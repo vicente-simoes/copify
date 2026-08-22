@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc,
-  type ApiResult, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type SessionSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput
+  profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, targetIpc,
+  type ApiResult, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type SessionSnapshot, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 const api = {
@@ -10,6 +10,14 @@ const api = {
     create: (input: CreateBrowserProfileInput): Promise<ApiResult<BrowserProfile>> => ipcRenderer.invoke(profileIpc.create, input),
     update: (id: string, input: UpdateBrowserProfileInput): Promise<ApiResult<BrowserProfile>> => ipcRenderer.invoke(profileIpc.update, id, input),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(profileIpc.remove, id)
+  },
+  targets: {
+    list: (): Promise<ApiResult<Target[]>> => ipcRenderer.invoke(targetIpc.list),
+    create: (input: CreateTargetInput): Promise<ApiResult<Target>> => ipcRenderer.invoke(targetIpc.create, input),
+    update: (id: string, input: UpdateTargetInput): Promise<ApiResult<Target>> => ipcRenderer.invoke(targetIpc.update, id, input),
+    remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(targetIpc.remove, id),
+    test: (id: string): Promise<ApiResult<Target>> => ipcRenderer.invoke(targetIpc.test, id),
+    onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(targetIpc.changed, callback); return () => ipcRenderer.removeListener(targetIpc.changed, callback); }
   },
   proxies: {
     list: (): Promise<ApiResult<ProxyProfile[]>> => ipcRenderer.invoke(proxyIpc.list),

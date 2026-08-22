@@ -1,6 +1,6 @@
 {
   "name": "copify",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "packageManager": "pnpm@10.0.0",
   "pnpm": {
@@ -18,6 +18,22 @@
     "typecheck": "pnpm --filter @copify/desktop typecheck",
     "test": "vitest run",
     "test:watch": "vitest"
+  },
+  "build": {
+    "appId": "com.copify.app",
+    "productName": "Copify",
+    "directories": {
+      "buildResources": "apps/desktop/resources"
+    },
+    "win": {
+      "icon": "icons/copify.ico"
+    },
+    "extraResources": [
+      {
+        "from": "apps/desktop/resources/icons/copify.ico",
+        "to": "copify.ico"
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

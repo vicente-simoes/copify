@@ -1,10 +1,11 @@
 import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, defaultRoute, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, updateBrowserProfileSchema, updateProxyProfileSchema,
-  type ApiResult, type BrowserProfile, type CreateProxyProfileInput, type CreateRunInput, type DiagnosticLevel, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type SessionError, type SessionRoute, type SessionSnapshot, type UpdateProxyProfileInput
+  SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createTargetSchema, defaultRoute, monitorEventSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateTargetSchema,
+  type ApiResult, type BrowserProfile, type CreateProxyProfileInput, type CreateRunInput, type CreateTargetInput, type MonitorEvent, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type SessionError, type SessionRoute, type SessionSnapshot, type Target, type TargetCheck, type TargetSnapshot, type UpdateProxyProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -15,18 +16,20 @@ let profiles: ProfileRepository;
 let orchestrator: SessionOrchestrator;
 let benchmarkRunning = false;
 let runsRoot = "";
-type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void };
+type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess };
 let activeRun: ActiveRun | undefined;
 
 function result<T>(action: () => T): ApiResult<T> { try { return { ok: true, value: action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 async function resultAsync<T>(action: () => Promise<T>): Promise<ApiResult<T>> { try { return { ok: true, value: await action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : "Unexpected application error."; }
 function emitRunsChanged(): void { void profiles.listRuns().then((runs) => mainWindow?.webContents.send(runIpc.changed, { runs, activeRunId: activeRun?.detail.run.id ?? null })); }
+function emitTargetsChanged(): void { void profiles.listTargets().then((targets) => mainWindow?.webContents.send(targetIpc.changed, targets)); }
 
 async function createWindow(): Promise<void> {
-  mainWindow = new BrowserWindow({ width: 1240, height: 860, minWidth: 960, minHeight: 650, webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  mainWindow = new BrowserWindow({ width: 1240, height: 860, minWidth: 960, minHeight: 650, icon: windowIconPath(), webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
   if (process.env.ELECTRON_RENDERER_URL) await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL); else await mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
+function windowIconPath(): string { return app.isPackaged ? join(process.resourcesPath, "copify.ico") : resolve(__dirname, "../../resources/icons/copify.ico"); }
 
 function registerIpc(): void {
   ipcMain.handle(profileIpc.list, (): Promise<ApiResult<BrowserProfile[]>> => resultAsync(() => profiles.list()));
@@ -35,6 +38,12 @@ function registerIpc(): void {
     const update = updateBrowserProfileSchema.parse(input); if (orchestrator.isActive(id) && update.proxyProfileId !== undefined) throw new Error("Close this browser session before changing its route."); if (activeRun?.profileSessions.has(id)) throw new Error("End the active run before changing a selected browser profile."); return profiles.update(id, update);
   }));
   ipcMain.handle(profileIpc.remove, async (_event, id: string): Promise<ApiResult<boolean>> => { if (activeRun?.profileSessions.has(id)) return { ok: false, error: "End the active run before removing a selected browser profile." }; await orchestrator.close(id); return resultAsync(() => profiles.remove(id)); });
+
+  ipcMain.handle(targetIpc.list, (): Promise<ApiResult<Target[]>> => resultAsync(() => profiles.listTargets()));
+  ipcMain.handle(targetIpc.create, (_event, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { const created = await profiles.createTarget(createTargetSchema.parse(input)); emitTargetsChanged(); return created; }));
+  ipcMain.handle(targetIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { assertTargetInactive(id); const updated = await profiles.updateTarget(id, updateTargetSchema.parse(input)); emitTargetsChanged(); return updated; }));
+  ipcMain.handle(targetIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertTargetInactive(id); const removed = await profiles.removeTarget(id); emitTargetsChanged(); return removed; }));
+  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
 
   ipcMain.handle(proxyIpc.list, (): Promise<ApiResult<ProxyProfile[]>> => resultAsync(() => profiles.listProxies()));
   ipcMain.handle(proxyIpc.create, (_event, input: unknown): Promise<ApiResult<ProxyProfile>> => resultAsync(async () => { const parsed = createProxyProfileSchema.parse(input); return profiles.createProxy(parsed, await encryptCreateCredentials(parsed)); }));
@@ -66,20 +75,26 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   if (selected.length !== input.profileIds.length) throw new Error("One or more selected browser profiles no longer exist.");
   if (selected.some((profile) => !profile.enabled)) throw new Error("Only enabled browser profiles may be selected.");
   if (selected.some((profile) => orchestrator.isActive(profile.id))) throw new Error("Selected profiles must be closed before starting a run.");
+  const target = input.targetId ? await requireTarget(input.targetId) : null;
+  if (target && !target.enabled) throw new Error("Select an enabled target for monitoring.");
+  const targetSnapshot = target ? snapshotTarget(target) : null;
   const specifications = await Promise.all(selected.map(async (profile) => ({ profile, proxy: profile.proxyProfileId ? await resolveProxy(profile.proxyProfileId) : null })));
   const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), status: "STARTING", startedAt, endedAt: null, finalError: null }));
-  const environment = runEnvironment(); const detail = await profiles.createRun(input, environment, sessions);
+  const environment = runEnvironment(); const detail = await profiles.createRun(input, environment, sessions, targetSnapshot);
   const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); activeRun = { detail, profileSessions, ending: false, pendingEnd: new Set() };
   const root = runDirectory(detail.run.id); await mkdir(root, { recursive: true }); await writeFile(join(root, "run.json"), JSON.stringify(detail.run, null, 2));
   await Promise.all(specifications.map(async ({ profile, proxy }) => {
     const session = profileSessions.get(profile.id)!; const artifactDir = join(root, session.id); await mkdir(artifactDir, { recursive: true }); await writeFile(join(artifactDir, "manifest.json"), JSON.stringify({ runId: detail.run.id, runSessionId: session.id, profileId: profile.id, diagnosticLevel: input.diagnosticLevel }, null, 2));
     try { await orchestrator.open({ profile, proxy, probeUrl: await profiles.getNetworkProbeUrl(), recording: { runId: detail.run.id, runSessionId: session.id, diagnosticLevel: input.diagnosticLevel, artifactDir, startedAt } }); } catch (error) { await recordSessionFailure(profile.id, session, sessionFailure(error)); }
   }));
+  if (targetSnapshot) activeRun.monitor = startMonitor(detail.run.id, targetSnapshot);
   emitRunsChanged(); return (await profiles.getRun(detail.run.id))!;
 }
 
 async function endRun(): Promise<RunDetail> {
   const active = activeRun; if (!active) throw new Error("No run is currently recording."); active.ending = true;
+  if (active.monitor) await appendMonitorEvent(active.detail.run.id, "TARGET_MONITOR_STOPPED", null, "The shared target monitor was stopped when the run ended.");
+  stopMonitor(active);
   const activeProfiles = [...active.profileSessions.entries()].filter(([profileId]) => orchestrator.isActive(profileId)); active.pendingEnd = new Set(activeProfiles.map(([, session]) => session.id));
   const wait = new Promise<void>((resolve) => { active.resolveEnd = resolve; });
   for (const [profileId, session] of activeProfiles) orchestrator.endRun(profileId, session.id);
@@ -96,6 +111,9 @@ async function removeRun(id: string): Promise<boolean> {
 async function openSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.open(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
 async function restartSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.restart(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
 async function requireProfile(id: string): Promise<BrowserProfile> { const profile = await profiles.get(id); if (!profile) throw new Error("Browser profile not found."); return profile; }
+async function requireTarget(id: string): Promise<Target> { const target = await profiles.getTarget(id); if (!target) throw new Error("Target not found."); return target; }
+function assertTargetInactive(id: string): void { if (activeRun?.detail.run.targetSnapshot?.targetId === id) throw new Error("End the active run before changing its target."); }
+function snapshotTarget(target: Target): TargetSnapshot { const { id, latestCheck: _latestCheck, createdAt: _createdAt, updatedAt: _updatedAt, ...value } = target; return { ...value, targetId: id, capturedAt: Date.now() }; }
 async function launchSpec(profile: BrowserProfile): Promise<SessionLaunchSpec> { return { profile, proxy: profile.proxyProfileId ? await resolveProxy(profile.proxyProfileId) : null, probeUrl: await profiles.getNetworkProbeUrl(), recording: null }; }
 function initialRoute(proxy: RunnerProxy | null): SessionRoute { return proxy ? { kind: "proxy", proxyProfileId: proxy.proxyProfileId, proxyName: proxy.proxyName, protocol: proxy.protocol, verification: defaultRoute().verification } : defaultRoute(); }
 async function resolveProxy(id: string, allowDisabled = false): Promise<RunnerProxy> { const stored = await profiles.getStoredProxy(id); if (!stored) throw new Error("The assigned proxy profile no longer exists."); if (!allowDisabled && !stored.enabled) throw new Error("The assigned proxy profile is disabled."); const username = stored.usernameCiphertext ? await decryptSecret(stored.usernameCiphertext) : undefined; const password = stored.passwordCiphertext ? await decryptSecret(stored.passwordCiphertext) : undefined; return { proxyProfileId: stored.id, proxyName: stored.name, protocol: stored.protocol, host: stored.host, port: stored.port, ...(username ? { username } : {}), ...(password ? { password } : {}), expectedCountry: stored.expectedCountry, expectedCity: stored.expectedCity }; }
@@ -108,6 +126,30 @@ function sessionFailure(error: unknown): SessionError { const text = message(err
 function runEnvironment(): RunEnvironment { return { appVersion: app.getVersion(), schemaVersion: SCHEMA_VERSION, osVersion: `${process.platform} ${process.getSystemVersion?.() ?? process.version}`, chromeVersion: process.versions.chrome ?? null, playwrightVersion: "1.56.1", capturedAt: Date.now() }; }
 function runDirectory(id: string): string { const root = resolve(runsRoot); const candidate = resolve(root, id); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid run artifact path."); return candidate; }
 function elapsedSince(active: ActiveRun): string { return (BigInt(Date.now() - active.detail.run.startedAt) * 1_000_000n).toString(); }
+
+function startMonitor(runId: string, target: TargetSnapshot): ChildProcess {
+  const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  worker.on("message", (value) => { void onMonitorEvent(value); }); worker.once("exit", () => { if (activeRun?.detail.run.id === runId && !activeRun.ending) void appendMonitorEvent(runId, "TARGET_MONITOR_FAILED", null, "The shared monitor exited unexpectedly."); });
+  worker.send({ type: "START_MONITOR", version: 4, runId, target }); return worker;
+}
+function stopMonitor(active: ActiveRun): void { if (!active.monitor) return; active.monitor.send({ type: "STOP_MONITOR", version: 4 }); setTimeout(() => active.monitor?.kill(), 3_000).unref(); active.monitor = undefined; }
+async function testTarget(target: Target): Promise<TargetCheck> {
+  const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "ignore", "ignore", "ipc"] }); const snapshot = snapshotTarget(target);
+  return new Promise<TargetCheck>((resolve, reject) => {
+    const timeout = setTimeout(() => { worker.kill(); reject(new Error("Target test timed out.")); }, 45_000);
+    worker.on("message", (value) => { const event = monitorEventSchema.safeParse(value); if (event.success && event.data.type === "MONITOR_TEST_RESULT") { clearTimeout(timeout); worker.kill(); resolve(event.data.check); } });
+    worker.once("exit", (code) => { if (code && code !== 0) { clearTimeout(timeout); reject(new Error("Target test monitor exited unexpectedly.")); } });
+    worker.send({ type: "TEST_TARGET", version: 4, target: snapshot });
+  });
+}
+async function onMonitorEvent(value: unknown): Promise<void> {
+  const parsed = monitorEventSchema.safeParse(value); if (!parsed.success) return; const event: MonitorEvent = parsed.data; if (event.type !== "MONITOR_EVENT") return; const active = activeRun; if (!active || event.runId !== active.detail.run.id) return;
+  await appendMonitorEvent(active.detail.run.id, event.eventType, event.check, null); emitRunsChanged();
+}
+async function appendMonitorEvent(runId: string, type: string, check: TargetCheck | null, fallback: string | null): Promise<void> {
+  const active = activeRun; if (!active || active.detail.run.id !== runId) return; const decision = check?.decision;
+  await profiles.addRunEvent({ id: randomUUID(), runId, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type, stateBefore: null, stateAfter: null, payload: check ? { checkedAt: check.checkedAt, status: check.status, candidateCount: check.candidateCount, decision: decision?.kind, message: decision?.message, candidate: decision?.candidate ? { name: decision.candidate.name, url: decision.candidate.url, priceMinor: decision.candidate.priceMinor, currency: decision.candidate.currency, variants: decision.candidate.variants } : null, selectedVariant: decision?.selectedVariant ?? null, errorMessage: check.errorMessage } : { message: fallback } });
+}
 
 async function onSessionChanged(snapshot: SessionSnapshot): Promise<void> {
   mainWindow?.webContents.send(sessionIpc.changed, snapshot); const active = activeRun; const runSession = active?.profileSessions.get(snapshot.profileId); if (!active || !runSession) return;
@@ -125,8 +167,8 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
 }
 
 app.whenReady().then(async () => {
-  const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
+  const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
   orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
-app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });
+app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });

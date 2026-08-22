@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, networkProbeSettingsSchema, runnerCommandSchema, updateProxyProfileSchema } from "./index";
+import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createTargetSchema, networkProbeSettingsSchema, runnerCommandSchema, updateProxyProfileSchema } from "./index";
 
 describe("shared contracts", () => {
   it("validates profile input", () => {
@@ -18,5 +18,11 @@ describe("shared contracts", () => {
     const profileId = "00000000-0000-4000-8000-000000000001";
     expect(createRunSchema.safeParse({ name: "Safe run", diagnosticLevel: "DEEP_DEBUG", profileIds: [profileId] }).success).toBe(false);
     expect(createRunSchema.parse({ name: "Safe run", diagnosticLevel: "DEEP_DEBUG", profileIds: [profileId], deepDebugAcknowledged: true })).toMatchObject({ diagnosticLevel: "DEEP_DEBUG" });
+  });
+  it("validates a Supreme EU target and optional run target selection", () => {
+    expect(createTargetSchema.safeParse({ name: "Bad", productKeywords: [], maxRetailMinor: 1 }).success).toBe(false);
+    expect(createTargetSchema.parse({ name: "Jacket", productKeywords: ["Leather Jacket"], maxRetailMinor: 20_000 })).toMatchObject({ storeId: "supreme-eu", currency: "EUR", quantity: 1 });
+    const profileId = "00000000-0000-4000-8000-000000000001";
+    expect(createRunSchema.parse({ name: "Observe", diagnosticLevel: "NORMAL", profileIds: [profileId] }).targetId).toBeNull();
   });
 });

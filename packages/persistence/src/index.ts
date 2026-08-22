@@ -3,11 +3,11 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, updateBrowserProfileSchema, updateProxyProfileSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateTargetSchema,
   type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
-  type CreateRunInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession,
-  type UpdateBrowserProfileInput, type UpdateProxyProfileInput
+  type CreateRunInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type Target, type TargetCheck, type TargetSnapshot,
+  type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 export * from "./schema";
@@ -79,7 +79,16 @@ export class ProfileRepository {
       CREATE INDEX IF NOT EXISTS run_artifacts_run_idx ON run_artifacts(run_id, run_session_id);
       `);
     }
-    this.sql.exec("PRAGMA user_version = 3;");
+    if (version < 4) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS targets (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, store_id TEXT NOT NULL, product_keywords_json TEXT NOT NULL, negative_keywords_json TEXT NOT NULL,
+        preferred_colors_json TEXT NOT NULL, size_priority_json TEXT NOT NULL, currency TEXT NOT NULL, max_retail_minor INTEGER NOT NULL, quantity INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, latest_check_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      ALTER TABLE runs ADD COLUMN target_snapshot_json TEXT;
+      CREATE INDEX IF NOT EXISTS targets_enabled_idx ON targets(enabled, created_at ASC);`);
+    }
+    this.sql.exec("PRAGMA user_version = 4;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -201,12 +210,29 @@ export class ProfileRepository {
     return value;
   }
 
-  async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: RunSession[]): Promise<RunDetail> {
+  async listTargets(): Promise<Target[]> { return this.all("SELECT * FROM targets ORDER BY created_at ASC").map((row) => targetSchema.parse(mapTarget(row))); }
+  async getTarget(id: string): Promise<Target | undefined> { const row = this.getRow("SELECT * FROM targets WHERE id = ?", [id]); return row ? targetSchema.parse(mapTarget(row)) : undefined; }
+  async createTarget(input: CreateTargetInput): Promise<Target> {
+    const parsed = createTargetSchema.parse(input); const id = randomUUID(); const now = Date.now();
+    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
+    return (await this.getTarget(id))!;
+  }
+  async updateTarget(id: string, input: UpdateTargetInput): Promise<Target> {
+    const parsed = updateTargetSchema.parse(input); const existing = await this.getTarget(id); if (!existing) throw new Error("Target not found."); const updated = targetSchema.parse({ ...existing, ...parsed, updatedAt: Date.now() });
+    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,enabled=?,updated_at=? WHERE id=?")
+      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
+    return (await this.getTarget(id))!;
+  }
+  async setTargetCheck(targetId: string, check: TargetCheck): Promise<Target> { const value = targetCheckSchema.parse(check); this.sql.prepare("UPDATE targets SET latest_check_json=?, updated_at=? WHERE id=?").run(JSON.stringify(value), Date.now(), targetId); const target = await this.getTarget(targetId); if (!target) throw new Error("Target not found."); return target; }
+  async removeTarget(id: string): Promise<boolean> { return this.sql.prepare("DELETE FROM targets WHERE id = ?").run(id).changes > 0; }
+
+  async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: RunSession[], targetSnapshot: TargetSnapshot | null = null): Promise<RunDetail> {
     const parsed = createRunSchema.parse(input); const now = Date.now(); const id = randomUUID();
-    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, status: "STARTING", startedAt: now, endedAt: null, environment, createdAt: now, updatedAt: now });
+    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, createdAt: now, updatedAt: now });
     this.transaction(() => {
-      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,status,started_at,ended_at,environment_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
-        .run(run.id, run.name, run.diagnosticLevel, run.status, run.startedAt, null, JSON.stringify(run.environment), now, now);
+      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,status,started_at,ended_at,environment_json,target_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .run(run.id, run.name, run.diagnosticLevel, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, now, now);
       for (const session of sessions) {
         const value = runSessionSchema.parse({ ...session, runId: id });
         this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?)")
@@ -263,6 +289,20 @@ export class ProfileRepository {
     return true;
   }
 
+  async recoverInterruptedRuns(): Promise<number> {
+    const interrupted = this.all("SELECT id, started_at FROM runs WHERE status IN ('STARTING', 'RECORDING')"); if (!interrupted.length) return 0;
+    const now = Date.now(); const error = { code: "RUN_INTERRUPTED", message: "Copify closed before this run was ended." };
+    this.transaction(() => {
+      for (const run of interrupted) {
+        this.sql.prepare("UPDATE runs SET status='FAILED', ended_at=?, updated_at=? WHERE id=?").run(now, now, run.id);
+        this.sql.prepare("UPDATE run_sessions SET status='FAILED', ended_at=?, final_error_json=? WHERE run_id=? AND status IN ('STARTING', 'RECORDING')").run(now, JSON.stringify(error), run.id);
+        this.sql.prepare("INSERT INTO run_events (id,run_id,run_session_id,wall_time_ms,elapsed_ns,type,state_before,state_after,payload_json) VALUES (?,?,?,?,?,?,?,?,?)")
+          .run(randomUUID(), run.id, null, now, (BigInt(Math.max(0, now - Number(run.started_at))) * 1_000_000n).toString(), "RUN_INTERRUPTED", "RECORDING", "FAILED", JSON.stringify({ message: error.message }));
+      }
+    });
+    return interrupted.length;
+  }
+
   close(): void { this.sql.close(); }
 
   private getProxyRow(id: string): Row | undefined { return this.getRow("SELECT * FROM proxy_profiles WHERE id = ?", [id]); }
@@ -293,7 +333,10 @@ function mapBenchmark(row: Row): Record<string, unknown> {
   return { id: row.id, routeKind: row.route_kind, proxyProfileId: row.proxy_profile_id ?? null, probeUrl: row.probe_url, startedAt: Number(row.started_at), completedAt: Number(row.completed_at), attempts: Number(row.attempts), successes: Number(row.successes), publicIp: row.public_ip ?? null, country: row.country ?? null, city: row.city ?? null, connectLatencyMs: nullableNumber(row.connect_latency_ms), medianLatencyMs: nullableNumber(row.median_latency_ms), jitterMs: nullableNumber(row.jitter_ms), failureRate: Number(row.failure_rate), ipStable: Boolean(row.ip_stable), qualityScore: Number(row.quality_score), status: row.status, errorCode: row.error_code ?? null, errorMessage: row.error_message ?? null, samples: JSON.parse(String(row.samples_json)) };
 }
 function mapRun(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+}
+function mapTarget(row: Row): Record<string, unknown> {
+  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSession(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };

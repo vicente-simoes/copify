@@ -63,6 +63,13 @@ describe("ProfileRepository", () => {
     expect(await repo.listProxies()).toEqual([]);
   });
 
+  it("migrates a v3 run database to targets and immutable target snapshots", async () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-v3-")); roots.push(root); const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(join(root, "copify.sqlite"));
+    database.exec("CREATE TABLE runs (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, diagnostic_level TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, environment_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version = 3;"); database.close();
+    const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo);
+    await expect(repo.createTarget({ name: "Migrated target", productKeywords: ["Jacket"], maxRetailMinor: 1_000 })).resolves.toMatchObject({ storeId: "supreme-eu" });
+  });
+
   it("persists ordered run timelines and removes all run records transactionally", async () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const startedAt = Date.now();
     const sessionId = randomUUID(); const detail = await repo.createRun({ name: "Direct test", diagnosticLevel: "NORMAL", profileIds: [profile.id] }, { appVersion: "0.3.0", schemaVersion: 3, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: sessionId, runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "STARTING", startedAt, endedAt: null, finalError: null }]);
@@ -71,5 +78,22 @@ describe("ProfileRepository", () => {
     expect((await repo.getRun(detail.run.id))?.events.map((event) => event.type)).toEqual(["FIRST", "SECOND"]);
     expect(await repo.removeRun(detail.run.id)).toBe(true);
     expect(await repo.getRun(detail.run.id)).toBeUndefined();
+  });
+
+  it("recovers interrupted active runs after an app restart", async () => {
+    const repo = repository(); const profile = await repo.create({ name: "Home" }); const startedAt = Date.now(); const sessionId = randomUUID();
+    const detail = await repo.createRun({ name: "Interrupted", diagnosticLevel: "NORMAL", profileIds: [profile.id] }, { appVersion: "0.4.0", schemaVersion: 4, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: sessionId, runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "RECORDING", startedAt, endedAt: null, finalError: null }]);
+    await repo.setRunStatus(detail.run.id, "RECORDING"); expect(await repo.recoverInterruptedRuns()).toBe(1);
+    const recovered = await repo.getRun(detail.run.id); expect(recovered?.run.status).toBe("FAILED"); expect(recovered?.sessions[0]).toMatchObject({ status: "FAILED", finalError: { code: "RUN_INTERRUPTED" } }); expect(recovered?.events.at(-1)?.type).toBe("RUN_INTERRUPTED");
+  });
+
+  it("persists a target's latest sanitized check and immutable run snapshot", async () => {
+    const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Jacket", productKeywords: ["Leather Jacket"], currency: "GBP", maxRetailMinor: 20_000 });
+    const check = { id: randomUUID(), targetId: target.id, checkedAt: Date.now(), status: "SUCCESS" as const, decision: { kind: "NO_MATCH" as const, message: "No configured product phrase was found.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: null };
+    await repo.setTargetCheck(target.id, check); expect((await repo.getTarget(target.id))?.latestCheck).toEqual(check);
+    const startedAt = Date.now(); const snapshot = { targetId: target.id, name: target.name, storeId: target.storeId, productKeywords: target.productKeywords, negativeKeywords: target.negativeKeywords, preferredColors: target.preferredColors, sizePriority: target.sizePriority, currency: target.currency, maxRetailMinor: target.maxRetailMinor, quantity: target.quantity, enabled: target.enabled, capturedAt: startedAt } as const;
+    const detail = await repo.createRun({ name: "Target run", diagnosticLevel: "NORMAL", profileIds: [profile.id], targetId: target.id }, { appVersion: "0.4.0", schemaVersion: 4, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "STARTING", startedAt, endedAt: null, finalError: null }], snapshot);
+    await repo.updateTarget(target.id, { name: "Changed" }); await repo.removeTarget(target.id);
+    expect((await repo.getRun(detail.run.id))?.run.targetSnapshot?.name).toBe("Jacket");
   });
 });

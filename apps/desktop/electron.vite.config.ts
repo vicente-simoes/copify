@@ -18,7 +18,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: path.resolve(__dirname, "src/main.ts"),
-          runner: path.resolve(workspaceRoot, "packages/runner/src/runner.ts")
+          runner: path.resolve(workspaceRoot, "packages/runner/src/runner.ts"),
+          monitor: path.resolve(workspaceRoot, "packages/runner/src/monitor.ts")
         },
         output: { entryFileNames: "[name].js" }
       }
