@@ -1,0 +1,37 @@
+import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import react from "@vitejs/plugin-react";
+import path from "node:path";
+
+const workspaceRoot = path.resolve(__dirname, "../..");
+const aliases = {
+  "@copify/shared": path.resolve(workspaceRoot, "packages/shared/src/index.ts"),
+  "@copify/persistence": path.resolve(workspaceRoot, "packages/persistence/src/index.ts"),
+  "@copify/core": path.resolve(workspaceRoot, "packages/core/src/index.ts")
+};
+
+export default defineConfig({
+  main: {
+    resolve: { alias: aliases },
+    plugins: [externalizeDepsPlugin({ exclude: ["@copify/core", "@copify/persistence", "@copify/shared"] })],
+    build: {
+      rollupOptions: {
+        input: {
+          index: path.resolve(__dirname, "src/main.ts"),
+          runner: path.resolve(workspaceRoot, "packages/runner/src/runner.ts")
+        },
+        output: { entryFileNames: "[name].js" }
+      }
+    }
+  },
+  preload: {
+    resolve: { alias: aliases },
+    plugins: [externalizeDepsPlugin({ exclude: ["@copify/shared"] })],
+    build: { rollupOptions: { input: path.resolve(__dirname, "src/preload.ts") } }
+  },
+  renderer: {
+    root: __dirname,
+    resolve: { alias: aliases },
+    plugins: [react()],
+    build: { rollupOptions: { input: path.resolve(__dirname, "index.html") } }
+  }
+});

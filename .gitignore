@@ -1,0 +1,14 @@
+node_modules/
+dist/
+out/
+.vite/
+browser-profiles/
+runs/
+data/
+*.sqlite
+*.sqlite3
+*.db
+playwright/.auth/
+.env
+*.log
+coverage/
