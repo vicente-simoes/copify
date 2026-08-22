@@ -12,7 +12,8 @@
     "paths": {
       "@copify/shared": ["packages/shared/src/index.ts"],
       "@copify/persistence": ["packages/persistence/src/index.ts"],
-      "@copify/core": ["packages/core/src/index.ts"]
+      "@copify/core": ["packages/core/src/index.ts"],
+      "@copify/runner": ["packages/runner/src/network.ts"]
     }
   }
 }

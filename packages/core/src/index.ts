@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
 import { fork, type ChildProcess } from "node:child_process";
-import type { BrowserProfile, RunnerCommand, RunnerEvent, SessionError, SessionSnapshot } from "@copify/shared";
-import { IPC_VERSION, runnerEventSchema } from "@copify/shared";
+import {
+  DEFAULT_NETWORK_PROBE_URL, IPC_VERSION, defaultRoute, runnerEventSchema,
+  type BrowserProfile, type RunnerCommand, type RunnerEvent, type RunnerProxy, type SessionError, type SessionRoute, type SessionSnapshot
+} from "@copify/shared";
 
 export type RunnerChild = Pick<ChildProcess, "send" | "kill" | "on" | "once" | "removeAllListeners">;
-export type RunnerFactory = (profile: BrowserProfile) => RunnerChild;
-
+export type SessionLaunchSpec = { profile: BrowserProfile; proxy: RunnerProxy | null; probeUrl: string };
+export type RunnerFactory = (spec: SessionLaunchSpec) => RunnerChild;
 type ActiveRunner = { child: RunnerChild; expectedStop: boolean };
 
 export class SessionOrchestrator extends EventEmitter {
@@ -14,114 +16,57 @@ export class SessionOrchestrator extends EventEmitter {
   private readonly queues = new Map<string, Promise<void>>();
 
   constructor(private readonly createRunner: RunnerFactory) { super(); }
+  list(): SessionSnapshot[] { return [...this.sessions.values()].sort((a, b) => a.profileId.localeCompare(b.profileId)); }
+  snapshot(profileId: string): SessionSnapshot { return this.sessions.get(profileId) ?? { profileId, state: "STOPPED", error: null, route: defaultRoute(), updatedAt: Date.now() }; }
 
-  list(): SessionSnapshot[] {
-    return [...this.sessions.values()].sort((a, b) => a.profileId.localeCompare(b.profileId));
-  }
-
-  snapshot(profileId: string): SessionSnapshot {
-    return this.sessions.get(profileId) ?? { profileId, state: "STOPPED", error: null, updatedAt: Date.now() };
-  }
-
-  async open(profile: BrowserProfile): Promise<void> {
-    await this.enqueue(profile.id, async () => {
-      const current = this.snapshot(profile.id);
+  async open(input: BrowserProfile | SessionLaunchSpec): Promise<void> {
+    const spec = toLaunchSpec(input);
+    await this.enqueue(spec.profile.id, async () => {
+      const current = this.snapshot(spec.profile.id);
       if (current.state === "READY" || current.state === "STARTING") return;
-      if (!profile.enabled) {
-        this.setState(profile.id, "ERROR", { code: "INVALID_COMMAND", message: "Disabled profiles cannot be opened." });
-        return;
-      }
-      this.setState(profile.id, "STARTING");
-      const child = this.createRunner(profile);
-      const active: ActiveRunner = { child, expectedStop: false };
-      this.runners.set(profile.id, active);
-      child.on("message", (message) => this.onRunnerMessage(profile.id, message));
-      child.once("exit", () => this.onRunnerExit(profile.id, active));
-      this.send(child, { type: "START", version: IPC_VERSION, profileId: profile.id, userDataDir: profile.userDataDir });
+      if (!spec.profile.enabled) { this.setState(spec.profile.id, "ERROR", { code: "INVALID_COMMAND", message: "Disabled profiles cannot be opened." }); return; }
+      const route = routeFor(spec.proxy);
+      this.setState(spec.profile.id, "STARTING", null, route);
+      const child = this.createRunner(spec); const active: ActiveRunner = { child, expectedStop: false }; this.runners.set(spec.profile.id, active);
+      child.on("message", (message) => this.onRunnerMessage(spec.profile.id, message)); child.once("exit", () => this.onRunnerExit(spec.profile.id, active));
+      this.send(child, { type: "START", version: IPC_VERSION, profileId: spec.profile.id, userDataDir: spec.profile.userDataDir, proxy: spec.proxy, probeUrl: spec.probeUrl });
     });
   }
 
   async close(profileId: string): Promise<void> {
     await this.enqueue(profileId, async () => {
-      const active = this.runners.get(profileId);
-      if (!active) {
-        this.setState(profileId, "STOPPED");
-        return;
-      }
-      active.expectedStop = true;
-      this.setState(profileId, "STOPPING");
-      this.send(active.child, { type: "STOP", version: IPC_VERSION });
-      // The runner normally exits after closing Chrome. Avoid leaking an orphaned child.
-      setTimeout(() => {
-        if (this.runners.get(profileId) === active) active.child.kill();
-      }, 8_000).unref();
+      const active = this.runners.get(profileId); if (!active) { this.setState(profileId, "STOPPED"); return; }
+      active.expectedStop = true; this.setState(profileId, "STOPPING"); this.send(active.child, { type: "STOP", version: IPC_VERSION });
+      setTimeout(() => { if (this.runners.get(profileId) === active) active.child.kill(); }, 8_000).unref();
     });
   }
 
-  async restart(profile: BrowserProfile): Promise<void> {
-    await this.close(profile.id);
-    await this.waitForStopped(profile.id);
-    await this.open(profile);
-  }
-
-  async shutdown(): Promise<void> {
-    await Promise.all([...this.runners.keys()].map((profileId) => this.close(profileId)));
-  }
+  async restart(input: BrowserProfile | SessionLaunchSpec): Promise<void> { const spec = toLaunchSpec(input); await this.close(spec.profile.id); await this.waitForStopped(spec.profile.id); await this.open(spec); }
+  async shutdown(): Promise<void> { await Promise.all([...this.runners.keys()].map((profileId) => this.close(profileId))); }
+  isActive(profileId: string): boolean { return this.runners.has(profileId); }
+  fail(profileId: string, error: SessionError): void { this.setState(profileId, "ERROR", error); }
 
   private onRunnerMessage(profileId: string, message: unknown): void {
-    const parsed = runnerEventSchema.safeParse(message);
-    if (!parsed.success || parsed.data.profileId !== null && parsed.data.profileId !== profileId) return;
+    const parsed = runnerEventSchema.safeParse(message); if (!parsed.success || (parsed.data.profileId !== null && parsed.data.profileId !== profileId)) return;
     const event: RunnerEvent = parsed.data;
-    if (event.type === "READY") this.setState(profileId, "READY");
+    if (event.type === "READY") this.setState(profileId, "READY", null, event.route);
     if (event.type === "STOPPED") this.setState(profileId, "STOPPED");
     if (event.type === "ERROR") this.setState(profileId, "ERROR", { code: event.code, message: event.message });
   }
 
   private onRunnerExit(profileId: string, active: ActiveRunner): void {
-    if (this.runners.get(profileId) !== active) return;
-    this.runners.delete(profileId);
-    active.child.removeAllListeners();
-    const current = this.snapshot(profileId);
-    if (active.expectedStop || current.state === "STOPPED") this.setState(profileId, "STOPPED");
-    else this.setState(profileId, "CRASHED", { code: "RUNNER_CRASHED", message: "The isolated browser runner exited unexpectedly." });
+    if (this.runners.get(profileId) !== active) return; this.runners.delete(profileId); active.child.removeAllListeners(); const current = this.snapshot(profileId);
+    if (active.expectedStop || current.state === "STOPPED") this.setState(profileId, "STOPPED"); else this.setState(profileId, "CRASHED", { code: "RUNNER_CRASHED", message: "The isolated browser runner exited unexpectedly." });
   }
 
-  private setState(profileId: string, state: SessionSnapshot["state"], error: SessionError | null = null): void {
-    const snapshot: SessionSnapshot = { profileId, state, error, updatedAt: Date.now() };
-    this.sessions.set(profileId, snapshot);
-    this.emit("changed", snapshot);
+  private setState(profileId: string, state: SessionSnapshot["state"], error: SessionError | null = null, route?: SessionRoute): void {
+    const snapshot: SessionSnapshot = { profileId, state, error, route: route ?? this.snapshot(profileId).route, updatedAt: Date.now() }; this.sessions.set(profileId, snapshot); this.emit("changed", snapshot);
   }
-
-  private send(child: RunnerChild, command: RunnerCommand): void {
-    child.send(command, (error) => {
-      if (error) child.kill();
-    });
-  }
-
-  private async waitForStopped(profileId: string): Promise<void> {
-    if (!this.runners.has(profileId)) return;
-    await new Promise<void>((resolve) => {
-      const listener = (snapshot: SessionSnapshot) => {
-        if (snapshot.profileId === profileId && !this.runners.has(profileId)) {
-          this.off("changed", listener);
-          resolve();
-        }
-      };
-      this.on("changed", listener);
-    });
-  }
-
-  private enqueue(profileId: string, task: () => Promise<void>): Promise<void> {
-    const previous = this.queues.get(profileId) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(task);
-    const tracked = next.finally(() => {
-      if (this.queues.get(profileId) === tracked) this.queues.delete(profileId);
-    });
-    this.queues.set(profileId, tracked);
-    return tracked;
-  }
+  private send(child: RunnerChild, command: RunnerCommand): void { child.send(command, (error) => { if (error) child.kill(); }); }
+  private async waitForStopped(profileId: string): Promise<void> { if (!this.runners.has(profileId)) return; await new Promise<void>((resolve) => { const listener = (snapshot: SessionSnapshot) => { if (snapshot.profileId === profileId && !this.runners.has(profileId)) { this.off("changed", listener); resolve(); } }; this.on("changed", listener); }); }
+  private enqueue(profileId: string, task: () => Promise<void>): Promise<void> { const previous = this.queues.get(profileId) ?? Promise.resolve(); const next = previous.catch(() => undefined).then(task); const tracked = next.finally(() => { if (this.queues.get(profileId) === tracked) this.queues.delete(profileId); }); this.queues.set(profileId, tracked); return tracked; }
 }
 
-export function nodeRunnerFactory(runnerPath: string): RunnerFactory {
-  return () => fork(runnerPath, [], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
-}
+export function nodeRunnerFactory(runnerPath: string): RunnerFactory { return () => fork(runnerPath, [], { stdio: ["ignore", "ignore", "ignore", "ipc"] }); }
+function toLaunchSpec(input: BrowserProfile | SessionLaunchSpec): SessionLaunchSpec { return "profile" in input ? input : { profile: input, proxy: null, probeUrl: DEFAULT_NETWORK_PROBE_URL }; }
+function routeFor(proxy: RunnerProxy | null): SessionRoute { return proxy ? { kind: "proxy", proxyProfileId: proxy.proxyProfileId, proxyName: proxy.proxyName, protocol: proxy.protocol, verification: defaultRoute().verification } : defaultRoute(); }

@@ -24,12 +24,20 @@ describe("SessionOrchestrator", () => {
     const first = profile(); const second = profile();
     await Promise.all([orchestrator.open(first), orchestrator.open(second)]);
     expect(runners).toHaveLength(2);
-    runners[0].emit("message", { type: "READY", version: IPC_VERSION, profileId: first.id });
-    runners[1].emit("message", { type: "READY", version: IPC_VERSION, profileId: second.id });
+    runners[0].emit("message", { type: "READY", version: IPC_VERSION, profileId: first.id, route: { kind: "direct", verification: { status: "VERIFIED", publicIp: "203.0.113.1", country: "PT", city: "Lisbon", verifiedAt: 1, message: null } } });
+    runners[1].emit("message", { type: "READY", version: IPC_VERSION, profileId: second.id, route: { kind: "direct", verification: { status: "VERIFIED", publicIp: "203.0.113.2", country: "PT", city: "Lisbon", verifiedAt: 1, message: null } } });
     expect(orchestrator.snapshot(first.id).state).toBe("READY");
     runners[0].emit("exit", 1);
     expect(orchestrator.snapshot(first.id).state).toBe("CRASHED");
     expect(orchestrator.snapshot(second.id).state).toBe("READY");
+  });
+
+  it("sends an optional proxy only to its assigned runner", async () => {
+    const runners: FakeRunner[] = [];
+    const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
+    const assigned = profile();
+    await orchestrator.open({ profile: assigned, probeUrl: "https://ipwho.is/", proxy: { proxyProfileId: randomUUID(), proxyName: "PT ISP", protocol: "http", host: "proxy.example", port: 8080, expectedCountry: "PT", expectedCity: "Lisbon" } });
+    expect(runners[0].commands[0]).toMatchObject({ type: "START", proxy: { proxyName: "PT ISP", host: "proxy.example" } });
   });
 
   it("does not launch disabled or already starting profiles twice", async () => {

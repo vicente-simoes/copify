@@ -6,13 +6,14 @@ const workspaceRoot = path.resolve(__dirname, "../..");
 const aliases = {
   "@copify/shared": path.resolve(workspaceRoot, "packages/shared/src/index.ts"),
   "@copify/persistence": path.resolve(workspaceRoot, "packages/persistence/src/index.ts"),
-  "@copify/core": path.resolve(workspaceRoot, "packages/core/src/index.ts")
+  "@copify/core": path.resolve(workspaceRoot, "packages/core/src/index.ts"),
+  "@copify/runner": path.resolve(workspaceRoot, "packages/runner/src/network.ts")
 };
 
 export default defineConfig({
   main: {
     resolve: { alias: aliases },
-    plugins: [externalizeDepsPlugin({ exclude: ["@copify/core", "@copify/persistence", "@copify/shared"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["@copify/core", "@copify/persistence", "@copify/shared", "@copify/runner"] })],
     build: {
       rollupOptions: {
         input: {
