@@ -36,8 +36,14 @@ describe("SessionOrchestrator", () => {
     const runners: FakeRunner[] = [];
     const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
     const assigned = profile();
-    await orchestrator.open({ profile: assigned, probeUrl: "https://ipwho.is/", proxy: { proxyProfileId: randomUUID(), proxyName: "PT ISP", protocol: "http", host: "proxy.example", port: 8080, expectedCountry: "PT", expectedCity: "Lisbon" } });
+    await orchestrator.open({ profile: assigned, probeUrl: "https://ipwho.is/", recording: null, proxy: { proxyProfileId: randomUUID(), proxyName: "PT ISP", protocol: "http", host: "proxy.example", port: 8080, expectedCountry: "PT", expectedCity: "Lisbon" } });
     expect(runners[0].commands[0]).toMatchObject({ type: "START", proxy: { proxyName: "PT ISP", host: "proxy.example" } });
+  });
+
+  it("forwards an end-recording command only to the selected runner", async () => {
+    const runners: FakeRunner[] = []; const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
+    const selected = profile(); await orchestrator.open(selected); const runSessionId = randomUUID(); orchestrator.endRun(selected.id, runSessionId);
+    expect(runners[0].commands.at(-1)).toMatchObject({ type: "END_RUN", runSessionId });
   });
 
   it("does not launch disabled or already starting profiles twice", async () => {

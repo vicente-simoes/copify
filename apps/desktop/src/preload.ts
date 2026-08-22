@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  profileIpc, proxyIpc, settingsIpc, sessionIpc,
-  type ApiResult, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput
+  profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc,
+  type ApiResult, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type SessionSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput
 } from "@copify/shared";
 
 const api = {
@@ -26,6 +26,14 @@ const api = {
   sessions: {
     list: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.list), open: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.open, id), close: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.close, id), restart: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.restart, id), openAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.openAll), closeAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.closeAll),
     onChanged: (listener: (snapshot: SessionSnapshot) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, snapshot: SessionSnapshot) => listener(snapshot); ipcRenderer.on(sessionIpc.changed, callback); return () => ipcRenderer.removeListener(sessionIpc.changed, callback); }
+  },
+  runs: {
+    list: (): Promise<ApiResult<{ runs: Run[]; activeRunId: string | null }>> => ipcRenderer.invoke(runIpc.list),
+    get: (id: string): Promise<ApiResult<RunDetail | null>> => ipcRenderer.invoke(runIpc.get, id),
+    start: (input: CreateRunInput): Promise<ApiResult<RunDetail>> => ipcRenderer.invoke(runIpc.start, input),
+    end: (): Promise<ApiResult<RunDetail>> => ipcRenderer.invoke(runIpc.end),
+    remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.remove, id),
+    onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(runIpc.changed, callback); return () => ipcRenderer.removeListener(runIpc.changed, callback); }
   }
 };
 contextBridge.exposeInMainWorld("copify", api);

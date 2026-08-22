@@ -26,3 +26,23 @@ export const proxyBenchmarks = sqliteTable("proxy_benchmarks", {
 });
 
 export const appSettings = sqliteTable("app_settings", { key: text("key").primaryKey(), value: text("value").notNull(), updatedAt: integer("updated_at").notNull() });
+
+export const runs = sqliteTable("runs", {
+  id: text("id").primaryKey(), name: text("name").notNull(), diagnosticLevel: text("diagnostic_level").notNull(), status: text("status").notNull(),
+  startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), environmentJson: text("environment_json").notNull(), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+});
+
+export const runSessions = sqliteTable("run_sessions", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), browserProfileId: text("browser_profile_id").notNull(), browserProfileName: text("browser_profile_name").notNull(),
+  routeJson: text("route_json").notNull(), status: text("status").notNull(), startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), finalErrorJson: text("final_error_json")
+});
+
+export const runEvents = sqliteTable("run_events", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), runSessionId: text("run_session_id"), wallTimeMs: integer("wall_time_ms").notNull(), elapsedNs: text("elapsed_ns").notNull(),
+  type: text("type").notNull(), stateBefore: text("state_before"), stateAfter: text("state_after"), payloadJson: text("payload_json").notNull()
+});
+
+export const runArtifacts = sqliteTable("run_artifacts", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), runSessionId: text("run_session_id").notNull(), kind: text("kind").notNull(),
+  relativePath: text("relative_path").notNull(), sensitive: integer("sensitive", { mode: "boolean" }).notNull(), createdAt: integer("created_at").notNull()
+});

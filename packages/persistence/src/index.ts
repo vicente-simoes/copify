@@ -3,9 +3,10 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, updateBrowserProfileSchema, updateProxyProfileSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, updateBrowserProfileSchema, updateProxyProfileSchema,
   type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
+  type CreateRunInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput
 } from "@copify/shared";
 
@@ -55,7 +56,30 @@ export class ProfileRepository {
       CREATE INDEX IF NOT EXISTS proxy_benchmarks_route_completed_idx ON proxy_benchmarks(proxy_profile_id, completed_at DESC);
       CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL);`);
     }
-    this.sql.exec("PRAGMA user_version = 2;");
+    if (version < 3) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS runs (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, diagnostic_level TEXT NOT NULL, status TEXT NOT NULL,
+        started_at INTEGER NOT NULL, ended_at INTEGER, environment_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS run_sessions (
+        id TEXT PRIMARY KEY NOT NULL, run_id TEXT NOT NULL, browser_profile_id TEXT NOT NULL, browser_profile_name TEXT NOT NULL,
+        route_json TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, final_error_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS run_sessions_run_idx ON run_sessions(run_id, started_at ASC);
+      CREATE TABLE IF NOT EXISTS run_events (
+        id TEXT PRIMARY KEY NOT NULL, run_id TEXT NOT NULL, run_session_id TEXT, wall_time_ms INTEGER NOT NULL, elapsed_ns TEXT NOT NULL,
+        type TEXT NOT NULL, state_before TEXT, state_after TEXT, payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS run_events_run_elapsed_idx ON run_events(run_id, elapsed_ns ASC);
+      CREATE INDEX IF NOT EXISTS run_events_session_elapsed_idx ON run_events(run_session_id, elapsed_ns ASC);
+      CREATE TABLE IF NOT EXISTS run_artifacts (
+        id TEXT PRIMARY KEY NOT NULL, run_id TEXT NOT NULL, run_session_id TEXT NOT NULL, kind TEXT NOT NULL,
+        relative_path TEXT NOT NULL, sensitive INTEGER NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS run_artifacts_run_idx ON run_artifacts(run_id, run_session_id);
+      `);
+    }
+    this.sql.exec("PRAGMA user_version = 3;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -177,6 +201,68 @@ export class ProfileRepository {
     return value;
   }
 
+  async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: RunSession[]): Promise<RunDetail> {
+    const parsed = createRunSchema.parse(input); const now = Date.now(); const id = randomUUID();
+    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, status: "STARTING", startedAt: now, endedAt: null, environment, createdAt: now, updatedAt: now });
+    this.transaction(() => {
+      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,status,started_at,ended_at,environment_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(run.id, run.name, run.diagnosticLevel, run.status, run.startedAt, null, JSON.stringify(run.environment), now, now);
+      for (const session of sessions) {
+        const value = runSessionSchema.parse({ ...session, runId: id });
+        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?)")
+          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
+      }
+    });
+    return (await this.getRun(id))!;
+  }
+
+  async listRuns(limit = 100): Promise<Run[]> {
+    return this.all("SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", [limit]).map((row) => runSchema.parse(mapRun(row)));
+  }
+
+  async getRun(id: string): Promise<RunDetail | undefined> {
+    const row = this.getRow("SELECT * FROM runs WHERE id = ?", [id]); if (!row) return undefined;
+    const sessions = this.all("SELECT * FROM run_sessions WHERE run_id = ? ORDER BY started_at ASC", [id]).map((value) => runSessionSchema.parse(mapRunSession(value)));
+    const events = this.all("SELECT * FROM run_events WHERE run_id = ? ORDER BY CAST(elapsed_ns AS INTEGER) ASC, wall_time_ms ASC", [id]).map((value) => runEventSchema.parse(mapRunEvent(value)));
+    const artifacts = this.all("SELECT * FROM run_artifacts WHERE run_id = ? ORDER BY created_at ASC", [id]).map((value) => runArtifactSchema.parse(mapRunArtifact(value)));
+    return runDetailSchema.parse({ run: mapRun(row), sessions, events, artifacts });
+  }
+
+  async setRunStatus(id: string, status: Run["status"], ended = false): Promise<void> {
+    const now = Date.now(); this.sql.prepare("UPDATE runs SET status=?, ended_at=?, updated_at=? WHERE id=?").run(status, ended ? now : null, now, id);
+  }
+
+  async setRunSession(id: string, status: RunSession["status"], route?: RunSession["route"], finalError?: RunSession["finalError"]): Promise<void> {
+    const ended = status === "ENDED" || status === "FAILED" ? Date.now() : null;
+    this.sql.prepare("UPDATE run_sessions SET status=?, route_json=COALESCE(?,route_json), ended_at=COALESCE(?,ended_at), final_error_json=? WHERE id=?")
+      .run(status, route ? JSON.stringify(route) : null, ended, finalError ? JSON.stringify(finalError) : null, id);
+  }
+
+  async addRunEvent(event: RunEvent): Promise<RunEvent> {
+    const value = runEventSchema.parse(event);
+    this.sql.prepare("INSERT INTO run_events (id,run_id,run_session_id,wall_time_ms,elapsed_ns,type,state_before,state_after,payload_json) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(value.id, value.runId, value.runSessionId, value.wallTimeMs, value.elapsedNs, value.type, value.stateBefore, value.stateAfter, JSON.stringify(value.payload));
+    return value;
+  }
+
+  async addRunArtifact(artifact: RunArtifact): Promise<RunArtifact> {
+    const value = runArtifactSchema.parse(artifact);
+    this.sql.prepare("INSERT INTO run_artifacts (id,run_id,run_session_id,kind,relative_path,sensitive,created_at) VALUES (?,?,?,?,?,?,?)")
+      .run(value.id, value.runId, value.runSessionId, value.kind, value.relativePath, value.sensitive ? 1 : 0, value.createdAt);
+    return value;
+  }
+
+  async removeRun(id: string): Promise<boolean> {
+    const existing = this.getRow("SELECT id FROM runs WHERE id = ?", [id]); if (!existing) return false;
+    this.transaction(() => {
+      this.sql.prepare("DELETE FROM run_artifacts WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM run_events WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM run_sessions WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM runs WHERE id = ?").run(id);
+    });
+    return true;
+  }
+
   close(): void { this.sql.close(); }
 
   private getProxyRow(id: string): Row | undefined { return this.getRow("SELECT * FROM proxy_profiles WHERE id = ?", [id]); }
@@ -205,6 +291,18 @@ function mapProxy(row: Row): Record<string, unknown> {
 }
 function mapBenchmark(row: Row): Record<string, unknown> {
   return { id: row.id, routeKind: row.route_kind, proxyProfileId: row.proxy_profile_id ?? null, probeUrl: row.probe_url, startedAt: Number(row.started_at), completedAt: Number(row.completed_at), attempts: Number(row.attempts), successes: Number(row.successes), publicIp: row.public_ip ?? null, country: row.country ?? null, city: row.city ?? null, connectLatencyMs: nullableNumber(row.connect_latency_ms), medianLatencyMs: nullableNumber(row.median_latency_ms), jitterMs: nullableNumber(row.jitter_ms), failureRate: Number(row.failure_rate), ipStable: Boolean(row.ip_stable), qualityScore: Number(row.quality_score), status: row.status, errorCode: row.error_code ?? null, errorMessage: row.error_message ?? null, samples: JSON.parse(String(row.samples_json)) };
+}
+function mapRun(row: Row): Record<string, unknown> {
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+}
+function mapRunSession(row: Row): Record<string, unknown> {
+  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
+}
+function mapRunEvent(row: Row): Record<string, unknown> {
+  return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, wallTimeMs: Number(row.wall_time_ms), elapsedNs: String(row.elapsed_ns), type: row.type, stateBefore: row.state_before ?? null, stateAfter: row.state_after ?? null, payload: JSON.parse(String(row.payload_json)) };
+}
+function mapRunArtifact(row: Row): Record<string, unknown> {
+  return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id, kind: row.kind, relativePath: row.relative_path, sensitive: Boolean(row.sensitive), createdAt: Number(row.created_at) };
 }
 function nullableNumber(value: unknown): number | null { return value === null || value === undefined ? null : Number(value); }
 function toBuffer(value: unknown): Buffer | null { return value instanceof Uint8Array ? Buffer.from(value) : null; }

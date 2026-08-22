@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { openProfileRepository, profileDirectory, type ProfileRepository } from "./index";
 
 const roots: string[] = [];
@@ -60,5 +61,15 @@ describe("ProfileRepository", () => {
     const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo);
     expect((await repo.list())[0]).toMatchObject({ name: "Legacy" });
     expect(await repo.listProxies()).toEqual([]);
+  });
+
+  it("persists ordered run timelines and removes all run records transactionally", async () => {
+    const repo = repository(); const profile = await repo.create({ name: "Home" }); const startedAt = Date.now();
+    const sessionId = randomUUID(); const detail = await repo.createRun({ name: "Direct test", diagnosticLevel: "NORMAL", profileIds: [profile.id] }, { appVersion: "0.3.0", schemaVersion: 3, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: sessionId, runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "STARTING", startedAt, endedAt: null, finalError: null }]);
+    await repo.addRunEvent({ id: randomUUID(), runId: detail.run.id, runSessionId: sessionId, wallTimeMs: startedAt + 2, elapsedNs: "20", type: "SECOND", stateBefore: null, stateAfter: null, payload: {} });
+    await repo.addRunEvent({ id: randomUUID(), runId: detail.run.id, runSessionId: sessionId, wallTimeMs: startedAt + 1, elapsedNs: "10", type: "FIRST", stateBefore: null, stateAfter: null, payload: {} });
+    expect((await repo.getRun(detail.run.id))?.events.map((event) => event.type)).toEqual(["FIRST", "SECOND"]);
+    expect(await repo.removeRun(detail.run.id)).toBe(true);
+    expect(await repo.getRun(detail.run.id)).toBeUndefined();
   });
 });

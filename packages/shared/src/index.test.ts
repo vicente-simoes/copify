@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBrowserProfileSchema, createProxyProfileSchema, networkProbeSettingsSchema, runnerCommandSchema, updateProxyProfileSchema } from "./index";
+import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, networkProbeSettingsSchema, runnerCommandSchema, updateProxyProfileSchema } from "./index";
 
 describe("shared contracts", () => {
   it("validates profile input", () => {
@@ -13,5 +13,10 @@ describe("shared contracts", () => {
     expect(createProxyProfileSchema.parse({ name: "PT ISP", host: "proxy.example", port: 8080 }).protocol).toBe("http");
     expect(updateProxyProfileSchema.parse({ username: null })).toEqual({ username: null });
     expect(networkProbeSettingsSchema.safeParse({ probeUrl: "http://localhost" }).success).toBe(false);
+  });
+  it("requires explicit acknowledgement before Deep Debug recording", () => {
+    const profileId = "00000000-0000-4000-8000-000000000001";
+    expect(createRunSchema.safeParse({ name: "Safe run", diagnosticLevel: "DEEP_DEBUG", profileIds: [profileId] }).success).toBe(false);
+    expect(createRunSchema.parse({ name: "Safe run", diagnosticLevel: "DEEP_DEBUG", profileIds: [profileId], deepDebugAcknowledged: true })).toMatchObject({ diagnosticLevel: "DEEP_DEBUG" });
   });
 });

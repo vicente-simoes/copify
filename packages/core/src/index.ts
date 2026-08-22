@@ -2,11 +2,11 @@ import { EventEmitter } from "node:events";
 import { fork, type ChildProcess } from "node:child_process";
 import {
   DEFAULT_NETWORK_PROBE_URL, IPC_VERSION, defaultRoute, runnerEventSchema,
-  type BrowserProfile, type RunnerCommand, type RunnerEvent, type RunnerProxy, type SessionError, type SessionRoute, type SessionSnapshot
+  type BrowserProfile, type RunnerCommand, type RunnerEvent, type RunnerProxy, type RunnerRecording, type SessionError, type SessionRoute, type SessionSnapshot
 } from "@copify/shared";
 
 export type RunnerChild = Pick<ChildProcess, "send" | "kill" | "on" | "once" | "removeAllListeners">;
-export type SessionLaunchSpec = { profile: BrowserProfile; proxy: RunnerProxy | null; probeUrl: string };
+export type SessionLaunchSpec = { profile: BrowserProfile; proxy: RunnerProxy | null; probeUrl: string; recording: RunnerRecording | null };
 export type RunnerFactory = (spec: SessionLaunchSpec) => RunnerChild;
 type ActiveRunner = { child: RunnerChild; expectedStop: boolean };
 
@@ -29,7 +29,7 @@ export class SessionOrchestrator extends EventEmitter {
       this.setState(spec.profile.id, "STARTING", null, route);
       const child = this.createRunner(spec); const active: ActiveRunner = { child, expectedStop: false }; this.runners.set(spec.profile.id, active);
       child.on("message", (message) => this.onRunnerMessage(spec.profile.id, message)); child.once("exit", () => this.onRunnerExit(spec.profile.id, active));
-      this.send(child, { type: "START", version: IPC_VERSION, profileId: spec.profile.id, userDataDir: spec.profile.userDataDir, proxy: spec.proxy, probeUrl: spec.probeUrl });
+      this.send(child, { type: "START", version: IPC_VERSION, profileId: spec.profile.id, userDataDir: spec.profile.userDataDir, proxy: spec.proxy, probeUrl: spec.probeUrl, recording: spec.recording });
     });
   }
 
@@ -45,6 +45,7 @@ export class SessionOrchestrator extends EventEmitter {
   async shutdown(): Promise<void> { await Promise.all([...this.runners.keys()].map((profileId) => this.close(profileId))); }
   isActive(profileId: string): boolean { return this.runners.has(profileId); }
   fail(profileId: string, error: SessionError): void { this.setState(profileId, "ERROR", error); }
+  endRun(profileId: string, runSessionId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "END_RUN", version: IPC_VERSION, runSessionId }); }
 
   private onRunnerMessage(profileId: string, message: unknown): void {
     const parsed = runnerEventSchema.safeParse(message); if (!parsed.success || (parsed.data.profileId !== null && parsed.data.profileId !== profileId)) return;
@@ -52,6 +53,7 @@ export class SessionOrchestrator extends EventEmitter {
     if (event.type === "READY") this.setState(profileId, "READY", null, event.route);
     if (event.type === "STOPPED") this.setState(profileId, "STOPPED");
     if (event.type === "ERROR") this.setState(profileId, "ERROR", { code: event.code, message: event.message });
+    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED") this.emit("runner-event", event);
   }
 
   private onRunnerExit(profileId: string, active: ActiveRunner): void {
@@ -68,5 +70,5 @@ export class SessionOrchestrator extends EventEmitter {
 }
 
 export function nodeRunnerFactory(runnerPath: string): RunnerFactory { return () => fork(runnerPath, [], { stdio: ["ignore", "ignore", "ignore", "ipc"] }); }
-function toLaunchSpec(input: BrowserProfile | SessionLaunchSpec): SessionLaunchSpec { return "profile" in input ? input : { profile: input, proxy: null, probeUrl: DEFAULT_NETWORK_PROBE_URL }; }
+function toLaunchSpec(input: BrowserProfile | SessionLaunchSpec): SessionLaunchSpec { return "profile" in input ? input : { profile: input, proxy: null, probeUrl: DEFAULT_NETWORK_PROBE_URL, recording: null }; }
 function routeFor(proxy: RunnerProxy | null): SessionRoute { return proxy ? { kind: "proxy", proxyProfileId: proxy.proxyProfileId, proxyName: proxy.proxyName, protocol: proxy.protocol, verification: defaultRoute().verification } : defaultRoute(); }
