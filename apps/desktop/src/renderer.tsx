@@ -71,9 +71,8 @@ function App() {
   );
   const [shippingDraft, setShippingDraft] =
     useState<ShippingDraft>(blankShipping());
-  const [editingShippingId, setEditingShippingId] = useState<string | null>(
-    null,
-  );
+  const [editingShippingId, setEditingShippingId] = useState<string | null>(null);
+  const [shippingDrawerOpen, setShippingDrawerOpen] = useState(false);
   const reload = async (): Promise<void> => {
     const [
       profileResult,
@@ -306,6 +305,7 @@ function App() {
     );
     setShippingDraft(blankShipping());
     setEditingShippingId(null);
+    setShippingDrawerOpen(false);
   };
   const saveTarget = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -375,9 +375,12 @@ function App() {
     } else setNotice({ kind: "error", message: response.error });
   };
   const recordingSince = activeRunId ? runs.find((run) => run.id === activeRunId)?.startedAt ?? null : null;
+  const inspecting = workspace === "run" && selectedRun !== null && !activeRunId;
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <TitleBar
+        crumb={inspecting ? selectedRun!.run.name : undefined}
+        onBack={inspecting ? () => setSelectedRun(null) : undefined}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
         recordingSince={recordingSince}
@@ -575,11 +578,18 @@ function App() {
           <Shipping
             profiles={profiles}
             shipping={shippingProfiles}
+            stores={stores}
             draft={shippingDraft}
             editingId={editingShippingId}
+            drawerOpen={shippingDrawerOpen}
             activeRun={Boolean(activeRunId)}
             busy={busy}
             setDraft={setShippingDraft}
+            onNew={() => {
+              setEditingShippingId(null);
+              setShippingDraft(blankShipping());
+              setShippingDrawerOpen(true);
+            }}
             onSave={(event) => void saveShipping(event)}
             onEdit={(profile) => {
               setEditingShippingId(profile.id);
@@ -589,10 +599,12 @@ function App() {
                 country: profile.country ?? "PT",
                 enabled: profile.enabled,
               });
+              setShippingDrawerOpen(true);
             }}
             onCancel={() => {
               setEditingShippingId(null);
               setShippingDraft(blankShipping());
+              setShippingDrawerOpen(false);
             }}
             onToggle={(profile) =>
               void execute(() =>

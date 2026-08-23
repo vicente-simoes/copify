@@ -1,15 +1,22 @@
-import { type BrowserProfile, type ShippingProfile } from "@copify/shared";
+import { type BrowserProfile, type ShippingProfile, type Store } from "@copify/shared";
 import { type ShippingDraft } from "../types";
 import { Field } from "../ui/primitives";
+import { Menu, type MenuEntry } from "../ui/Menu";
+import { Drawer } from "../ui/Drawer";
+
+type AssignmentColumn = { id: string; label: string };
 
 export function Shipping({
   profiles,
   shipping,
+  stores,
   draft,
   editingId,
+  drawerOpen,
   activeRun,
   busy,
   setDraft,
+  onNew,
   onSave,
   onEdit,
   onCancel,
@@ -19,11 +26,14 @@ export function Shipping({
 }: {
   profiles: BrowserProfile[];
   shipping: ShippingProfile[];
+  stores: Store[];
   draft: ShippingDraft;
   editingId: string | null;
+  drawerOpen: boolean;
   activeRun: boolean;
   busy: boolean;
   setDraft: (value: ShippingDraft) => void;
+  onNew: () => void;
   onSave: (event: React.FormEvent) => void;
   onEdit: (profile: ShippingProfile) => void;
   onCancel: () => void;
@@ -31,224 +41,166 @@ export function Shipping({
   onRemove: (profile: ShippingProfile) => void;
   onAssign: (profileId: string, shippingId: string) => void;
 }) {
+  // One column today, backed by browser_profiles.shipping_profile_id. Per-store
+  // columns need their own persistence, so they are added when a second
+  // checkout-capable adapter exists rather than rendered with nowhere to save.
+  const checkoutStores = stores.filter((store) => store.enabled && store.capabilities.checkoutAutofill);
+  const columns: AssignmentColumn[] = [{ id: "default", label: checkoutStores.length > 1 ? "Default" : "Address" }];
+
+  const usable = shipping.filter((item) => item.enabled && item.complete);
+
   return (
     <div className="page-stack">
-      <section className="page-intro">
-        <div>
-          <h2>Shipping profiles</h2>
-          <p>
-            Copify encrypts saved contact and address details with Windows
-            secure storage. Existing details are never displayed again or
-            included in run records.
-          </p>
-        </div>
-      </section>
-      <section className="profiles">
-        {shipping.length === 0 && (
-          <div className="empty">
-            Create a complete shipping profile to make a browser eligible for
-            assisted checkout.
-          </div>
-        )}
-        {shipping.map((item) => (
-          <article key={item.id} className="profile-card">
-            <div className="profile-title">
-              <div>
-                <h3>{item.name}</h3>
-                <p>
-                  {item.enabled ? "Enabled" : "Disabled"} ·{" "}
-                  {item.country ?? "No country"} ·{" "}
-                  {item.complete
-                    ? "Details encrypted and complete"
-                    : "Details unavailable"}
-                </p>
-              </div>
-              <span
-                className={`state ${item.complete && item.enabled ? "ready" : "warn"}`}
-              >
-                {item.complete && item.enabled ? "READY" : "INCOMPLETE"}
-              </span>
-            </div>
-            <div className="actions">
-              <button
-                className="secondary"
-                disabled={busy || activeRun}
-                onClick={() => onEdit(item)}
-              >
-                Replace details
-              </button>
-              <button
-                className="text"
-                disabled={busy || activeRun}
-                onClick={() => onToggle(item)}
-              >
-                {item.enabled ? "Disable" : "Enable"}
-              </button>
-              <button
-                className="danger"
-                disabled={busy || activeRun}
-                onClick={() => onRemove(item)}
-              >
-                Remove
-              </button>
-            </div>
-          </article>
-        ))}
-      </section>
       <section className="panel">
-        <h2>Use a shipping profile per browser</h2>
-        <div className="profiles">
-          {profiles.map((profile) => (
-            <div className="profile-card" key={profile.id}>
-              <div className="profile-title">
-                <div>
-                  <h3>{profile.name}</h3>
-                  <p>Used only by opt-in assisted runs.</p>
-                </div>
-                <select
-                  disabled={busy || activeRun}
-                  value={profile.shippingProfileId ?? ""}
-                  onChange={(event) => onAssign(profile.id, event.target.value)}
-                >
-                  <option value="">No shipping profile — observe only</option>
-                  {shipping.map((item) => (
-                    <option
-                      key={item.id}
-                      value={item.id}
-                      disabled={!item.enabled || !item.complete}
-                    >
-                      {item.name}
-                      {item.complete && item.enabled ? "" : " (unavailable)"}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-      <form className="form-card" onSubmit={onSave}>
         <div className="section-title">
           <div>
-            <h2>
-              {editingId
-                ? "Replace encrypted shipping details"
-                : "Add shipping profile"}
-            </h2>
+            <h2>Addresses</h2>
+            <p className="muted">Encrypted by Windows and never shown again once saved.</p>
           </div>
-          {editingId && (
-            <button className="text" type="button" onClick={onCancel}>
-              Cancel
-            </button>
-          )}
+          <button className="primary" disabled={busy || activeRun} onClick={onNew}>New address</button>
         </div>
-        <Field label="Profile name">
-          <input
-            required
-            value={draft.name}
-            onChange={(event) =>
-              setDraft({ ...draft, name: event.target.value })
-            }
-            placeholder="e.g. Home delivery"
-          />
-        </Field>
-        <Field label="Full name">
-          <input
-            required
-            value={draft.fullName}
-            onChange={(event) =>
-              setDraft({ ...draft, fullName: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Email">
-          <input
-            required
-            type="email"
-            value={draft.email}
-            onChange={(event) =>
-              setDraft({ ...draft, email: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Phone">
-          <input
-            required
-            value={draft.phone}
-            onChange={(event) =>
-              setDraft({ ...draft, phone: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Address line 1">
-          <input
-            required
-            value={draft.address1}
-            onChange={(event) =>
-              setDraft({ ...draft, address1: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Address line 2">
-          <input
-            value={draft.address2}
-            onChange={(event) =>
-              setDraft({ ...draft, address2: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Postal code">
-          <input
-            required
-            value={draft.postalCode}
-            onChange={(event) =>
-              setDraft({ ...draft, postalCode: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="City">
-          <input
-            required
-            value={draft.city}
-            onChange={(event) =>
-              setDraft({ ...draft, city: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Region">
-          <input
-            value={draft.region}
-            onChange={(event) =>
-              setDraft({ ...draft, region: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Country code">
-          <input
-            required
-            maxLength={2}
-            value={draft.country}
-            onChange={(event) =>
-              setDraft({ ...draft, country: event.target.value.toUpperCase() })
-            }
-            placeholder="PT"
-          />
-        </Field>
-        <label className="check form-check">
-          <input
-            type="checkbox"
-            checked={draft.enabled}
-            onChange={(event) =>
-              setDraft({ ...draft, enabled: event.target.checked })
-            }
-          />{" "}
-          Enabled
-        </label>
-        <button disabled={busy} type="submit">
-          {editingId ? "Replace and save" : "Encrypt and save"}
-        </button>
-      </form>
+
+        {shipping.length === 0 ? (
+          <div className="empty">
+            No addresses yet.
+            <button disabled={busy || activeRun} onClick={onNew}>New address</button>
+          </div>
+        ) : (
+          <div className="rows address-rows">
+            <div className="row row-head">
+              <span>Name</span>
+              <span>Country</span>
+              <span>Status</span>
+              <span />
+            </div>
+            {shipping.map((item) => {
+              const ready = item.enabled && item.complete;
+              const entries: MenuEntry[] = [
+                { kind: "item", label: "Replace details", disabled: busy || activeRun, onSelect: () => onEdit(item) },
+                { kind: "item", label: item.enabled ? "Disable" : "Enable", disabled: busy || activeRun, onSelect: () => onToggle(item) },
+                { kind: "separator" },
+                { kind: "item", label: "Remove", danger: true, disabled: busy || activeRun, onSelect: () => onRemove(item) },
+              ];
+              return (
+                <div className="row address-row" key={item.id}>
+                  <span className="row-name">{item.name}</span>
+                  <span className="row-cell mono">{item.country ?? "—"}</span>
+                  <span className={`state ${ready ? "ready" : "warn"}`}>
+                    {!item.complete ? "INCOMPLETE" : item.enabled ? "READY" : "OFF"}
+                  </span>
+                  <div className="row-actions">
+                    <Menu entries={entries} label={`Actions for ${item.name}`} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="section-title">
+          <div>
+            <h2>Who ships where</h2>
+            <p className="muted">Only used by assisted runs. Unassigned browsers observe.</p>
+          </div>
+        </div>
+
+        {profiles.length === 0 ? (
+          <div className="empty">No browsers yet.</div>
+        ) : (
+          <div className="rows assignment-rows">
+            <div className="row row-head">
+              <span>Browser</span>
+              {columns.map((column) => <span key={column.id}>{column.label}</span>)}
+            </div>
+            {profiles.map((profile) => (
+              <div className="row" key={profile.id}>
+                <span className="row-name">{profile.name}</span>
+                <span>
+                  <select
+                    aria-label={`Address for ${profile.name}`}
+                    disabled={busy || activeRun}
+                    value={profile.shippingProfileId ?? ""}
+                    onChange={(event) => onAssign(profile.id, event.target.value)}
+                  >
+                    <option value="">None</option>
+                    {shipping.map((item) => (
+                      <option key={item.id} value={item.id} disabled={!item.enabled || !item.complete}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {shipping.length > 0 && usable.length === 0 && (
+          <p className="muted assignment-note">No address is both complete and enabled, so no browser can check out.</p>
+        )}
+      </section>
+
+      <Drawer
+        open={drawerOpen}
+        title={editingId ? "Replace details" : "New address"}
+        onClose={onCancel}
+        footer={
+          <>
+            <button className="primary" form="shipping-form" type="submit" disabled={busy}>Save</button>
+            <button onClick={onCancel}>Cancel</button>
+          </>
+        }
+      >
+        <form id="shipping-form" className="drawer-form" onSubmit={onSave}>
+          {editingId && (
+            <p className="preset-notice">Saved details cannot be read back, so enter them again in full.</p>
+          )}
+
+          <Field label="Name">
+            <input
+              required
+              value={draft.name}
+              onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+              placeholder="e.g. Home"
+            />
+          </Field>
+          <Field label="Full name">
+            <input required value={draft.fullName} onChange={(event) => setDraft({ ...draft, fullName: event.target.value })} />
+          </Field>
+          <Field label="Email">
+            <input required type="email" value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />
+          </Field>
+          <Field label="Phone">
+            <input required value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} />
+          </Field>
+          <Field label="Address">
+            <input required value={draft.address1} onChange={(event) => setDraft({ ...draft, address1: event.target.value })} />
+          </Field>
+          <Field label="Address line 2">
+            <input value={draft.address2} onChange={(event) => setDraft({ ...draft, address2: event.target.value })} placeholder="Optional" />
+          </Field>
+          <Field label="Postal code">
+            <input required value={draft.postalCode} onChange={(event) => setDraft({ ...draft, postalCode: event.target.value })} />
+          </Field>
+          <Field label="City">
+            <input required value={draft.city} onChange={(event) => setDraft({ ...draft, city: event.target.value })} />
+          </Field>
+          <Field label="Region">
+            <input value={draft.region} onChange={(event) => setDraft({ ...draft, region: event.target.value })} placeholder="Optional" />
+          </Field>
+          <Field label="Country">
+            <input
+              required
+              maxLength={2}
+              value={draft.country}
+              onChange={(event) => setDraft({ ...draft, country: event.target.value.toUpperCase() })}
+              placeholder="PT"
+            />
+          </Field>
+        </form>
+      </Drawer>
     </div>
   );
 }
-
