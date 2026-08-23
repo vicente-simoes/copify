@@ -2,10 +2,10 @@
 
 **Document:** `spec.md`  
 **Product:** Copify  
-**Status:** Initial architecture specification  
+**Status:** Living specification — implemented through v0.5.5  
 **Primary platform:** Windows  
 **Future platforms:** macOS, Linux  
-**Date:** 2026-08-22
+**Date:** 2026-08-23
 
 ---
 
@@ -142,14 +142,19 @@ The chosen initial stack is:
 - **SQLite** — local structured application data.
 - **Electron `safeStorage`** — encryption/protection for stored secrets.
 
-Potential supporting libraries may include:
+Supporting libraries in use:
 
-- Zod for runtime validation.
-- Drizzle ORM or Prisma for SQLite access.
-- Zustand, Redux Toolkit, or React Query for UI state.
-- Pino for structured application logging.
+- Zod for runtime validation and IPC contracts.
+- Drizzle schema definitions over `node:sqlite`.
 - Vitest for unit tests.
-- Playwright Test only for internal testing utilities, not necessarily as the runtime runner.
+
+Deliberately **not** used:
+
+- No UI state library. Component state plus IPC events proved sufficient; add one
+  only when prop threading actually hurts.
+- No component or icon library. The interface is a small set of local primitives
+  and an inline 16px stroke icon set, so the app carries no design-system
+  dependency and no unused bundle weight.
 
 The application should avoid unnecessary cloud dependencies in v1.
 
@@ -507,6 +512,9 @@ Exact scoring may change after empirical testing.
 
 A `Target` defines what the user wants Copify to look for.
 
+`storeId` is a free string validated against the store registry (section 15.1)
+rather than an enum, so adding a store never changes this type.
+
 ```ts
 interface Target {
   id: string;
@@ -528,6 +536,9 @@ interface Target {
   enabled: boolean;
 }
 ```
+
+`quantity` is fixed at 1 and is not user-editable. It stays in the model so a
+future adapter with a legitimate multi-quantity workflow has somewhere to put it.
 
 Example:
 
@@ -649,6 +660,61 @@ interface StoreAdapter {
   detectSuccess(page: Page): Promise<boolean>;
 }
 ```
+
+### 15.1 Store registry and capability manifest
+
+An adapter interface alone is not enough, because the **user interface** also has
+to know what a store can do. Without that, store knowledge leaks into the
+renderer as `storeId === "supreme-eu"` branches and as prose explaining why a
+button is disabled — which does not scale past a handful of stores.
+
+Every store therefore declares a manifest:
+
+```ts
+interface StoreManifest {
+  id: string;                 // "supreme-eu"
+  name: string;               // "Supreme"
+  region: string | null;      // "EU"
+  currency: StoreCurrency;
+  status: "stable" | "beta" | "experimental" | "unsupported";
+
+  capabilities: {
+    monitor: "shared" | "in-browser" | null;
+    cartInspection: boolean;
+    addToCart: boolean;
+    checkoutAutofill: boolean;
+  };
+
+  variants: {
+    sizes: { kind: "enum"; values: string[] } | { kind: "freeform" };
+    colors: { kind: "freeform" };
+  };
+}
+```
+
+Manifests are pure data and live in `packages/shared`, so both the main process
+and the renderer can read them. Adapter *implementations* stay behind
+`StoreAdapter`.
+
+The manifest is the single source of truth for store-specific UI:
+
+| Question | Answered by |
+|---|---|
+| Can this target be monitored or tested? | `capabilities.monitor !== null` |
+| Can a run use assisted checkout? | `addToCart && checkoutAutofill` |
+| Should a cart column exist? | `capabilities.cartInspection` |
+| Size chips or a free-text field? | `variants.sizes.kind` |
+| Which currency? | `currency` — derived, never asked |
+
+A store with no adapter is an ordinary manifest with `monitor: null` rather than
+a special case, so it renders through the same path and simply reads as having no
+adapter yet.
+
+Per-store enablement is persisted in `app_settings` and merged over the manifests
+when they are read, so a store can be turned off without deleting its targets.
+
+Brand art is resolved by id from `resources/brands/<storeId>.svg`, with the store
+name as fallback. Adding a store's branding is dropping a file in that folder.
 
 Initial adapters:
 
@@ -1271,22 +1337,33 @@ Redaction should happen before disk persistence.
 
 Suggested initial repository:
 
+Actual structure as implemented:
+
 ```text
 copify/
 │
 ├── apps/
 │   └── desktop/
-│       ├── main/
-│       ├── renderer/
-│       └── preload/
+│       ├── resources/
+│       │   ├── brands/         <storeId>.svg, resolved by StoreMark
+│       │   └── icons/
+│       └── src/
+│           ├── main.ts         Electron main: IPC, orchestration, runs
+│           ├── preload.ts      contextBridge API surface
+│           ├── renderer.tsx    app shell and shared state
+│           ├── preflight.ts    pre-run checks (section 39)
+│           ├── types.ts        renderer draft shapes and helpers
+│           ├── pages/          Run, Browsers, Targets, Shipping, Settings,
+│           │                   RunInspector, Proxies, LaunchModes
+│           ├── ui/             TitleBar, Sidebar, Menu, Drawer, Toast,
+│           │                   StoreMark, primitives, icons
+│           └── styles/         tokens, base, shell, components
 │
 ├── packages/
 │   ├── core/
 │   ├── runner/
-│   ├── stores/
 │   ├── persistence/
-│   ├── shared/
-│   └── observability/
+│   └── shared/                 types, schemas, IPC contracts, store manifests
 │
 ├── browser-profiles/
 │   ├── home/
@@ -1340,7 +1417,12 @@ packages/shared
   types
   schemas
   IPC contracts
+  store manifests and capability lookups
 ```
+
+`packages/stores` and `packages/observability` are not yet split out. Store
+adapter implementations currently live in `packages/runner`; extracting them is
+worthwhile once a second adapter exists.
 
 ---
 
@@ -1365,73 +1447,96 @@ Development fixtures must not contain real secrets.
 
 ## 33. UI Direction
 
-Copify should feel like an operations console, not a traditional shopping interface.
+Copify is an operations console, not a shopping interface. The interface is dense,
+near-monochrome, and spends colour only on meaning.
 
-### 33.1 Primary dashboard
+### 33.1 Information architecture
 
-Example:
-
-```text
-COPIFY                                              15:59:42
-
-TARGET
-──────────────────────────────────────────────────────────
-Supreme Nike Air Max 2001
-Black > Red
-US 10 > US 9.5 > US 10.5
-Max retail: €195
-
-SESSIONS
-──────────────────────────────────────────────────────────
-HOME
-READY          38 ms
-Home network
-
-PT ISP 01
-READY          51 ms
-185.x.x.x
-
-PT RES 01
-READY          63 ms
-188.x.x.x
-
-RUN CONTROL
-──────────────────────────────────────────────────────────
-Monitor        ACTIVE
-Target         ARMED
-Commit Lock    FREE
-
-[ OPEN ALL ]    [ ARM ]    [ STOP ALL ]
-```
-
-### 33.2 Live run view
-
-Example:
+Five sections, ordered by the drop workflow — you run from the top item and
+prepare below it:
 
 ```text
-HOME
-CHECKOUT       1.84 s
-
-PT ISP 01
-CHECKPOINT     2.11 s
-[ OPEN ]
-
-PT RES 01
-SOLD OUT
+Run        the drop console and landing page
+Browsers   browser profiles, routes, cart state
+Targets    what to watch for and which variants are acceptable
+Shipping   addresses and which browser uses which
+Settings   Routes · Stores · Advanced · About
 ```
 
-### 33.3 Visual priorities
+There is no separate dashboard. A dashboard that only summarises other pages adds
+a hop without adding information; Run carries the live state instead.
 
-The UI should emphasize:
+There is no global store switcher. A run is already scoped by its target's store,
+and Browsers must never be filtered, because one Chrome profile can hold state for
+several stores at once.
 
-- state
-- timing
-- failure
-- action required
-- target rules
-- network health
+### 33.2 The drop console
 
-Avoid visual clutter.
+`Run` is the answer to "a drop is happening, what do I do". Idle, it shows the
+preflight checklist, the launch controls, and recent runs. Recording, it becomes a
+live board with one row per session.
+
+```text
+Start a run                                              [ Start run ]
+Copify opens the selected browsers itself so it can record from the first page.
+
+●  Browsers selected   2 browsers ready to launch.
+●  Browsers closed     The run will open them with recording attached.
+●  Routes verified     Never benchmarked: Proxy 1 (PT ISP 01).
+●  Target armed        Box Logo · Box Logo, Hooded
+```
+
+Recording:
+
+```text
+READY_TO_CONFIRM   Home session   82.155.x.x PT
+CHECKPOINT         PT ISP 01      Cart is not empty.        [ Recheck cart ]
+SOLD_OUT           PT RES 01
+```
+
+A session waiting on a human is the one thing that must catch the eye mid-drop: it
+carries an amber edge and its resume action inline.
+
+### 33.3 Visual language
+
+- **Chrome and content are two surfaces.** A frameless window draws its own 40px
+  titlebar sharing one background with the sidebar and no divider between them, so
+  the chrome reads as a single L-shaped surface with the content in a well.
+  Window controls are OS-drawn in the app palette via `titleBarOverlay`.
+- **The titlebar carries identity and state**, not the page name: the mark, the
+  wordmark, and a live status chip (ready count, or `REC` with a running clock).
+  Page identity comes from the sidebar's active item. The sidebar collapses to a
+  52px icon rail.
+- **One accent, semantic only.** Primary actions are near-white. Colour means
+  state: green for ready and pass, amber for warnings and human handoff, red for
+  failure. Never decoration.
+- **Rows, not cards.** Tables share one grid between header and rows via subgrid,
+  so columns cannot drift. Machine values — IPs, latencies, timings, event names,
+  scores — render monospaced with tabular numerals.
+- **One primary action per row**, everything else behind an overflow menu.
+  Creating and editing happen in a drawer, not a form permanently occupying the
+  bottom of a page.
+- **Type caps at 17px** on a 13px base. There are no page-level `h1` elements.
+
+### 33.4 Writing
+
+Interface copy states what is true and what will happen. It does not explain the
+architecture, restate the heading above it, or narrate what the user just did.
+
+- No kicker labels above headings.
+- Dropdown options are nouns. If a mode needs explaining, one line under the whole
+  control, never a clause inside each option.
+- Structural facts render as data — a capability badge, a disabled control with a
+  reason — not as a paragraph. Prose does not scale across a dozen adapters.
+- Confirmations only for what leaves no trace. A visible change is its own
+  confirmation, so successful edits stay silent; failures and results with no
+  on-screen effect appear as a transient toast.
+- Empty states are one line and an action.
+
+### 33.5 Visual priorities
+
+The UI emphasises state, timing, failure, action required, target rules, and
+network health — in that order.
 
 ---
 
@@ -1507,6 +1612,13 @@ run_annotations
 target_templates
 ```
 
+`app_settings` is a key/value table. Current keys:
+
+```text
+network_probe_url   HTTPS endpoint used by route benchmarks
+store_settings      JSON map of storeId -> enabled, merged over the manifests
+```
+
 Large binary artifacts such as screenshots and traces should remain on disk, with paths referenced from SQLite.
 
 ---
@@ -1572,24 +1684,29 @@ This enables useful aggregate analytics later.
 
 ## 39. Health Checks
 
-Before arming a real run, Copify should perform preflight checks.
+Preflight runs continuously on the Run page against the current selection, so the
+run is either startable or the reason why not is already on screen.
 
-Example preflight:
+Each check is `pass`, `warn`, or `fail`. **A failure blocks the run; a warning
+does not.** Warnings exist so a stale benchmark cannot stop a drop, while a
+misconfiguration that would certainly waste it does.
 
-```text
-Chrome installed              PASS
-Browser profile readable      PASS
-Proxy reachable               PASS
-Expected country              PASS
-Store reachable               PASS
-Target configured             PASS
-Shipping profile complete     PASS
-Price limit configured        PASS
-Disk space                    PASS
-Clock sync warning            PASS
-```
+| Check | Fails when | Warns when |
+|---|---|---|
+| Browsers selected | nothing selected | — |
+| Browsers closed | a selected browser is open | — |
+| Routes | assigned proxy is missing or disabled | route never benchmarked |
+| Target armed | assisted with no target, target disabled, or store cannot assist | observing with no target |
+| Shipping ready | assisted and no selected browser has a complete address | some selected browsers will only observe |
+| Price limit set | assisted and the target has no maximum price | — |
 
-If a critical check fails, the app should refuse to arm that session.
+The "browsers closed" check exists because a run launches its browsers itself in
+order to record from the first navigation, so an already-open browser cannot join
+one. The check says that rather than refusing without explanation.
+
+Preflight is implemented in `apps/desktop/src/preflight.ts` as a pure function and
+is unit tested. The main process keeps its own guards, so the renderer prevents and
+the main process still validates.
 
 ---
 
@@ -1760,6 +1877,35 @@ Success criteria:
 
 - On a safe test run, Copify reaches checkout from an armed target without manual browsing.
 - Security/payment challenges pause correctly.
+
+---
+
+### v0.5.5 — Interface and store modularity
+
+Delivered:
+
+- Store registry and capability manifest (section 15.1); `storeId` moves from a
+  fixed enum to a registry-validated string with no data migration.
+- Capability-driven UI: monitorability, assisted eligibility, cart columns, size
+  inputs and currency all read from the manifest instead of store-specific
+  branches.
+- Frameless window with an integrated titlebar and a collapsible sidebar.
+- Design tokens; near-white primary actions with colour reserved for state.
+- Information architecture reorganised around the drop workflow (section 33.1),
+  with Run as the drop console and a blocking preflight (section 39).
+- Rows with overflow menus in place of button-covered cards; drawers in place of
+  permanent forms; transient toasts in place of a persistent notice bar.
+- Run Inspector as a full view with the timeline from section 29.1.
+- Copy pass removing kickers, restated headings, architecture explanations, and
+  confirmations of already-visible changes.
+- Knobs removed: proxy provider branding, expected city, quantity, per-item
+  enabled checkboxes, raw benchmark history.
+
+Success criteria:
+
+- A new store adapter is added without editing the renderer, beyond dropping in
+  its brand art.
+- A misconfigured run cannot be started, and the reason is visible before trying.
 
 ---
 
@@ -2053,10 +2199,6 @@ Recommended coding order:
 
 These items are intentionally not finalized yet:
 
-- Exact Electron build tooling.
-- Exact React state-management library.
-- SQLite ORM choice.
-- Exact UI visual design system.
 - Whether Chrome only or Chrome + Edge are supported on Windows.
 - Exact proxy providers used in production.
 - Exact Supreme selector implementation.
@@ -2067,6 +2209,13 @@ These items are intentionally not finalized yet:
 - Commercial licensing/distribution model.
 - Auto-update mechanism.
 - macOS/Linux release packaging.
+- Whether per-store shipping addresses are needed, and the table behind them. The
+  assignment grid is built for extra columns but renders one until a second
+  checkout-capable adapter exists.
+- Whether preflight should move into a shared package so the main process and the
+  renderer enforce one implementation rather than two.
+- When to split `packages/stores` and `packages/observability` out of
+  `packages/runner`.
 
 These should be decided only when the preceding architecture gives enough evidence.
 
@@ -2105,3 +2254,21 @@ The following decisions are considered **locked unless new evidence justifies ch
 - Security challenges trigger human handoff.
 - Parallel sessions use a global commit/purchase lock.
 - Development begins with browser/session infrastructure and observability before Supreme-specific automation.
+- Electron Vite is the build tooling; Drizzle schema over `node:sqlite` is the
+  persistence layer.
+- The renderer uses component state and IPC events, with no UI state library, no
+  component library, and no icon dependency.
+- Stores declare a capability manifest, and the interface renders from it rather
+  than branching on store identity.
+- A store with no adapter is an ordinary manifest, not a special case.
+- `storeId` is a registry-validated string, never an enum.
+- The interface is near-monochrome: primary actions are near-white and colour is
+  reserved for state.
+- The window is frameless with an app-drawn titlebar.
+- Navigation follows the drop workflow, and Run is both the landing page and the
+  drop console.
+- Preflight blocks on critical failures and passes on warnings.
+- Data is presented as rows with one primary action; the rest goes in an overflow
+  menu, and creating or editing happens in a drawer.
+- Interface copy states what is true and what will happen, and structural facts
+  render as data rather than prose.

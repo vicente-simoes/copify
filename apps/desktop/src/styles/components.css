@@ -17,7 +17,16 @@
 }
 .section-title p, .page-intro p { color: var(--fg-muted); margin-top: 3px; }
 
-.actions, .inline-form, .header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.actions, .header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* flex-end so the button sits on the input baseline rather than centring
+   against the label-plus-input stack. */
+.inline-form {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px;
+  margin-top: 16px; padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.inline-form .form-field { flex: 1 1 240px; max-width: 400px; }
 
 .empty {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
@@ -335,23 +344,34 @@
 
 /* ---- browser rows ---- */
 
-/* One grid so the header labels and every row share the same column edges. */
-.browser-rows .row {
+/* The header and every row are subgrids of one parent grid, so a column can
+   never drift because one cell happens to hold more than another. Sizing each
+   row independently made the header and body disagree by the actions width. */
+.browser-rows, .proxy-rows, .address-rows, .assignment-rows { display: grid; }
+.browser-rows > .row,
+.proxy-rows > .row,
+.address-rows > .row,
+.assignment-rows > .row {
   display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  gap: 12px;
+}
+
+.browser-rows {
   grid-template-columns:
     minmax(96px, 110px)   /* status  */
     minmax(0, 1fr)        /* name    */
     minmax(80px, 130px)   /* route   */
     minmax(96px, 150px)   /* ip      */
     minmax(60px, 76px)    /* latency */
-    auto;                 /* actions */
-  align-items: center;
-  gap: 12px;
+    minmax(92px, auto);   /* actions */
 }
-.browser-rows.has-cart .row {
+.browser-rows.has-cart {
   grid-template-columns:
     minmax(96px, 110px) minmax(0, 1fr) minmax(80px, 130px)
-    minmax(96px, 150px) minmax(60px, 76px) minmax(64px, 90px) auto;
+    minmax(96px, 150px) minmax(60px, 76px) minmax(64px, 90px) minmax(92px, auto);
 }
 
 .row-head {
@@ -419,17 +439,9 @@
 
 /* ---- shipping ---- */
 
-.address-rows .row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(64px, 90px) minmax(96px, 120px) auto;
-  align-items: center; gap: 14px;
-}
+.address-rows { grid-template-columns: minmax(0, 1fr) minmax(64px, 90px) minmax(96px, 120px) minmax(40px, auto); }
 
-.assignment-rows .row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
-  align-items: center; gap: 14px;
-}
+.assignment-rows { grid-template-columns: minmax(0, 1fr) minmax(180px, 260px); }
 .assignment-note { margin-top: 12px; }
 
 /* ---- run inspector ---- */
@@ -498,10 +510,10 @@
 
 /* ---- proxy rows ---- */
 
-.proxy-rows .row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(120px, 190px) minmax(64px, 80px) minmax(64px, 80px) minmax(48px, 60px) auto;
-  align-items: center; gap: 14px;
+.proxy-rows {
+  grid-template-columns:
+    minmax(0, 1fr) minmax(120px, 190px) minmax(64px, 80px)
+    minmax(64px, 80px) minmax(48px, 60px) minmax(96px, auto);
 }
 .proxy-row .row-name { display: flex; align-items: center; gap: 8px; }
 .score.pass { color: var(--accent); }
@@ -509,3 +521,5 @@
 .score.fail { color: var(--danger); }
 
 .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+.benchmark-empty { margin-top: 12px; }

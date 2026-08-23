@@ -44,7 +44,7 @@ export function Route({ route }: { route: SessionSnapshot["route"] }) {
   );
 }
 export function Benchmark({ benchmark }: { benchmark?: ProxyBenchmark }) {
-  if (!benchmark) return <p className="muted">No benchmark yet.</p>;
+  if (!benchmark) return <p className="muted benchmark-empty">Not tested yet.</p>;
   return (
     <div className={`benchmark ${benchmark.status.toLowerCase()}`}>
       <span>
