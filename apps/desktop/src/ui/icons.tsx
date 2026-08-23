@@ -66,6 +66,20 @@ export const SettingsIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const MoreIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx="3.2" cy="8" r="1" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="8" r="1" fill="currentColor" stroke="none" />
+    <circle cx="12.8" cy="8" r="1" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+export const CheckIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M3 8.4 6.2 11.5 13 4.8" />
+  </Icon>
+);
+
 export const PanelIcon = (props: IconProps) => (
   <Icon {...props}>
     <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />

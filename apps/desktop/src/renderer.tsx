@@ -155,13 +155,6 @@ function App() {
       offShipping();
     };
   }, []);
-  const activeCount = useMemo(
-    () =>
-      Object.values(sessions).filter((item) =>
-        ["STARTING", "READY", "STOPPING"].includes(item.state),
-      ).length,
-    [sessions],
-  );
   const readyCount = useMemo(
     () =>
       Object.values(sessions).filter((item) => item.state === "READY").length,
@@ -387,23 +380,6 @@ function App() {
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
         recordingSince={recordingSince}
         readyCount={readyCount}
-        actions={
-          <>
-            <button
-              className="primary"
-              disabled={busy || !profiles.some((profile) => profile.enabled)}
-              onClick={() => void execute(() => window.copify.sessions.openAll())}
-            >
-              Open all
-            </button>
-            <button
-              disabled={busy || activeCount === 0}
-              onClick={() => void execute(() => window.copify.sessions.closeAll())}
-            >
-              Close all
-            </button>
-          </>
-        }
       />
       <div className="app-body">
       <Sidebar workspace={workspace} collapsed={sidebarCollapsed} onNavigate={setWorkspace} />
@@ -472,8 +448,10 @@ function App() {
           <Browsers
             profiles={profiles}
             proxies={proxies}
+            stores={stores}
             sessions={sessions}
             cartStatuses={cartStatuses}
+            latest={latest}
             profileName={profileName}
             busy={busy}
             setProfileName={setProfileName}
@@ -497,6 +475,8 @@ function App() {
               if (window.confirm("Remove every item from this cart?"))
                 void execute(() => window.copify.sessions.emptyCart(id), "Cart emptied.");
             }}
+            onOpenAll={() => void execute(() => window.copify.sessions.openAll())}
+            onCloseAll={() => void execute(() => window.copify.sessions.closeAll())}
           />
         )}
         {workspace === "settings" && (
