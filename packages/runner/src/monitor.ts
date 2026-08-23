@@ -37,6 +37,20 @@ export function parseDisplayedPrice(value: string): { priceMinor: number; curren
   const match = value.replace(/\s/g, " ").match(/([£€$])\s*([0-9]+)(?:[.,]([0-9]{1,2}))?/); if (!match) return null;
   const currency = match[1] === "£" ? "GBP" : match[1] === "€" ? "EUR" : "USD"; return { currency, priceMinor: Number(match[2]) * 100 + Number((match[3] ?? "").padEnd(2, "0")) };
 }
+export function colorFromThumbnailTitle(value: string): string | null {
+  const match = value.match(/^view\s+.+\s+-\s+(.+?)\s+\(image\s+1\s+of\s+\d+\)$/i); return match?.[1]?.trim() || null;
+}
+export function canonicalProductImageUrl(value: string | null | undefined): string | null {
+  try {
+    const url = new URL(value ?? "");
+    if (url.protocol !== "https:") return null;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
 
 export class SupremeEuAdapter implements StoreAdapter {
   readonly id = "supreme-eu";
@@ -53,27 +67,60 @@ export class SupremeEuAdapter implements StoreAdapter {
       }).filter((value) => value.href && value.name));
       const seen = new Set<string>(); const matches = links.filter((link) => !seen.has(link.href) && (seen.add(link.href), matchesName(link.name, target))).slice(0, 5);
       const result: ProductCandidate[] = [];
-      for (const link of matches) { const product = await this.readProduct(page, link.href, link.name, link.index); result.push(product); }
+      for (const link of matches) { const product = await this.readProduct(page, link.href, link.name, link.index, target); result.push(product); }
       return result;
     } finally { await browser.close(); }
   }
-  private async readProduct(page: Page, href: string, fallbackName: string, listingOrder: number): Promise<ProductCandidate> {
+  private async readProduct(page: Page, href: string, fallbackName: string, listingOrder: number, target: TargetSnapshot): Promise<ProductCandidate> {
     await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForFunction(() => /[€£$]\s*\d/.test(document.body.innerText), { timeout: 15_000 }).catch(() => undefined);
     const data = await page.evaluate(() => {
       const text = (selector: string) => document.querySelector(selector)?.textContent?.trim() ?? "";
       const name = text("h1") || document.title || "Product"; const body = document.body.innerText.slice(0, 20_000);
       const selects = [...document.querySelectorAll("select")].map((select) => ({ key: `${select.getAttribute("name") ?? ""} ${select.getAttribute("id") ?? ""} ${select.getAttribute("aria-label") ?? ""}`.toLowerCase(), options: [...select.querySelectorAll("option")].map((option) => ({ text: option.textContent?.trim() ?? "", disabled: (option as HTMLOptionElement).disabled })) }));
-      return { name, body, selects };
+      const colorButtons = [...document.querySelectorAll("button[title]")].map((button) => ({ title: button.getAttribute("title") ?? "", disabled: (button as HTMLButtonElement).disabled || button.getAttribute("aria-disabled") === "true" }));
+      return { name, body, selects, colorButtons };
     });
     const values = (kind: "color" | "size") => data.selects.find((select) => select.key.includes(kind))?.options.filter((option) => option.text && !/select|choose/i.test(option.text)) ?? [];
-    const colors = values("color"); const sizes = values("size"); const variants: ProductVariant[] = (colors.length ? colors : [{ text: "Default", disabled: false }]).flatMap((color) => (sizes.length ? sizes : [{ text: "Default", disabled: false }]).map((size) => ({ color: color.text, size: size.text, available: !color.disabled && !size.disabled })));
-    const parsed = parseDisplayedPrice(data.body); const url = new URL(href); return { name: data.name || fallbackName, url: `${url.origin}${url.pathname}`, priceMinor: parsed?.priceMinor ?? null, currency: parsed?.currency ?? null, variants, listingOrder };
+    const knownColors = data.colorButtons.map((button) => ({ ...button, color: colorFromThumbnailTitle(button.title) })).filter((button): button is { title: string; disabled: boolean; color: string } => Boolean(button.color)).filter((button, index, all) => all.findIndex((item) => item.color === button.color) === index);
+    const colors = knownColors.length ? (target.preferredColors.length ? knownColors.filter((button) => target.preferredColors.some((color) => normalizeMatch(color) === normalizeMatch(button.color))) : knownColors.slice(0, 1)) : [{ title: "", disabled: false, color: values("color")[0]?.text ?? "Default" }];
+    const variants: ProductVariant[] = [];
+    for (const color of colors) {
+      if (color.title) await page.getByTitle(color.title, { exact: true }).click({ timeout: 5_000 }).catch(() => undefined);
+      const sizes = await page.locator("select").evaluateAll((selects) => { const size = selects.find((select) => `${select.getAttribute("name") ?? ""} ${select.getAttribute("id") ?? ""} ${select.getAttribute("aria-label") ?? ""}`.toLowerCase().includes("size")); return size ? [...size.querySelectorAll("option")].map((option) => ({ text: option.textContent?.trim() ?? "", disabled: (option as HTMLOptionElement).disabled })).filter((option) => option.text && !/select|choose/i.test(option.text)) : []; });
+      for (const size of sizes.length ? sizes : [{ text: "Default", disabled: false }]) variants.push({ color: color.color, size: size.text, available: !color.disabled && !size.disabled });
+    }
+    const imageColor = target.preferredColors.find((color) => variants.some((variant) => variant.available && normalizeMatch(variant.color) === normalizeMatch(color))) ?? variants.find((variant) => variant.available)?.color ?? colors[0]?.color ?? "";
+    const imageButton = knownColors.find((button) => normalizeMatch(button.color) === normalizeMatch(imageColor));
+    if (imageButton?.title) {
+      await page.getByTitle(imageButton.title, { exact: true }).click({ timeout: 5_000 }).catch(() => undefined);
+      await page.waitForTimeout(250);
+    }
+    const imageUrl = canonicalProductImageUrl(await page.evaluate(({ productName, color }) => {
+      const normalize = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+      const name = normalize(productName);
+      const selectedColor = normalize(color);
+      const images = [...document.querySelectorAll<HTMLImageElement>("img")].map((image) => {
+        const source = image.currentSrc || image.getAttribute("src") || image.getAttribute("data-src") || "";
+        const url = source ? new URL(source, window.location.href) : null;
+        return { source: url?.href ?? "", alt: normalize(image.alt), width: image.naturalWidth, height: image.naturalHeight, shopify: url?.hostname.endsWith("shopify.com") ?? false };
+      }).filter((image) => image.source);
+      const primary = images.sort((left, right) => {
+        const leftColorMatch = Number(Boolean(selectedColor) && left.alt.includes(selectedColor));
+        const rightColorMatch = Number(Boolean(selectedColor) && right.alt.includes(selectedColor));
+        const leftNameMatch = Number(Boolean(name) && left.alt.includes(name));
+        const rightNameMatch = Number(Boolean(name) && right.alt.includes(name));
+        return rightColorMatch - leftColorMatch || rightNameMatch - leftNameMatch || Number(right.shopify) - Number(left.shopify) || right.width * right.height - left.width * left.height;
+      })[0];
+      return primary?.source ?? null;
+    }, { productName: data.name || fallbackName, color: imageColor }));
+    const parsed = parseDisplayedPrice(data.body); const url = new URL(href); return { name: data.name || fallbackName, url: `${url.origin}${url.pathname}`, imageUrl, priceMinor: parsed?.priceMinor ?? null, currency: parsed?.currency ?? null, variants, listingOrder };
   }
 }
 
 function matchesName(name: string, target: TargetSnapshot): boolean { return matchesTarget(name, target); }
 async function check(target: TargetSnapshot): Promise<TargetCheck> {
+  if (target.storeId !== "supreme-eu") return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "This general target is saved for a future store adapter and cannot be monitored yet.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: "No monitor adapter is installed for this target preset." };
   try { const candidates = await new SupremeEuAdapter().locateProducts(target); const decision = decideTarget(target, candidates); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: decision.kind === "ERROR" ? "ERROR" : "SUCCESS", decision, candidateCount: candidates.length, errorMessage: decision.kind === "ERROR" ? decision.message : null }; }
   catch (error) { const errorMessage = sanitizeMonitorError(error instanceof Error ? error.message : "The Supreme monitor failed."); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "The Supreme EU listing could not be checked.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage }; }
 }

@@ -3,11 +3,11 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateTargetSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createShippingProfileSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
-  type CreateRunInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type Target, type TargetCheck, type TargetSnapshot,
-  type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateTargetInput
+  type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
+  type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 export * from "./schema";
@@ -17,6 +17,8 @@ export type EncryptedCredential = Buffer | null | undefined;
 export type EncryptedProxyCredentials = { username?: Buffer; password?: Buffer };
 export type EncryptedProxyCredentialUpdate = { username?: EncryptedCredential; password?: EncryptedCredential };
 export type StoredProxy = ProxyProfile & { usernameCiphertext: Buffer | null; passwordCiphertext: Buffer | null };
+export type StoredShippingProfile = ShippingProfile & { detailsCiphertext: Buffer | null };
+type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason">>;
 
 export function profileDirectory(profilesRoot: string, profileId: string): string {
   return join(resolve(profilesRoot), profileId);
@@ -88,7 +90,28 @@ export class ProfileRepository {
       ALTER TABLE runs ADD COLUMN target_snapshot_json TEXT;
       CREATE INDEX IF NOT EXISTS targets_enabled_idx ON targets(enabled, created_at ASC);`);
     }
-    this.sql.exec("PRAGMA user_version = 4;");
+    if (version < 5) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS shipping_profiles (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, details_secret_id TEXT, country TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS run_sessions (
+        id TEXT PRIMARY KEY NOT NULL, run_id TEXT NOT NULL, browser_profile_id TEXT NOT NULL, browser_profile_name TEXT NOT NULL,
+        route_json TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, final_error_json TEXT
+      );
+      ALTER TABLE runs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'OBSERVATION';
+      ALTER TABLE run_sessions ADD COLUMN shipping_profile_json TEXT;
+      ALTER TABLE run_sessions ADD COLUMN assisted_eligible INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE run_sessions ADD COLUMN execution_state TEXT NOT NULL DEFAULT 'OBSERVING';
+      ALTER TABLE run_sessions ADD COLUMN checkpoint_reason TEXT;
+      CREATE INDEX IF NOT EXISTS shipping_profiles_enabled_idx ON shipping_profiles(enabled, created_at ASC);`);
+    }
+    if (version < 6 && this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles'").get()) {
+      this.sql.exec("ALTER TABLE browser_profiles ADD COLUMN launch_mode TEXT NOT NULL DEFAULT 'PLAYWRIGHT';");
+    }
+    if (version < 7 && this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles'").get()) {
+      this.sql.exec("UPDATE browser_profiles SET launch_mode = 'PLAYWRIGHT' WHERE launch_mode = 'NATIVE_CDP';");
+    }
+    this.sql.exec("PRAGMA user_version = 7;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -102,10 +125,10 @@ export class ProfileRepository {
 
   async create(input: CreateBrowserProfileInput): Promise<BrowserProfile> {
     const parsed = createBrowserProfileSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, enabled: parsed.enabled, createdAt: now, updatedAt: now };
+    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, launchMode: parsed.launchMode, enabled: parsed.enabled, createdAt: now, updatedAt: now };
     try {
-      this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
-        .run(profile.id, profile.name, profile.userDataDir, null, null, profile.enabled ? 1 : 0, now, now);
+      this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,launch_mode,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(profile.id, profile.name, profile.userDataDir, null, null, profile.launchMode, profile.enabled ? 1 : 0, now, now);
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not create the browser profile."); }
     return profile;
   }
@@ -114,10 +137,11 @@ export class ProfileRepository {
     const parsed = updateBrowserProfileSchema.parse(input); const existing = await this.get(id);
     if (!existing) throw new Error("Browser profile not found.");
     if (parsed.proxyProfileId !== undefined && parsed.proxyProfileId !== null && !(await this.getProxy(parsed.proxyProfileId))) throw new Error("Proxy profile not found.");
+    if (parsed.shippingProfileId !== undefined && parsed.shippingProfileId !== null && !(await this.getShippingProfile(parsed.shippingProfileId))) throw new Error("Shipping profile not found.");
     const updated = { ...existing, ...parsed, updatedAt: Date.now() };
     try {
-      this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, proxy_profile_id=?, updated_at=? WHERE id=?")
-        .run(updated.name, updated.enabled ? 1 : 0, updated.proxyProfileId, updated.updatedAt, id);
+      this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, launch_mode=?, proxy_profile_id=?, shipping_profile_id=?, updated_at=? WHERE id=?")
+        .run(updated.name, updated.enabled ? 1 : 0, updated.launchMode, updated.proxyProfileId, updated.shippingProfileId, updated.updatedAt, id);
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not update the browser profile."); }
     return updated;
   }
@@ -125,6 +149,29 @@ export class ProfileRepository {
   async remove(id: string): Promise<boolean> {
     const result = this.sql.prepare("DELETE FROM browser_profiles WHERE id = ?").run(id);
     return result.changes > 0;
+  }
+
+  async listShippingProfiles(): Promise<ShippingProfile[]> { return this.all("SELECT * FROM shipping_profiles ORDER BY created_at ASC").map((row) => shippingProfileSchema.parse(mapShipping(row))); }
+  async getShippingProfile(id: string): Promise<ShippingProfile | undefined> { const row = this.getRow("SELECT * FROM shipping_profiles WHERE id = ?", [id]); return row ? shippingProfileSchema.parse(mapShipping(row)) : undefined; }
+  async getStoredShippingProfile(id: string): Promise<StoredShippingProfile | undefined> {
+    const row = this.getRow("SELECT s.*, a.ciphertext AS details_ciphertext FROM shipping_profiles s LEFT JOIN app_secrets a ON a.id = s.details_secret_id WHERE s.id = ?", [id]);
+    return row ? { ...shippingProfileSchema.parse(mapShipping(row)), detailsCiphertext: toBuffer(row.details_ciphertext) } : undefined;
+  }
+  async createShippingProfile(input: CreateShippingProfileInput, ciphertext: Buffer): Promise<ShippingProfile> {
+    const parsed = createShippingProfileSchema.parse(input); const id = randomUUID(); const secretId = randomUUID(); const now = Date.now();
+    this.transaction(() => { this.insertSecret(secretId, ciphertext, now); try { this.sql.prepare("INSERT INTO shipping_profiles (id,name,details_secret_id,country,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run(id, parsed.name, secretId, parsed.details.country, parsed.enabled ? 1 : 0, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A shipping profile with that name already exists." : "Could not create shipping profile."); } });
+    return (await this.getShippingProfile(id))!;
+  }
+  async updateShippingProfile(id: string, input: UpdateShippingProfileInput, ciphertext: Buffer | null | undefined): Promise<ShippingProfile> {
+    const parsed = updateShippingProfileSchema.parse(input); const existing = this.getRow("SELECT * FROM shipping_profiles WHERE id = ?", [id]); if (!existing) throw new Error("Shipping profile not found."); const now = Date.now();
+    const detailsSecretId = this.replaceSecret(existing.details_secret_id, ciphertext, now); const current = shippingProfileSchema.parse(mapShipping(existing)); const country = parsed.details ? parsed.details.country : ciphertext === null ? null : current.country;
+    const updated = shippingProfileSchema.parse({ ...current, ...parsed, country, detailsConfigured: Boolean(detailsSecretId), complete: Boolean(detailsSecretId), updatedAt: now });
+    this.transaction(() => { this.updateSecret(existing.details_secret_id, detailsSecretId, ciphertext, now); try { this.sql.prepare("UPDATE shipping_profiles SET name=?,details_secret_id=?,country=?,enabled=?,updated_at=? WHERE id=?").run(updated.name, detailsSecretId, updated.country, updated.enabled ? 1 : 0, now, id); } catch (error) { throw new Error(isUniqueError(error) ? "A shipping profile with that name already exists." : "Could not update shipping profile."); } });
+    return updated;
+  }
+  async removeShippingProfile(id: string): Promise<boolean> {
+    const existing = this.getRow("SELECT * FROM shipping_profiles WHERE id = ?", [id]); if (!existing) return false;
+    this.transaction(() => { this.sql.prepare("UPDATE browser_profiles SET shipping_profile_id=NULL, updated_at=? WHERE shipping_profile_id=?").run(Date.now(), id); this.sql.prepare("DELETE FROM shipping_profiles WHERE id=?").run(id); if (existing.details_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(existing.details_secret_id); }); return true;
   }
 
   async listProxies(): Promise<ProxyProfile[]> {
@@ -227,16 +274,16 @@ export class ProfileRepository {
   async setTargetCheck(targetId: string, check: TargetCheck): Promise<Target> { const value = targetCheckSchema.parse(check); this.sql.prepare("UPDATE targets SET latest_check_json=?, updated_at=? WHERE id=?").run(JSON.stringify(value), Date.now(), targetId); const target = await this.getTarget(targetId); if (!target) throw new Error("Target not found."); return target; }
   async removeTarget(id: string): Promise<boolean> { return this.sql.prepare("DELETE FROM targets WHERE id = ?").run(id).changes > 0; }
 
-  async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: RunSession[], targetSnapshot: TargetSnapshot | null = null): Promise<RunDetail> {
+  async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: NewRunSession[], targetSnapshot: TargetSnapshot | null = null): Promise<RunDetail> {
     const parsed = createRunSchema.parse(input); const now = Date.now(); const id = randomUUID();
-    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, createdAt: now, updatedAt: now });
+    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, executionMode: parsed.executionMode, status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, createdAt: now, updatedAt: now });
     this.transaction(() => {
-      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,status,started_at,ended_at,environment_json,target_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
-        .run(run.id, run.name, run.diagnosticLevel, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, now, now);
+      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,execution_mode,status,started_at,ended_at,environment_json,target_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+        .run(run.id, run.name, run.diagnosticLevel, run.executionMode, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, now, now);
       for (const session of sessions) {
         const value = runSessionSchema.parse({ ...session, runId: id });
-        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?)")
-          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
+        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,shipping_profile_json,assisted_eligible,execution_state,checkpoint_reason,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), JSON.stringify(value.shippingProfile), value.assistedEligible ? 1 : 0, value.executionState, value.checkpointReason, value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
       }
     });
     return (await this.getRun(id))!;
@@ -263,6 +310,7 @@ export class ProfileRepository {
     this.sql.prepare("UPDATE run_sessions SET status=?, route_json=COALESCE(?,route_json), ended_at=COALESCE(?,ended_at), final_error_json=? WHERE id=?")
       .run(status, route ? JSON.stringify(route) : null, ended, finalError ? JSON.stringify(finalError) : null, id);
   }
+  async setRunSessionExecution(id: string, executionState: RunSession["executionState"], checkpointReason: string | null = null): Promise<void> { this.sql.prepare("UPDATE run_sessions SET execution_state=?, checkpoint_reason=? WHERE id=?").run(executionState, checkpointReason, id); }
 
   async addRunEvent(event: RunEvent): Promise<RunEvent> {
     const value = runEventSchema.parse(event);
@@ -324,22 +372,25 @@ export function openProfileRepository(databasePath: string, profilesRoot: string
 }
 
 function mapProfile(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, launchMode: row.launch_mode ?? "PLAYWRIGHT", enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapProxy(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, provider: row.provider, type: row.type, protocol: row.protocol, host: row.host, port: Number(row.port), expectedCountry: row.expected_country ?? null, expectedCity: row.expected_city ?? null, usernameConfigured: Boolean(row.username_secret_id), passwordConfigured: Boolean(row.password_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+}
+function mapShipping(row: Row): Record<string, unknown> {
+  return { id: row.id, name: row.name, country: row.country ?? null, detailsConfigured: Boolean(row.details_secret_id), complete: Boolean(row.details_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapBenchmark(row: Row): Record<string, unknown> {
   return { id: row.id, routeKind: row.route_kind, proxyProfileId: row.proxy_profile_id ?? null, probeUrl: row.probe_url, startedAt: Number(row.started_at), completedAt: Number(row.completed_at), attempts: Number(row.attempts), successes: Number(row.successes), publicIp: row.public_ip ?? null, country: row.country ?? null, city: row.city ?? null, connectLatencyMs: nullableNumber(row.connect_latency_ms), medianLatencyMs: nullableNumber(row.median_latency_ms), jitterMs: nullableNumber(row.jitter_ms), failureRate: Number(row.failure_rate), ipStable: Boolean(row.ip_stable), qualityScore: Number(row.quality_score), status: row.status, errorCode: row.error_code ?? null, errorMessage: row.error_message ?? null, samples: JSON.parse(String(row.samples_json)) };
 }
 function mapRun(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode ?? "OBSERVATION", status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapTarget(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSession(row: Row): Record<string, unknown> {
-  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
+  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), shippingProfile: row.shipping_profile_json ? JSON.parse(String(row.shipping_profile_json)) : { shippingProfileId: null, name: null, country: null, complete: false }, assistedEligible: Boolean(row.assisted_eligible), executionState: row.execution_state ?? "OBSERVING", checkpointReason: row.checkpoint_reason ?? null, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
 }
 function mapRunEvent(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, wallTimeMs: Number(row.wall_time_ms), elapsedNs: String(row.elapsed_ns), type: row.type, stateBefore: row.state_before ?? null, stateAfter: row.state_after ?? null, payload: JSON.parse(String(row.payload_json)) };

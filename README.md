@@ -2,7 +2,9 @@
 
 Copify is a local Windows desktop console for isolated persistent Chrome sessions.
 
-## v0.4
+Each browser profile can use either Playwright launch or Native Chrome + local CDP attachment. Playwright launch is the default for new and existing profiles; Native CDP remains an opt-in option. Native CDP currently supports direct and unauthenticated-proxy routes only.
+
+## v0.5
 
 - Direct/home networking is the default; proxies are optional per browser profile.
 - HTTP, HTTPS, and SOCKS5 proxy profiles support encrypted optional credentials.
@@ -17,5 +19,10 @@ The default route probe is `https://ipwho.is/`. It can be replaced with an HTTPS
 - Ending a run finalizes recording without closing persistent Chrome sessions. Run records and artifacts remain until manually deleted.
 
 - Add Supreme EU targets with ordered keyword, color, and size priorities plus a currency-aware maximum retail-price kill switch.
+- Target setup offers a General preset for future store adapters and a Supreme EU preset with observed common apparel sizes (`Small` through `XXLarge`) and EUR pricing.
+- General targets are retained as templates but cannot be tested or attached to runs until their store adapter is available.
 - Test a target once on the direct route, or attach it to a recorded run for a single shared direct monitor that checks the public listing every 15 seconds.
-- Product detection is read-only: Copify records matching candidates and selected variants but never navigates persistent sessions, carts products, or starts checkout.
+- In Observation mode, product detection is read-only: Copify records matching candidates and selected variants without navigating persistent sessions, carting products, or starting checkout.
+
+- Observation runs stay read-only. Assisted Checkout runs require an explicit acknowledgement, can add an acceptable Supreme EU target to cart and fill an assigned encrypted shipping profile, then stop for manual payment and submission.
+- Shipping/contact details are encrypted with Electron safeStorage, never returned after saving, and never persisted in run events or artifacts.

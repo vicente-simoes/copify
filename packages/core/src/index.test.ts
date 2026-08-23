@@ -12,7 +12,7 @@ class FakeRunner extends EventEmitter {
 
 function profile(): BrowserProfile {
   const id = randomUUID();
-  return { id, name: "Test", userDataDir: `C:/profiles/${id}`, proxyProfileId: null, shippingProfileId: null, enabled: true, createdAt: 1, updatedAt: 1 };
+  return { id, name: "Test", userDataDir: `C:/profiles/${id}`, proxyProfileId: null, shippingProfileId: null, launchMode: "PLAYWRIGHT", enabled: true, createdAt: 1, updatedAt: 1 };
 }
 
 describe("SessionOrchestrator", () => {
@@ -37,7 +37,7 @@ describe("SessionOrchestrator", () => {
     const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
     const assigned = profile();
     await orchestrator.open({ profile: assigned, probeUrl: "https://ipwho.is/", recording: null, proxy: { proxyProfileId: randomUUID(), proxyName: "PT ISP", protocol: "http", host: "proxy.example", port: 8080, expectedCountry: "PT", expectedCity: "Lisbon" } });
-    expect(runners[0].commands[0]).toMatchObject({ type: "START", proxy: { proxyName: "PT ISP", host: "proxy.example" } });
+    expect(runners[0].commands[0]).toMatchObject({ type: "START", launchMode: "PLAYWRIGHT", proxy: { proxyName: "PT ISP", host: "proxy.example" } });
   });
 
   it("forwards an end-recording command only to the selected runner", async () => {
@@ -55,5 +55,14 @@ describe("SessionOrchestrator", () => {
     const enabled = profile();
     await Promise.all([orchestrator.open(enabled), orchestrator.open(enabled)]);
     expect(runners).toHaveLength(1);
+  });
+
+  it("keeps a runner launch error visible after that runner exits", async () => {
+    const runners: FakeRunner[] = [];
+    const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
+    const selected = profile(); await orchestrator.open(selected);
+    runners[0].emit("message", { type: "ERROR", version: IPC_VERSION, profileId: selected.id, code: "BROWSER_START_FAILED", message: "Native Chrome closed before Copify could attach." });
+    runners[0].emit("exit", 1);
+    expect(orchestrator.snapshot(selected.id)).toMatchObject({ state: "ERROR", error: { code: "BROWSER_START_FAILED" } });
   });
 });

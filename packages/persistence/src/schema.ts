@@ -2,7 +2,7 @@ import { blob, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const browserProfiles = sqliteTable("browser_profiles", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), userDataDir: text("user_data_dir").notNull(),
-  proxyProfileId: text("proxy_profile_id"), shippingProfileId: text("shipping_profile_id"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  proxyProfileId: text("proxy_profile_id"), shippingProfileId: text("shipping_profile_id"), launchMode: text("launch_mode").notNull().default("PLAYWRIGHT"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
@@ -17,6 +17,11 @@ export const appSecrets = sqliteTable("app_secrets", {
   id: text("id").primaryKey(), ciphertext: blob("ciphertext", { mode: "buffer" }).notNull(), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
+export const shippingProfiles = sqliteTable("shipping_profiles", {
+  id: text("id").primaryKey(), name: text("name").notNull().unique(), detailsSecretId: text("details_secret_id"), country: text("country"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+});
+
 export const proxyBenchmarks = sqliteTable("proxy_benchmarks", {
   id: text("id").primaryKey(), routeKind: text("route_kind").notNull(), proxyProfileId: text("proxy_profile_id"), probeUrl: text("probe_url").notNull(),
   startedAt: integer("started_at").notNull(), completedAt: integer("completed_at").notNull(), attempts: integer("attempts").notNull(), successes: integer("successes").notNull(),
@@ -28,13 +33,13 @@ export const proxyBenchmarks = sqliteTable("proxy_benchmarks", {
 export const appSettings = sqliteTable("app_settings", { key: text("key").primaryKey(), value: text("value").notNull(), updatedAt: integer("updated_at").notNull() });
 
 export const runs = sqliteTable("runs", {
-  id: text("id").primaryKey(), name: text("name").notNull(), diagnosticLevel: text("diagnostic_level").notNull(), status: text("status").notNull(),
+  id: text("id").primaryKey(), name: text("name").notNull(), diagnosticLevel: text("diagnostic_level").notNull(), executionMode: text("execution_mode").notNull(), status: text("status").notNull(),
   startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), environmentJson: text("environment_json").notNull(), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
 export const runSessions = sqliteTable("run_sessions", {
   id: text("id").primaryKey(), runId: text("run_id").notNull(), browserProfileId: text("browser_profile_id").notNull(), browserProfileName: text("browser_profile_name").notNull(),
-  routeJson: text("route_json").notNull(), status: text("status").notNull(), startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), finalErrorJson: text("final_error_json")
+  routeJson: text("route_json").notNull(), shippingProfileJson: text("shipping_profile_json"), assistedEligible: integer("assisted_eligible", { mode: "boolean" }).notNull().default(false), executionState: text("execution_state").notNull().default("OBSERVING"), checkpointReason: text("checkpoint_reason"), status: text("status").notNull(), startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), finalErrorJson: text("final_error_json")
 });
 
 export const runEvents = sqliteTable("run_events", {

@@ -1,6 +1,6 @@
 {
   "name": "@copify/runner",
-  "version": "0.4.0",
+  "version": "0.5.15",
   "private": true,
   "dependencies": {
     "@copify/shared": "workspace:*",
