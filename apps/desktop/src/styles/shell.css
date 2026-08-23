@@ -1,0 +1,151 @@
+/* The titlebar and sidebar share one background with no divider between them,
+   so the chrome reads as a single L-shaped surface and the content sits in a well. */
+/* Flex, not grid: the sidebar animates its own width, and a flex row takes that
+   width as authoritative. An auto grid track sized from the same element it is
+   sizing is a needless circular dependency to hand the layout engine. */
+.app-shell {
+  display: flex; flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+}
+.app-body { display: flex; flex: 1 1 auto; min-height: 0; }
+
+/* ---- titlebar ---- */
+
+.titlebar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; height: var(--titlebar-height);
+  background: var(--bg);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+/* env() keeps our content clear of the OS-drawn window controls.
+   The 13px inset centres the mark on the same axis as the sidebar icons. */
+.titlebar-inner {
+  display: flex; align-items: center; gap: 8px;
+  width: env(titlebar-area-width, 100%);
+  height: 100%;
+  padding: 0 6px 0 13px;
+}
+
+.titlebar button, .titlebar select, .titlebar a { -webkit-app-region: no-drag; }
+
+.titlebar-icon-button {
+  height: 28px; width: 28px; padding: 0; flex: 0 0 auto;
+  background: transparent; border-color: transparent; color: var(--fg-muted);
+}
+.titlebar-icon-button:hover:not(:disabled) { background: var(--surface-hover); border-color: transparent; color: var(--fg); }
+
+/* ---- brand + sidebar toggle ---- */
+
+/* Not a control: the wordmark and mark are inert. Only the toggle that
+   replaces the mark on hover is interactive. */
+.titlebar-brand { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+.brand-icon { position: relative; display: grid; place-items: center; width: 26px; height: 26px; flex: 0 0 auto; }
+
+.titlebar-mark {
+  width: 22px; height: 22px; object-fit: contain;
+  transition: opacity var(--speed) ease;
+}
+
+.sidebar-toggle {
+  position: absolute; inset: 0;
+  width: 26px; height: 26px; padding: 0;
+  border-radius: var(--radius);
+  background: transparent; border-color: transparent; color: var(--fg-muted);
+  opacity: 0;
+  transition: opacity var(--speed) ease, background var(--speed) ease, color var(--speed) ease;
+}
+.sidebar-toggle .toggle-icon { width: 14px; height: 14px; }
+
+.brand-icon:hover .titlebar-mark, .sidebar-toggle:focus-visible + .titlebar-mark { opacity: 0; }
+.brand-icon:hover .sidebar-toggle, .sidebar-toggle:focus-visible { opacity: 1; }
+.sidebar-toggle:hover:not(:disabled) { background: var(--surface-hover); border-color: transparent; color: var(--fg); }
+
+.titlebar-wordmark { color: var(--fg); font-size: var(--text-base); font-weight: 650; letter-spacing: -0.01em; }
+
+.titlebar-crumb { color: var(--fg-dim); font-size: var(--text-base); }
+
+.titlebar-spacer { flex: 1 1 auto; min-width: 12px; }
+
+.titlebar-actions { display: flex; align-items: center; gap: 6px; }
+.titlebar-actions button { height: 26px; }
+
+/* ---- status chip ---- */
+
+.status-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--fg-muted); font-size: var(--text-sm); white-space: nowrap;
+}
+.status-chip b { color: var(--fg); font-weight: 600; }
+.status-chip .elapsed { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--fg); }
+
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); flex: 0 0 auto; }
+.status-dot.ready { background: var(--accent); }
+.status-dot.recording { background: var(--danger); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+/* ---- sidebar ---- */
+
+.sidebar {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column;
+  width: var(--sidebar-width);
+  padding: 4px 8px 8px;
+  background: var(--bg);
+  overflow: hidden auto;
+  transition: width 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.app-shell.sidebar-collapsed .sidebar { width: var(--sidebar-width-collapsed); }
+
+.sidebar-nav { display: flex; flex-direction: column; gap: 1px; }
+
+.nav-item {
+  position: relative;
+  display: flex; align-items: center; gap: 10px;
+  justify-content: flex-start;
+  height: 34px; width: 100%; padding: 0 10px;
+  border: 0; border-radius: var(--radius);
+  background: transparent; color: var(--fg-muted);
+  font-size: var(--text-base); font-weight: 500; text-align: left;
+  overflow: hidden;
+}
+.nav-item:hover:not(:disabled) { background: var(--surface-hover); color: var(--fg); border-color: transparent; }
+.nav-item.active { background: var(--surface-raised); color: var(--fg); font-weight: 600; }
+/* The one place the accent appears in chrome. */
+.nav-item.active::before {
+  content: ""; position: absolute; left: 0; top: 9px; bottom: 9px;
+  width: 2px; border-radius: 1px; background: var(--accent);
+}
+.nav-item .nav-icon { width: 16px; height: 16px; flex: 0 0 auto; }
+
+/* Collapsed keeps identical padding, so the icons never shift sideways —
+   only the labels fade out as the rail narrows around them. */
+.nav-label { white-space: nowrap; opacity: 1; transition: opacity var(--speed) ease; }
+.app-shell.sidebar-collapsed .nav-label { opacity: 0; }
+
+.sidebar-spacer { flex: 1 1 auto; }
+
+.sidebar-footer { display: flex; flex-direction: column; gap: 1px; padding-top: 6px; }
+
+/* ---- workspace ---- */
+
+.workspace {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-top-left-radius: var(--radius-lg);
+}
+
+.workspace-inner {
+  max-width: 1180px;
+  padding: 22px clamp(18px, 3vw, 36px) 56px;
+}

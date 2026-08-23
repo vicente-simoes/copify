@@ -1,11 +1,11 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, safeStorage } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, monitorEventSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, shippingIpc, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type ApiResult, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  type ApiResult, type AppInfo, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -29,9 +29,26 @@ function emitTargetsChanged(): void { void profiles.listTargets().then((targets)
 function emitShippingChanged(): void { void profiles.listShippingProfiles().then((shipping) => mainWindow?.webContents.send(shippingIpc.changed, shipping)); }
 
 async function createWindow(): Promise<void> {
-  mainWindow = new BrowserWindow({ width: 1240, height: 860, minWidth: 960, minHeight: 650, icon: windowIconPath(), webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  mainWindow = new BrowserWindow({
+    width: 1240, height: 860, minWidth: 960, minHeight: 650, icon: windowIconPath(), show: false, backgroundColor: CHROME_BACKGROUND,
+    titleBarStyle: "hidden", titleBarOverlay: { color: CHROME_BACKGROUND, symbolColor: CHROME_SYMBOL, height: TITLEBAR_HEIGHT },
+    webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false }
+  });
+  mainWindow.once("ready-to-show", () => mainWindow?.show());
   if (process.env.ELECTRON_RENDERER_URL) await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL); else await mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
+// Copify draws its own titlebar; these keep the OS-drawn window controls in the app palette.
+const CHROME_BACKGROUND = "#0B0B0C";
+const CHROME_SYMBOL = "#8A8A93";
+const TITLEBAR_HEIGHT = 40;
+
+// Windows and Linux get no menu at all. Chromium still handles clipboard shortcuts inside
+// inputs there, but macOS needs the roles to exist for them to work, so keep a minimal one.
+function applyApplicationMenu(): void {
+  if (process.platform !== "darwin") { Menu.setApplicationMenu(null); return; }
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]));
+}
+
 function windowIconPath(): string { return app.isPackaged ? join(process.resourcesPath, "copify.ico") : resolve(__dirname, "../../resources/icons/copify.ico"); }
 
 function registerIpc(): void {
@@ -43,10 +60,10 @@ function registerIpc(): void {
   ipcMain.handle(profileIpc.remove, async (_event, id: string): Promise<ApiResult<boolean>> => { if (activeRun?.profileSessions.has(id)) return { ok: false, error: "End the active run before removing a selected browser profile." }; await orchestrator.close(id); return resultAsync(() => profiles.remove(id)); });
 
   ipcMain.handle(targetIpc.list, (): Promise<ApiResult<Target[]>> => resultAsync(() => profiles.listTargets()));
-  ipcMain.handle(targetIpc.create, (_event, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { const created = await profiles.createTarget(createTargetSchema.parse(input)); emitTargetsChanged(); return created; }));
-  ipcMain.handle(targetIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { assertTargetInactive(id); const updated = await profiles.updateTarget(id, updateTargetSchema.parse(input)); emitTargetsChanged(); return updated; }));
+  ipcMain.handle(targetIpc.create, (_event, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { const parsed = createTargetSchema.parse(input); assertKnownStore(parsed.storeId); const created = await profiles.createTarget(parsed); emitTargetsChanged(); return created; }));
+  ipcMain.handle(targetIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { assertTargetInactive(id); const parsed = updateTargetSchema.parse(input); assertKnownStore(parsed.storeId); const updated = await profiles.updateTarget(id, parsed); emitTargetsChanged(); return updated; }));
   ipcMain.handle(targetIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertTargetInactive(id); const removed = await profiles.removeTarget(id); emitTargetsChanged(); return removed; }));
-  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (target.storeId !== "supreme-eu") throw new Error("General targets are saved for future store adapters and cannot be tested yet."); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
+  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (!isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet."); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
 
   ipcMain.handle(shippingIpc.list, (): Promise<ApiResult<ShippingProfile[]>> => resultAsync(() => profiles.listShippingProfiles()));
   ipcMain.handle(shippingIpc.create, (_event, input: unknown): Promise<ApiResult<ShippingProfile>> => resultAsync(async () => { const parsed = createShippingProfileSchema.parse(input); const created = await profiles.createShippingProfile(parsed, await encryptSecret(JSON.stringify(parsed.details))); emitShippingChanged(); return created; }));
@@ -59,6 +76,11 @@ function registerIpc(): void {
   ipcMain.handle(proxyIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { await assertProxyInactive(id); return profiles.removeProxy(id); }));
   ipcMain.handle(proxyIpc.benchmarks, (_event, proxyId: string | null): Promise<ApiResult<ProxyBenchmark[]>> => resultAsync(() => profiles.listBenchmarks(proxyId, 10)));
   ipcMain.handle(proxyIpc.test, (_event, proxyId: string | null): Promise<ApiResult<ProxyBenchmark>> => resultAsync(async () => { if (benchmarkRunning) throw new Error("A network benchmark is already running."); benchmarkRunning = true; try { const proxy = proxyId ? await resolveProxy(proxyId, true) : null; return profiles.addBenchmark(await benchmarkRoute(proxy, await profiles.getNetworkProbeUrl())); } finally { benchmarkRunning = false; } }));
+
+  ipcMain.handle(storeIpc.list, (): Promise<ApiResult<Store[]>> => resultAsync(() => listStores()));
+  ipcMain.handle(storeIpc.update, (_event, id: string, enabled: boolean): Promise<ApiResult<Store[]>> => resultAsync(async () => { if (!isKnownStore(id)) throw new Error("Unknown store."); await profiles.setStoreEnabled(id, Boolean(enabled)); const stores = await listStores(); mainWindow?.webContents.send(storeIpc.changed, stores); return stores; }));
+
+  ipcMain.handle(settingsIpc.appInfo, (): ApiResult<AppInfo> => result(() => ({ version: app.getVersion(), electronVersion: process.versions.electron ?? "unknown", chromeVersion: process.versions.chrome ?? null, osVersion: `${process.platform} ${process.getSystemVersion?.() ?? ""}`.trim() })));
 
   ipcMain.handle(settingsIpc.getNetworkProbe, (): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => ({ probeUrl: await profiles.getNetworkProbeUrl() })));
   ipcMain.handle(settingsIpc.updateNetworkProbe, (_event, input: unknown): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => { const { probeUrl } = networkProbeSettingsSchema.parse(input); return { probeUrl: await profiles.setNetworkProbeUrl(probeUrl) }; }));
@@ -88,7 +110,8 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   if (selected.some((profile) => !profile.enabled)) throw new Error("Only enabled browser profiles may be selected.");
   if (selected.some((profile) => orchestrator.isActive(profile.id))) throw new Error("Selected profiles must be closed before starting a run.");
   const target = input.targetId ? await requireTarget(input.targetId) : null;
-  if (target && !target.enabled) throw new Error("Select an enabled target for monitoring."); if (target && target.storeId !== "supreme-eu") throw new Error("General targets cannot be attached to a run until their store adapter is available.");
+  if (target && !target.enabled) throw new Error("Select an enabled target for monitoring."); if (target && !isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet.");
+  if (input.executionMode === "ASSISTED_CHECKOUT" && target && !supportsAssistedCheckout(target.storeId)) throw new Error("This store does not support assisted checkout.");
   const targetSnapshot = target ? snapshotTarget(target) : null;
   const specifications = await Promise.all(selected.map(async (profile) => ({ profile, proxy: profile.proxyProfileId ? await resolveProxy(profile.proxyProfileId) : null, shipping: profile.shippingProfileId ? await profiles.getShippingProfile(profile.shippingProfileId) : undefined })));
   const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, assistedEligible: input.executionMode === "ASSISTED_CHECKOUT" && Boolean(shipping?.enabled && shipping?.complete), executionState: input.executionMode === "ASSISTED_CHECKOUT" && shipping?.enabled && shipping.complete ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, status: "STARTING", startedAt, endedAt: null, finalError: null }));
@@ -123,6 +146,8 @@ async function removeRun(id: string): Promise<boolean> {
 async function openSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.open(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
 async function restartSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.restart(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
 async function requireProfile(id: string): Promise<BrowserProfile> { const profile = await profiles.get(id); if (!profile) throw new Error("Browser profile not found."); return profile; }
+async function listStores(): Promise<Store[]> { const settings = await profiles.listStoreSettings(); return listStoreManifests().map((manifest) => ({ ...manifest, enabled: settings[manifest.id] ?? true })); }
+function assertKnownStore(storeId: string | undefined): void { if (storeId !== undefined && !isKnownStore(storeId)) throw new Error("Unknown store."); }
 async function requireTarget(id: string): Promise<Target> { const target = await profiles.getTarget(id); if (!target) throw new Error("Target not found."); return target; }
 function assertTargetInactive(id: string): void { if (activeRun?.detail.run.targetSnapshot?.targetId === id) throw new Error("End the active run before changing its target."); }
 function assertShippingInactive(id: string): void { if ([...(activeRun?.profileSessions.values() ?? [])].some((session) => session.shippingProfile.shippingProfileId === id)) throw new Error("End the active run before changing its captured shipping profile."); }
@@ -199,7 +224,7 @@ async function resumeRunSession(profileId: string): Promise<boolean> {
 
 app.whenReady().then(async () => {
   const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
-  orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); await createWindow();
+  orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
 app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });
