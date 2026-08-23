@@ -7,29 +7,30 @@ import type {
   ProxyBenchmark,
   ProxyProfile,
   RunDetail,
-  RunSession,
   SessionSnapshot,
   ShippingProfile,
+  Store,
   Target,
 } from "@copify/shared";
-import { STORE_GENERAL, getStoreManifest, isMonitorable, listStoreManifests, type StoreManifest } from "@copify/shared";
 import { Sidebar, allNavigation, type Workspace } from "./ui/Sidebar";
 import { TitleBar } from "./ui/TitleBar";
 import "./styles/index.css";
 
 import { blankProxy, blankShipping, blankTarget, fromMinor, list, toMinor, type ProxyDraft, type ShippingDraft, type TargetDraft } from "./types";
-import { Overview } from "./pages/Overview";
-import { Runs } from "./pages/Runs";
+import { Run } from "./pages/Run";
+import { RunInspector } from "./pages/RunInspector";
 import { Targets } from "./pages/Targets";
-import { Profiles, LaunchModes } from "./pages/Profiles";
+import { Browsers } from "./pages/Browsers";
 import { Shipping } from "./pages/Shipping";
-import { Network } from "./pages/Network";
+import { Settings } from "./pages/Settings";
 
 type Notice = { kind: "error" | "info"; message: string } | null;
 
 function App() {
-  const [workspace, setWorkspace] = useState<Workspace>("overview");
+  const [workspace, setWorkspace] = useState<Workspace>("run");
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
+  const [appVersion, setAppVersion] = useState("");
   const [proxies, setProxies] = useState<ProxyProfile[]>([]);
   const [sessions, setSessions] = useState<Record<string, SessionSnapshot>>({});
   const [cartStatuses, setCartStatuses] = useState<Record<string, CartStatus>>({});
@@ -79,6 +80,7 @@ function App() {
       targetResult,
       shippingResult,
       cartResult,
+      storeResult,
     ] = await Promise.all([
       window.copify.profiles.list(),
       window.copify.proxies.list(),
@@ -88,6 +90,7 @@ function App() {
       window.copify.targets.list(),
       window.copify.shipping.list(),
       window.copify.sessions.carts(),
+      window.copify.stores.list(),
     ]);
     if (!profileResult.ok) {
       setNotice({ kind: "error", message: profileResult.error });
@@ -101,6 +104,7 @@ function App() {
     setProxies(proxyResult.value);
     if (targetResult.ok) setTargets(targetResult.value);
     if (shippingResult.ok) setShippingProfiles(shippingResult.value);
+    if (storeResult.ok) setStores(storeResult.value);
     if (cartResult.ok) setCartStatuses(Object.fromEntries(cartResult.value.map((item) => [item.profileId, item])));
     if (sessionResult.ok)
       setSessions(
@@ -126,6 +130,7 @@ function App() {
   };
   useEffect(() => {
     void reload();
+    void window.copify.settings.appInfo().then((result) => { if (result.ok) setAppVersion(result.value.version); });
     const offSessions = window.copify.sessions.onChanged((snapshot) =>
       setSessions((current) => ({
         ...current,
@@ -214,7 +219,7 @@ function App() {
     setEditingProxyId(null);
   };
   const editProxy = (proxy: ProxyProfile) => {
-    setWorkspace("profiles");
+    setWorkspace("settings");
     setEditingProxyId(proxy.id);
     setProxyDraft({
       name: proxy.name,
@@ -365,7 +370,7 @@ function App() {
     const response = await window.copify.runs.get(id);
     if (response.ok) {
       setSelectedRun(response.value);
-      setWorkspace("runs");
+      setWorkspace("run");
     } else setNotice({ kind: "error", message: response.error });
   };
   const page = allNavigation.find((item) => item.id === workspace) ?? allNavigation[0];
@@ -398,81 +403,136 @@ function App() {
       <main className="workspace">
         <div className="workspace-inner page-stack">
         {notice && <p className={`notice ${notice.kind}`}>{notice.message}</p>}
-        {workspace === "overview" && (
-          <Overview
-            activeCount={activeCount}
-            readyCount={readyCount}
-            targets={targets}
-            benchmark={latest("direct")}
-            activeRun={Boolean(activeRunId)}
-            navigate={setWorkspace}
+        {workspace === "run" && (
+          selectedRun && !activeRunId ? (
+            <RunInspector
+              detail={selectedRun}
+              onDelete={() => {
+                if (window.confirm(`Delete "${selectedRun.run.name}" and its local artifacts?`))
+                  void execute(async () => {
+                    const response = await window.copify.runs.remove(selectedRun.run.id);
+                    if (response.ok) setSelectedRun(null);
+                    return response;
+                  }, "Run deleted.");
+              }}
+            />
+          ) : (
+            <Run
+              profiles={profiles}
+              targets={targets}
+              proxies={proxies}
+              shipping={shippingProfiles}
+              latest={latest}
+              getSession={session}
+              runs={runs}
+              activeRun={Boolean(activeRunId)}
+              selected={selectedRun}
+              name={runName}
+              level={runLevel}
+              mode={runMode}
+              selectedProfiles={runProfiles}
+              targetId={runTargetId}
+              acknowledged={deepDebugAcknowledged}
+              assistedAcknowledged={assistedAcknowledged}
+              busy={busy}
+              onName={setRunName}
+              onLevel={(value) => { setRunLevel(value); setDeepDebugAcknowledged(false); }}
+              onMode={(value) => { setRunMode(value); setAssistedAcknowledged(false); }}
+              onTarget={setRunTargetId}
+              onToggle={(id) =>
+                setRunProfiles((current) =>
+                  current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+                )
+              }
+              onAck={setDeepDebugAcknowledged}
+              onAssistedAck={setAssistedAcknowledged}
+              onStart={() => void beginRun()}
+              onEnd={() =>
+                void execute(async () => {
+                  const response = await window.copify.runs.end();
+                  if (response.ok) setSelectedRun(response.value);
+                  return response;
+                }, "Run ended. Browsers stay open.")
+              }
+              onResume={(profileId) =>
+                void execute(() => window.copify.runs.resume(profileId), "Checkpoint resumed.")
+              }
+              onShow={(id) => void showRun(id)}
+            />
+          )
+        )}
+        {workspace === "browsers" && (
+          <Browsers
+            profiles={profiles}
+            proxies={proxies}
+            sessions={sessions}
+            cartStatuses={cartStatuses}
+            profileName={profileName}
+            busy={busy}
+            setProfileName={setProfileName}
+            onCreate={() =>
+              void execute(async () => {
+                const response = await window.copify.profiles.create({ name: profileName });
+                if (response.ok) setProfileName("");
+                return response;
+              }, "Browser added.")
+            }
+            onProfile={(id, action) => void execute(() => action(id))}
+            onUpdate={(id, input, success) =>
+              void execute(() => window.copify.profiles.update(id, input), success)
+            }
+            onRemoveProfile={(profile) => {
+              if (window.confirm(`Remove "${profile.name}"? Its Chrome data stays on disk.`))
+                void execute(() => window.copify.profiles.remove(profile.id));
+            }}
+            onCheckCart={(id) => void execute(() => window.copify.sessions.checkCart(id))}
+            onEmptyCart={(id) => {
+              if (window.confirm("Remove every item from this cart?"))
+                void execute(() => window.copify.sessions.emptyCart(id), "Cart emptied.");
+            }}
           />
         )}
-        {workspace === "runs" && (
-          <Runs
-            profiles={profiles}
-            targets={targets}
-            getSession={session}
-            runs={runs}
-            activeRun={Boolean(activeRunId)}
-            selected={selectedRun}
-            name={runName}
-            level={runLevel}
-            mode={runMode}
-            selectedProfiles={runProfiles}
-            targetId={runTargetId}
-            acknowledged={deepDebugAcknowledged}
-            assistedAcknowledged={assistedAcknowledged}
+        {workspace === "settings" && (
+          <Settings
+            proxies={proxies}
+            benchmarks={benchmarks}
+            latest={latest}
+            draft={proxyDraft}
+            editingProxyId={editingProxyId}
             busy={busy}
-            onName={setRunName}
-            onLevel={(value) => {
-              setRunLevel(value);
-              setDeepDebugAcknowledged(false);
-            }}
-            onMode={(value) => {
-              setRunMode(value);
-              setAssistedAcknowledged(false);
-            }}
-            onTarget={setRunTargetId}
-            onToggle={(id) =>
-              setRunProfiles((current) =>
-                current.includes(id)
-                  ? current.filter((item) => item !== id)
-                  : [...current, id],
-              )
-            }
-            onAck={setDeepDebugAcknowledged}
-            onAssistedAck={setAssistedAcknowledged}
-            onStart={() => void beginRun()}
-            onEnd={() =>
-              void execute(async () => {
-                const response = await window.copify.runs.end();
-                if (response.ok) setSelectedRun(response.value);
-                return response;
-              }, "Run completed. Chrome sessions remain open.")
-            }
-            onResume={(profileId) =>
+            testing={testing}
+            probeUrl={probeUrl}
+            stores={stores}
+            profiles={profiles}
+            sessions={sessions}
+            appVersion={appVersion}
+            setProbeUrl={setProbeUrl}
+            onTestRoute={(id) => void testRoute(id)}
+            onSaveProbe={(event) => {
+              event.preventDefault();
               void execute(
-                () => window.copify.runs.resume(profileId),
-                "Checkpoint resumed.",
-              )
-            }
-            onShow={(id) => void showRun(id)}
-            onDelete={() => {
-              if (
-                selectedRun &&
-                window.confirm(
-                  `Delete “${selectedRun.run.name}” and its local artifacts?`,
-                )
-              )
-                void execute(async () => {
-                  const response = await window.copify.runs.remove(
-                    selectedRun.run.id,
-                  );
-                  if (response.ok) setSelectedRun(null);
-                  return response;
-                }, "Run deleted.");
+                () => window.copify.settings.updateNetworkProbe({ probeUrl }),
+                "Probe endpoint saved.",
+              );
             }}
+            onEditProxy={editProxy}
+            onClearCredential={clearCredential}
+            onToggleProxy={(proxy) =>
+              void execute(() => window.copify.proxies.update(proxy.id, { enabled: !proxy.enabled }))
+            }
+            onRemoveProxy={(proxy) => {
+              if (window.confirm(`Remove "${proxy.name}"? Browsers using it return to direct.`))
+                void execute(() => window.copify.proxies.remove(proxy.id));
+            }}
+            setDraft={setProxyDraft}
+            onSaveProxy={(event) => void saveProxy(event)}
+            onCancelProxy={() => { setEditingProxyId(null); setProxyDraft(blankProxy()); }}
+            onToggleStore={(id, enabled) =>
+              void execute(() => window.copify.stores.update(id, enabled))
+            }
+            onLaunchMode={(id, launchMode) =>
+              void execute(() => window.copify.profiles.update(id, { launchMode }), "Launch method updated.")
+            }
           />
         )}
         {workspace === "targets" && (
@@ -505,74 +565,6 @@ function App() {
                 )
               )
                 void execute(() => window.copify.targets.remove(target.id));
-            }}
-          />
-        )}
-        {workspace === "profiles" && (
-          <Profiles
-            profiles={profiles}
-            proxies={proxies}
-            sessions={sessions}
-            cartStatuses={cartStatuses}
-            benchmarks={benchmarks}
-            latest={latest}
-            profileName={profileName}
-            draft={proxyDraft}
-            editingId={editingProxyId}
-            busy={busy}
-            testing={testing}
-            setProfileName={setProfileName}
-            onCreate={() =>
-              void execute(async () => {
-                const response = await window.copify.profiles.create({
-                  name: profileName,
-                });
-                if (response.ok) setProfileName("");
-                return response;
-              }, "Browser profile created.")
-            }
-            onProfile={(id, action) => void execute(() => action(id))}
-            onUpdate={(id, input, success) =>
-              void execute(
-                () => window.copify.profiles.update(id, input),
-                success,
-              )
-            }
-            onRemoveProfile={(profile) => {
-              if (
-                window.confirm(
-                  `Remove “${profile.name}” from Copify? Its Chrome data will stay on disk.`,
-                )
-              )
-                void execute(() => window.copify.profiles.remove(profile.id));
-            }}
-            onTest={(id) => void testRoute(id)}
-            onCheckCart={(id) => void execute(() => window.copify.sessions.checkCart(id))}
-            onEmptyCart={(id) => {
-              if (window.confirm("Remove every item from this profile’s Supreme cart? This cannot be undone.")) void execute(() => window.copify.sessions.emptyCart(id), "Cart emptied.");
-            }}
-            onEdit={editProxy}
-            onClear={clearCredential}
-            onToggleProxy={(proxy) =>
-              void execute(() =>
-                window.copify.proxies.update(proxy.id, {
-                  enabled: !proxy.enabled,
-                }),
-              )
-            }
-            onRemoveProxy={(proxy) => {
-              if (
-                window.confirm(
-                  `Remove “${proxy.name}”? Assigned inactive profiles will return to direct networking.`,
-                )
-              )
-                void execute(() => window.copify.proxies.remove(proxy.id));
-            }}
-            setDraft={setProxyDraft}
-            onSave={(event) => void saveProxy(event)}
-            onCancel={() => {
-              setEditingProxyId(null);
-              setProxyDraft(blankProxy());
             }}
           />
         )}
@@ -621,38 +613,6 @@ function App() {
                     shippingProfileId: shippingProfileId || null,
                   }),
                 "Shipping assignment updated.",
-              )
-            }
-          />
-        )}
-        {workspace === "network" && (
-          <Network
-            benchmark={latest("direct")}
-            history={benchmarks.direct ?? []}
-            probeUrl={probeUrl}
-            busy={busy}
-            testing={testing === "direct"}
-            setProbeUrl={setProbeUrl}
-            onTest={() => void testRoute(null)}
-            onSave={(event) => {
-              event.preventDefault();
-              void execute(
-                () => window.copify.settings.updateNetworkProbe({ probeUrl }),
-                "Network probe updated.",
-              );
-            }}
-          />
-        )}
-        {workspace === "profiles" && (
-          <LaunchModes
-            profiles={profiles}
-            proxies={proxies}
-            sessions={sessions}
-            busy={busy}
-            onUpdate={(id, launchMode) =>
-              void execute(
-                () => window.copify.profiles.update(id, { launchMode }),
-                "Browser launch method updated.",
               )
             }
           />

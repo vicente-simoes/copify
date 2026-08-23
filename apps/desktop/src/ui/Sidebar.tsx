@@ -1,25 +1,18 @@
-import { NetworkIcon, RunsIcon, SessionsIcon, SettingsIcon, ShippingIcon, TargetsIcon } from "./icons";
+import { RunsIcon, SessionsIcon, SettingsIcon, ShippingIcon, TargetsIcon } from "./icons";
 
-export type Workspace =
-  | "overview"
-  | "runs"
-  | "targets"
-  | "profiles"
-  | "shipping"
-  | "network";
+export type Workspace = "run" | "browsers" | "targets" | "shipping" | "settings";
 
 type NavEntry = { id: Workspace; label: string; Icon: (props: { className?: string }) => React.JSX.Element };
 
-// Labels carry the whole meaning; the pre-redesign captions repeated them.
+// Ordered by the drop workflow: you run from the top item and prepare below it.
 export const navigation: NavEntry[] = [
-  { id: "overview", label: "Overview", Icon: SessionsIcon },
-  { id: "profiles", label: "Profiles", Icon: SessionsIcon },
+  { id: "run", label: "Run", Icon: RunsIcon },
+  { id: "browsers", label: "Browsers", Icon: SessionsIcon },
   { id: "targets", label: "Targets", Icon: TargetsIcon },
   { id: "shipping", label: "Shipping", Icon: ShippingIcon },
-  { id: "runs", label: "Runs", Icon: RunsIcon },
 ];
 
-const footerNavigation: NavEntry[] = [{ id: "network", label: "Network", Icon: NetworkIcon }];
+const footerNavigation: NavEntry[] = [{ id: "settings", label: "Settings", Icon: SettingsIcon }];
 
 // Lookup must span both groups, or a footer section resolves to no page.
 export const allNavigation: NavEntry[] = [...navigation, ...footerNavigation];
@@ -53,5 +46,3 @@ export function Sidebar({
     </aside>
   );
 }
-
-export { SettingsIcon };
