@@ -1,0 +1,91 @@
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, p { margin: 0; }
+h2 { font-size: var(--text-md); font-weight: 600; letter-spacing: -0.01em; }
+h3 { font-size: var(--text-base); font-weight: 600; }
+h4 { font-size: var(--text-base); font-weight: 600; }
+
+a { color: var(--fg); text-decoration-color: var(--border-strong); text-underline-offset: 2px; }
+a:hover { text-decoration-color: var(--fg-muted); }
+
+/* Anything that is a machine value reads as one. */
+.mono, .tabular { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.muted { color: var(--fg-muted); }
+.dim { color: var(--fg-dim); }
+
+/* ---- controls ---- */
+
+button, input, select, textarea { font: inherit; color: inherit; }
+
+button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 30px; padding: 0 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface-raised); color: var(--fg);
+  font-size: var(--text-base); font-weight: 500; white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--speed) ease, border-color var(--speed) ease, color var(--speed) ease;
+}
+button:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--fg-dim); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Exactly one of these per screen. */
+button.primary {
+  background: var(--primary-bg); color: var(--primary-fg); border-color: var(--primary-bg); font-weight: 600;
+}
+button.primary:hover:not(:disabled) { background: var(--primary-bg-hover); border-color: var(--primary-bg-hover); }
+
+button.ghost, button.text {
+  height: 28px; padding: 0 8px;
+  background: transparent; border-color: transparent; color: var(--fg-muted);
+}
+button.ghost:hover:not(:disabled), button.text:hover:not(:disabled) { background: var(--surface-hover); color: var(--fg); border-color: transparent; }
+
+button.danger { background: transparent; border-color: transparent; color: var(--danger); }
+button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: transparent; color: var(--danger); }
+
+/* Legacy alias from the pre-redesign markup; folded into the default button. */
+button.secondary { background: var(--surface-raised); }
+
+input, select, textarea {
+  width: 100%; min-width: 0; height: 30px; padding: 0 9px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg);
+  transition: border-color var(--speed) ease;
+}
+input::placeholder { color: var(--fg-dim); }
+input:hover, select:hover { border-color: var(--fg-dim); }
+
+/* Focus is near-white so the accent stays reserved for state. */
+:focus-visible { outline: 2px solid var(--primary-bg); outline-offset: 1px; }
+input:focus, select:focus, textarea:focus { border-color: var(--primary-bg); outline: none; }
+
+input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary-bg); }
+
+select {
+  appearance: none;
+  padding-right: 26px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg-muted) 50%), linear-gradient(135deg, var(--fg-muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 6px; background: var(--border-strong); background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); background-clip: content-box; }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, safeStorage } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -29,9 +29,26 @@ function emitTargetsChanged(): void { void profiles.listTargets().then((targets)
 function emitShippingChanged(): void { void profiles.listShippingProfiles().then((shipping) => mainWindow?.webContents.send(shippingIpc.changed, shipping)); }
 
 async function createWindow(): Promise<void> {
-  mainWindow = new BrowserWindow({ width: 1240, height: 860, minWidth: 960, minHeight: 650, icon: windowIconPath(), webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  mainWindow = new BrowserWindow({
+    width: 1240, height: 860, minWidth: 960, minHeight: 650, icon: windowIconPath(), show: false, backgroundColor: CHROME_BACKGROUND,
+    titleBarStyle: "hidden", titleBarOverlay: { color: CHROME_BACKGROUND, symbolColor: CHROME_SYMBOL, height: TITLEBAR_HEIGHT },
+    webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false }
+  });
+  mainWindow.once("ready-to-show", () => mainWindow?.show());
   if (process.env.ELECTRON_RENDERER_URL) await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL); else await mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
+// Copify draws its own titlebar; these keep the OS-drawn window controls in the app palette.
+const CHROME_BACKGROUND = "#0B0B0C";
+const CHROME_SYMBOL = "#8A8A93";
+const TITLEBAR_HEIGHT = 40;
+
+// Windows and Linux get no menu at all. Chromium still handles clipboard shortcuts inside
+// inputs there, but macOS needs the roles to exist for them to work, so keep a minimal one.
+function applyApplicationMenu(): void {
+  if (process.platform !== "darwin") { Menu.setApplicationMenu(null); return; }
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]));
+}
+
 function windowIconPath(): string { return app.isPackaged ? join(process.resourcesPath, "copify.ico") : resolve(__dirname, "../../resources/icons/copify.ico"); }
 
 function registerIpc(): void {
@@ -205,7 +222,7 @@ async function resumeRunSession(profileId: string): Promise<boolean> {
 
 app.whenReady().then(async () => {
   const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
-  orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); await createWindow();
+  orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
 app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });

@@ -1,0 +1,43 @@
+/* Copify design tokens.
+   Chrome (titlebar + sidebar) and the content well are deliberately different
+   surfaces; everything else is a hairline on top of one of them. */
+:root {
+  --bg: #0b0b0c;
+  --surface: #111113;
+  --surface-raised: #171719;
+  --surface-hover: #1c1c1f;
+  --border: #232326;
+  --border-strong: #2e2e33;
+
+  --fg: #e8e8ea;
+  --fg-muted: #93939c;
+  --fg-dim: #5e5e66;
+
+  /* One primary. Near-white, so colour is never spent on "this is a button". */
+  --primary-bg: #f2f2f3;
+  --primary-fg: #0b0b0c;
+  --primary-bg-hover: #ffffff;
+
+  /* Semantic only. Never decoration. */
+  --accent: #3ecf8e;
+  --warn: #e3b341;
+  --danger: #f0656b;
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-lg: 17px;
+  --text-md: 15px;
+  --text-base: 13px;
+  --text-sm: 12px;
+  --text-xs: 11px;
+
+  --radius: 6px;
+  --radius-lg: 8px;
+
+  --titlebar-height: 40px;
+  --sidebar-width: 220px;
+  --row-height: 44px;
+
+  --speed: 120ms;
+}
