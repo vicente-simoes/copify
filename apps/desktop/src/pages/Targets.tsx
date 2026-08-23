@@ -1,15 +1,63 @@
-import { getStoreManifest, isMonitorable, listStoreManifests, type Target, type StoreManifest } from "@copify/shared";
+import { getStoreManifest, isMonitorable, type StoreManifest, type Store, type Target } from "@copify/shared";
 import { list, fromMinor, type TargetDraft } from "../types";
 import { Field } from "../ui/primitives";
+import { Menu, type MenuEntry } from "../ui/Menu";
+import { Drawer } from "../ui/Drawer";
+import { StoreMark } from "../ui/StoreMark";
+
+const FREEFORM: StoreManifest["variants"]["sizes"] = { kind: "freeform" };
+
+function DetectionSummary({ check }: { check: NonNullable<Target["latestCheck"]> }) {
+  const candidate = check.decision.candidate;
+  const when = new Date(check.checkedAt).toLocaleString();
+
+  if (!candidate) {
+    return (
+      <p className={check.status === "ERROR" ? "error-detail" : "muted"}>
+        {when} · {check.decision.message === "NO_ADAPTER" ? "No adapter for this store yet." : check.decision.message}
+      </p>
+    );
+  }
+
+  const selected = check.decision.selectedVariant;
+  const available = [...new Set(candidate.variants.filter((variant) => variant.available).map((variant) => variant.size))];
+  const imageUrl = candidate.imageUrl?.startsWith("https://") ? candidate.imageUrl : null;
+
+  return (
+    <section className={`detected-product${imageUrl ? "" : " no-image"}`} aria-label="Latest detection">
+      {imageUrl && <img className="detected-product-image" src={imageUrl} alt="" />}
+      <div className="detected-product-copy">
+        <div className="detected-product-header">
+          <h4>{candidate.name}</h4>
+          <span className={`state ${check.status === "ERROR" ? "error" : "ready"}`}>{check.decision.kind}</span>
+        </div>
+        <p className={check.status === "ERROR" ? "error-detail" : "muted"}>{when} · {check.decision.message}</p>
+        <div className="detected-product-meta">
+          <span>
+            {candidate.priceMinor !== null && candidate.currency
+              ? `${candidate.currency} ${fromMinor(candidate.priceMinor)}`
+              : "No price"}
+          </span>
+          {selected && <span>Picked {selected.color} · {selected.size}</span>}
+          <span>{available.length ? available.join(", ") : "No sizes available"}</span>
+        </div>
+        <a href={candidate.url} target="_blank" rel="noreferrer">Open product</a>
+      </div>
+    </section>
+  );
+}
 
 export function Targets({
   targets,
+  stores,
   draft,
   editingId,
+  drawerOpen,
   activeRun,
   busy,
   testing,
   setDraft,
+  onNew,
   onSave,
   onEdit,
   onCancel,
@@ -18,12 +66,15 @@ export function Targets({
   onRemove,
 }: {
   targets: Target[];
+  stores: Store[];
   draft: TargetDraft;
   editingId: string | null;
+  drawerOpen: boolean;
   activeRun: boolean;
   busy: boolean;
   testing: string | null;
   setDraft: (value: TargetDraft) => void;
+  onNew: () => void;
   onSave: (event: React.FormEvent) => void;
   onEdit: (target: Target) => void;
   onCancel: () => void;
@@ -31,256 +82,193 @@ export function Targets({
   onToggle: (target: Target) => void;
   onRemove: (target: Target) => void;
 }) {
-  const draftManifest = getStoreManifest(draft.storeId);
-  const draftSizes: StoreManifest["variants"]["sizes"] = draftManifest?.variants.sizes ?? { kind: "freeform" };
+  const manifest = getStoreManifest(draft.storeId);
+  const sizes = manifest?.variants.sizes ?? FREEFORM;
+  const selectableStores = stores.filter((store) => store.enabled);
+
   return (
     <div className="page-stack">
-      <section className="page-intro">
-        <div>
-          <h2>Product targets</h2>
-          <p>
-            General targets are saved as future-ready templates. Supreme EU
-            targets use the direct shared monitor and never open product pages
-            in browser profiles or take cart and checkout actions.
-          </p>
-        </div>
-        <span>Supreme EU polls every 15 seconds during target-bound runs</span>
-      </section>
-      <section className="profiles">
-        {targets.length === 0 && (
-          <div className="empty">
-            Create a General template or a monitorable Supreme EU target.
-          </div>
-        )}
-        {targets.map((target) => {
-          const monitorable = isMonitorable(target.storeId);
-          return <article key={target.id} className="profile-card target-card">
-            <div className="profile-title">
-              <div>
-                <h3>{target.name}</h3>
-                <p>
-                  {monitorable ? "Supreme EU" : "General template"} · {target.enabled ? "Enabled" : "Disabled"} · {target.currency}{" "}
-                  {fromMinor(target.maxRetailMinor)} max · {target.quantity}{" "}
-                  item{target.quantity === 1 ? "" : "s"}
-                </p>
-              </div>
-              <span
-                className={`state ${!monitorable ? "warn" : target.latestCheck?.status === "ERROR" ? "error" : "ready"}`}
-              >
-                {monitorable ? target.latestCheck?.decision.kind ?? "UNTESTED" : "TEMPLATE"}
-              </span>
-            </div>
-            <p className="muted">
-              Match: {target.productKeywords.join(" · ")}
-              {target.negativeKeywords.length
-                ? ` · exclude ${target.negativeKeywords.join(" · ")}`
-                : ""}
-            </p>
-            {target.latestCheck && <DetectionSummary check={target.latestCheck} />}
-            <div className="actions">
-              <button
-                disabled={busy || testing !== null || activeRun || !monitorable}
-                onClick={() => onTest(target.id)}
-              >
-                {monitorable ? testing === target.id ? "Testing…" : "Test target" : "Adapter pending"}
-              </button>
-              <button
-                className="secondary"
-                disabled={busy || activeRun}
-                onClick={() => onEdit(target)}
-              >
-                Edit
-              </button>
-              <button
-                className="text"
-                disabled={busy || activeRun}
-                onClick={() => onToggle(target)}
-              >
-                {target.enabled ? "Disable" : "Enable"}
-              </button>
-              <button
-                className="danger"
-                disabled={busy || activeRun}
-                onClick={() => onRemove(target)}
-              >
-                Remove
-              </button>
-            </div>
-          </article>;
-        })}
-      </section>
-      <form className="form-card target-form" onSubmit={onSave}>
+      <section className="panel">
         <div className="section-title">
           <div>
-            <h2>{editingId ? "Edit target" : "Add target"}</h2>
+            <h2>Targets</h2>
+            <p className="muted">What Copify watches for, and which variants it will accept.</p>
           </div>
-          {editingId && (
-            <button type="button" className="text" onClick={onCancel}>
-              Cancel edit
-            </button>
-          )}
+          <button className="primary" disabled={busy || activeRun} onClick={onNew}>New target</button>
         </div>
-        <Field label="Target preset">
-          <select
-            value={draft.storeId}
-            onChange={(event) => {
-              const storeId = event.target.value;
-              setDraft({ ...draft, storeId, currency: getStoreManifest(storeId)?.currency ?? draft.currency });
-            }}
-          >
-            {listStoreManifests().map((manifest) => (
-              <option key={manifest.id} value={manifest.id}>{manifest.name}</option>
-            ))}
-          </select>
-        </Field>
-        {draftManifest && draftManifest.capabilities.monitor === null && (
-          <p className="preset-notice">No adapter yet — saved as a template.</p>
-        )}
-        <Field label="Target name">
-          <input
-            required
-            value={draft.name}
-            onChange={(event) =>
-              setDraft({ ...draft, name: event.target.value })
-            }
-            placeholder="e.g. Leather jacket"
-          />
-        </Field>
-        <Field label="Positive keywords">
-          <input
-            required
-            value={draft.productKeywords}
-            onChange={(event) =>
-              setDraft({ ...draft, productKeywords: event.target.value })
-            }
-            placeholder="Comma-separated phrases"
-          />
-        </Field>
-        <Field label="Negative keywords">
-          <input
-            value={draft.negativeKeywords}
-            onChange={(event) =>
-              setDraft({ ...draft, negativeKeywords: event.target.value })
-            }
-            placeholder="Optional exclusions"
-          />
-        </Field>
-        <Field label="Color priority">
-          <input
-            value={draft.preferredColors}
-            onChange={(event) =>
-              setDraft({ ...draft, preferredColors: event.target.value })
-            }
-            placeholder="First choice first"
-          />
-        </Field>
-        {draftSizes.kind === "enum" ? (
-          <Field label="Size priority">
-            <div className="preset-size-picker">
-              <div className="preset-size-options">
-                {draftSizes.values.map((size) => {
-                  const selected = list(draft.sizePriority).includes(size);
-                  return <button key={size} className={`preset-size-option ${selected ? "selected" : ""}`} type="button" onClick={() => {
-                    const current = list(draft.sizePriority);
-                    setDraft({ ...draft, sizePriority: (selected ? current.filter((value) => value !== size) : [...current, size]).join(", ") });
-                  }}>{size}</button>;
-                })}
-              </div>
-              <input value={draft.sizePriority} onChange={(event) => setDraft({ ...draft, sizePriority: event.target.value })} placeholder="Choose above, or type an exact storefront size" />
-            </div>
-          </Field>
+
+        {targets.length === 0 ? (
+          <div className="empty">
+            No targets yet.
+            <button disabled={busy || activeRun} onClick={onNew}>New target</button>
+          </div>
         ) : (
-          <Field label="Size priority">
-            <input value={draft.sizePriority} onChange={(event) => setDraft({ ...draft, sizePriority: event.target.value })} placeholder="First choice first" />
-          </Field>
+          <div className="rows target-rows">
+            {targets.map((target) => {
+              const monitorable = isMonitorable(target.storeId);
+              const check = target.latestCheck;
+              const entries: MenuEntry[] = [
+                { kind: "item", label: "Edit", disabled: busy || activeRun, onSelect: () => onEdit(target) },
+                { kind: "item", label: target.enabled ? "Disable" : "Enable", disabled: busy || activeRun, onSelect: () => onToggle(target) },
+                { kind: "separator" },
+                { kind: "item", label: "Remove", danger: true, disabled: busy || activeRun, onSelect: () => onRemove(target) },
+              ];
+
+              return (
+                <div className="row target-row" key={target.id}>
+                  <StoreMark storeId={target.storeId} className="target-store" />
+
+                  <div className="row-main">
+                    <span className="row-name">
+                      {target.name}
+                      {!target.enabled && <span className="badge">off</span>}
+                      {!monitorable && <span className="badge">no adapter</span>}
+                    </span>
+                    <span className="row-meta">
+                      {target.productKeywords.join(", ")}
+                      {target.negativeKeywords.length ? ` · not ${target.negativeKeywords.join(", ")}` : ""}
+                    </span>
+                    {check && <DetectionSummary check={check} />}
+                  </div>
+
+                  <span className="row-cell mono">{target.currency} {fromMinor(target.maxRetailMinor)}</span>
+                  <span className={`state ${!monitorable ? "template" : check?.status === "ERROR" ? "error" : check ? "ready" : "untested"}`}>
+                    {!monitorable ? "TEMPLATE" : check?.decision.kind ?? "UNTESTED"}
+                  </span>
+
+                  <div className="row-actions">
+                    <button
+                      disabled={busy || testing !== null || activeRun || !monitorable}
+                      onClick={() => onTest(target.id)}
+                      title={monitorable ? undefined : "This store has no adapter yet."}
+                    >
+                      {testing === target.id ? "Testing…" : "Test"}
+                    </button>
+                    <Menu entries={entries} label={`Actions for ${target.name}`} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
-        <Field label="Currency">
-          <select
-            value={draft.currency}
-            disabled={Boolean(draftManifest)}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                currency: event.target.value as TargetDraft["currency"],
-              })
-            }
-          >
-            <option value="EUR">EUR (€)</option>
-            <option value="GBP">GBP (£)</option>
-            <option value="USD">USD ($)</option>
-          </select>
-        </Field>
-        <Field label="Maximum retail price">
-          <input
-            required
-            value={draft.maxRetailPrice}
-            onChange={(event) =>
-              setDraft({ ...draft, maxRetailPrice: event.target.value })
-            }
-            placeholder="e.g. 180.00"
-          />
-        </Field>
-        <Field label="Quantity">
-          <input
-            required
-            type="number"
-            min="1"
-            max="10"
-            value={draft.quantity}
-            onChange={(event) =>
-              setDraft({ ...draft, quantity: Number(event.target.value) })
-            }
-          />
-        </Field>
-        <label className="check form-check">
-          <input
-            type="checkbox"
-            checked={draft.enabled}
-            onChange={(event) =>
-              setDraft({ ...draft, enabled: event.target.checked })
-            }
-          />{" "}
-          Enabled
-        </label>
-        <button disabled={busy} type="submit">
-          {editingId ? "Save target" : "Add target"}
-        </button>
-      </form>
+      </section>
+
+      <Drawer
+        open={drawerOpen}
+        title={editingId ? "Edit target" : "New target"}
+        onClose={onCancel}
+        footer={
+          <>
+            <button className="primary" form="target-form" type="submit" disabled={busy}>
+              {editingId ? "Save" : "Add target"}
+            </button>
+            <button onClick={onCancel}>Cancel</button>
+          </>
+        }
+      >
+        <form id="target-form" className="drawer-form" onSubmit={onSave}>
+          <Field label="Store">
+            <select
+              value={draft.storeId}
+              onChange={(event) => {
+                const storeId = event.target.value;
+                setDraft({ ...draft, storeId, currency: getStoreManifest(storeId)?.currency ?? draft.currency });
+              }}
+            >
+              {selectableStores.map((store) => (
+                <option key={store.id} value={store.id}>{store.name}</option>
+              ))}
+            </select>
+          </Field>
+
+          {manifest && manifest.capabilities.monitor === null && (
+            <p className="preset-notice">Saved as a template. Copify cannot watch this store yet.</p>
+          )}
+
+          <Field label="Name">
+            <input
+              required
+              value={draft.name}
+              onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+              placeholder="e.g. Box Logo Hoodie"
+            />
+          </Field>
+
+          <Field label="Must match">
+            <input
+              required
+              value={draft.productKeywords}
+              onChange={(event) => setDraft({ ...draft, productKeywords: event.target.value })}
+              placeholder="Comma-separated"
+            />
+          </Field>
+
+          <Field label="Must not match">
+            <input
+              value={draft.negativeKeywords}
+              onChange={(event) => setDraft({ ...draft, negativeKeywords: event.target.value })}
+              placeholder="Optional"
+            />
+          </Field>
+
+          <Field label="Colors, best first">
+            <input
+              value={draft.preferredColors}
+              onChange={(event) => setDraft({ ...draft, preferredColors: event.target.value })}
+              placeholder="Optional"
+            />
+          </Field>
+
+          {sizes.kind === "enum" ? (
+            <Field label="Sizes, best first">
+              <div className="preset-size-picker">
+                <div className="preset-size-options">
+                  {sizes.values.map((size) => {
+                    const chosen = list(draft.sizePriority).includes(size);
+                    return (
+                      <button
+                        key={size}
+                        type="button"
+                        className={`preset-size-option ${chosen ? "selected" : ""}`}
+                        onClick={() => {
+                          const current = list(draft.sizePriority);
+                          const next = chosen ? current.filter((value) => value !== size) : [...current, size];
+                          setDraft({ ...draft, sizePriority: next.join(", ") });
+                        }}
+                      >
+                        {size}
+                      </button>
+                    );
+                  })}
+                </div>
+                <input
+                  value={draft.sizePriority}
+                  onChange={(event) => setDraft({ ...draft, sizePriority: event.target.value })}
+                  placeholder="Or type an exact storefront size"
+                />
+              </div>
+            </Field>
+          ) : (
+            <Field label="Sizes, best first">
+              <input
+                value={draft.sizePriority}
+                onChange={(event) => setDraft({ ...draft, sizePriority: event.target.value })}
+                placeholder="Optional"
+              />
+            </Field>
+          )}
+
+          <Field label={`Maximum price (${draft.currency})`}>
+            <input
+              required
+              value={draft.maxRetailPrice}
+              onChange={(event) => setDraft({ ...draft, maxRetailPrice: event.target.value })}
+              placeholder="180.00"
+            />
+          </Field>
+          <p className="field-note">Copify stops rather than buying above this.</p>
+        </form>
+      </Drawer>
     </div>
   );
 }
-
-export function DetectionSummary({ check }: { check: NonNullable<Target["latestCheck"]> }) {
-  const candidate = check.decision.candidate;
-  if (!candidate) {
-    return <p className={check.status === "ERROR" ? "error-detail" : "muted"}>
-      {new Date(check.checkedAt).toLocaleString()} · {check.decision.message}
-      {check.errorMessage ? ` · ${check.errorMessage}` : ""}
-    </p>;
-  }
-  const selected = check.decision.selectedVariant;
-  const available = candidate.variants.filter((variant) => variant.available);
-  const availableSizes = [...new Set(available.map((variant) => variant.size))];
-  const imageUrl = candidate.imageUrl?.startsWith("https://") ? candidate.imageUrl : null;
-  return <section className={`detected-product${imageUrl ? "" : " no-image"}`} aria-label="Latest product detection">
-    {imageUrl && <img className="detected-product-image" src={imageUrl} alt="" />}
-    <div className="detected-product-copy">
-      <div className="detected-product-header">
-        <span className={`state ${check.status === "ERROR" ? "error" : "ready"}`}>{check.decision.kind}</span>
-      </div>
-      <h4>{candidate.name}</h4>
-      <p className={check.status === "ERROR" ? "error-detail" : "muted"}>
-        {new Date(check.checkedAt).toLocaleString()} · {check.decision.message}
-        {check.errorMessage ? ` · ${check.errorMessage}` : ""}
-      </p>
-      <div className="detected-product-meta">
-        <span>{candidate.priceMinor !== null && candidate.currency ? `${candidate.currency} ${fromMinor(candidate.priceMinor)}` : "Price unavailable"}</span>
-        {selected && <span>Selected: {selected.color} · {selected.size}</span>}
-        <span>{availableSizes.length ? `Available sizes: ${availableSizes.join(", ")}` : "Availability unavailable"}</span>
-        <span>{check.candidateCount} candidate{check.candidateCount === 1 ? "" : "s"} checked</span>
-      </div>
-      <a href={candidate.url} target="_blank" rel="noreferrer">View product</a>
-    </div>
-  </section>;
-}
-

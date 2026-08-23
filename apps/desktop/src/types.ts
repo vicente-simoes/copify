@@ -23,7 +23,6 @@ export type TargetDraft = {
   sizePriority: string;
   currency: "EUR" | "GBP" | "USD";
   maxRetailPrice: string;
-  quantity: number;
   enabled: boolean;
 };
 export type ShippingDraft = {
@@ -59,7 +58,6 @@ export const blankTarget = (): TargetDraft => ({
   sizePriority: "",
   currency: "EUR",
   maxRetailPrice: "0.00",
-  quantity: 1,
   enabled: true,
 });
 export const blankShipping = (): ShippingDraft => ({

@@ -64,6 +64,7 @@ function App() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [targetDraft, setTargetDraft] = useState<TargetDraft>(blankTarget());
   const [editingTargetId, setEditingTargetId] = useState<string | null>(null);
+  const [targetDrawerOpen, setTargetDrawerOpen] = useState(false);
   const [targetTesting, setTargetTesting] = useState<string | null>(null);
   const [shippingProfiles, setShippingProfiles] = useState<ShippingProfile[]>(
     [],
@@ -325,7 +326,7 @@ function App() {
       sizePriority: list(targetDraft.sizePriority),
       currency: targetDraft.currency,
       maxRetailMinor,
-      quantity: targetDraft.quantity,
+      quantity: 1,
       enabled: targetDraft.enabled,
     };
     await execute(
@@ -337,10 +338,12 @@ function App() {
     );
     setTargetDraft(blankTarget());
     setEditingTargetId(null);
+    setTargetDrawerOpen(false);
   };
   const editTarget = (target: Target) => {
     setWorkspace("targets");
     setEditingTargetId(target.id);
+    setTargetDrawerOpen(true);
     setTargetDraft({
       storeId: target.storeId,
       name: target.name,
@@ -350,7 +353,6 @@ function App() {
       sizePriority: target.sizePriority.join(", "),
       currency: target.currency,
       maxRetailPrice: fromMinor(target.maxRetailMinor),
-      quantity: target.quantity,
       enabled: target.enabled,
     });
   };
@@ -525,17 +527,31 @@ function App() {
         {workspace === "targets" && (
           <Targets
             targets={targets}
+            stores={stores}
             draft={targetDraft}
             editingId={editingTargetId}
+            drawerOpen={targetDrawerOpen}
             activeRun={Boolean(activeRunId)}
             busy={busy}
             testing={targetTesting}
             setDraft={setTargetDraft}
+            onNew={() => {
+              // Default to a store that can actually be watched, not a template.
+              const watchable = stores.find((store) => store.enabled && store.capabilities.monitor !== null);
+              setEditingTargetId(null);
+              setTargetDraft(
+                watchable
+                  ? { ...blankTarget(), storeId: watchable.id, currency: watchable.currency }
+                  : blankTarget(),
+              );
+              setTargetDrawerOpen(true);
+            }}
             onSave={(event) => void saveTarget(event)}
             onEdit={editTarget}
             onCancel={() => {
               setEditingTargetId(null);
               setTargetDraft(blankTarget());
+              setTargetDrawerOpen(false);
             }}
             onTest={(id) => void testTarget(id)}
             onToggle={(target) =>
