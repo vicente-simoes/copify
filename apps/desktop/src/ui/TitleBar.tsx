@@ -21,7 +21,6 @@ function RecordingClock({ startedAt }: { startedAt: number }) {
 export function TitleBar({
   crumb,
   onBack,
-  onHome,
   sidebarCollapsed,
   onToggleSidebar,
   recordingSince,
@@ -30,7 +29,6 @@ export function TitleBar({
 }: {
   crumb?: string;
   onBack?: () => void;
-  onHome: () => void;
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
   recordingSince: number | null;
@@ -40,26 +38,28 @@ export function TitleBar({
   return (
     <header className="titlebar">
       <div className="titlebar-inner">
-        <button
-          className="titlebar-icon-button"
-          onClick={onToggleSidebar}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-pressed={!sidebarCollapsed}
-          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          <PanelIcon className="nav-icon" />
-        </button>
-
         {onBack && (
           <button className="titlebar-icon-button" onClick={onBack} aria-label="Back" title="Back">
             <BackIcon className="nav-icon" />
           </button>
         )}
 
-        <button className="titlebar-brand" onClick={onHome} aria-label="Copify home">
-          <img className="titlebar-mark" src={appIcon} alt="" />
+        {/* The brand is inert. Hovering the mark swaps it for the collapse toggle. */}
+        <div className="titlebar-brand">
+          <span className="brand-icon">
+            <img className="titlebar-mark" src={appIcon} alt="" />
+            <button
+              className="sidebar-toggle"
+              onClick={onToggleSidebar}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-pressed={!sidebarCollapsed}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              <PanelIcon className="toggle-icon" />
+            </button>
+          </span>
           <span className="titlebar-wordmark">Copify</span>
-        </button>
+        </div>
 
         {crumb && (
           <>

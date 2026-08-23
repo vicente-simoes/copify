@@ -383,7 +383,6 @@ function App() {
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <TitleBar
-        onHome={() => setWorkspace("run")}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
         recordingSince={recordingSince}
@@ -406,6 +405,7 @@ function App() {
           </>
         }
       />
+      <div className="app-body">
       <Sidebar workspace={workspace} collapsed={sidebarCollapsed} onNavigate={setWorkspace} />
       <main className="workspace">
         <div className="workspace-inner page-stack">
@@ -626,6 +626,7 @@ function App() {
         )}
         </div>
       </main>
+      </div>
     </div>
   );
 }
