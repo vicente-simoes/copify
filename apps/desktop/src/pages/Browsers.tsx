@@ -1,5 +1,7 @@
-import { type BrowserProfile, type CartStatus, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store } from "@copify/shared";
+import { useState } from "react";
+import { type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store } from "@copify/shared";
 import { Menu, type MenuEntry } from "../ui/Menu";
+import { Drawer } from "../ui/Drawer";
 
 const STOPPED_SESSION = (profileId: string): SessionSnapshot => ({
   profileId,
@@ -9,6 +11,7 @@ const STOPPED_SESSION = (profileId: string): SessionSnapshot => ({
     kind: "direct",
     verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null },
   },
+  driver: null,
   updatedAt: 0,
 });
 
@@ -22,6 +25,18 @@ function cartLabel(cart: CartStatus): string {
   if (cart.status === "CHECKING") return "Checking…";
   if (cart.status === "ERROR") return "Failed";
   return "—";
+}
+
+function HealthDrawer({ detail, title, onClose }: { detail: BrowserHealthDetail | null; title: string; onClose: () => void }) {
+  const health = detail?.latest;
+  const number = (value: number | null | undefined, suffix = "") => value == null ? "—" : `${Math.round(value)}${suffix}`;
+  return <Drawer open={Boolean(detail)} title={`${title} details`} onClose={onClose}>
+    {!health ? <p className="muted">No recorded health yet. It appears after this profile participates in a run.</p> : <div className="page-stack health-detail">
+      <section><h3>Identity</h3><p className="muted">webdriver: {health.navigatorWebdriver === null ? "—" : String(health.navigatorWebdriver)} · {health.browserVersion ?? "Browser version unavailable"}</p><p className="muted">Profile age: {number(health.profileAgeMs == null ? null : health.profileAgeMs / 86_400_000, " days")} · Cookies: {number(health.cookieCount)}</p></section>
+      <section><h3>Activity</h3><p className="muted">Requests: {number(health.requestCount)} ({number(health.requestsPerMinute)}/min) · Navigations: {number(health.navigationCount)} ({number(health.navigationsPerMinute)}/min)</p><p className="muted">ATC attempts: {number(health.atcAttempts)} · Average page load: {number(health.averagePageLoadMs, " ms")}</p></section>
+      <section><h3>Protection & checkout</h3><p className="muted">403: {number(health.forbiddenCount)} · 429: {number(health.rateLimitedCount)} · Challenges: {number(health.challengeCount)} · Checkout failures: {number(health.checkoutFailures)}</p>{health.circuit?.state === "OPEN" && <p className="error-detail">Circuit open until {health.circuit.reopenAt ? new Date(health.circuit.reopenAt).toLocaleTimeString() : "unknown"}.</p>}</section>
+    </div>}
+  </Drawer>;
 }
 
 export function Browsers({
@@ -67,9 +82,15 @@ export function Browsers({
   onOpenAll: () => void;
   onCloseAll: () => void;
 }) {
+  const [healthDetail, setHealthDetail] = useState<BrowserHealthDetail | null>(null);
+  const [healthTitle, setHealthTitle] = useState("");
+  const showHealth = async (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string, title: string) => {
+    const result = await window.copify.health.get(subjectKind, subjectId); if (result.ok) { setHealthTitle(title); setHealthDetail(result.value); }
+  };
   // Cart is a store-specific idea, so the column only exists when some enabled
   // adapter can actually read one.
   const showCart = stores.some((store) => store.enabled && store.capabilities.cartInspection);
+  const watcherStores = stores.filter((store) => store.enabled && store.capabilities.monitor === "shared");
 
   const activeCount = profiles.filter((profile) =>
     ["STARTING", "READY", "STOPPING"].includes((sessions[profile.id] ?? STOPPED_SESSION(profile.id)).state),
@@ -108,7 +129,7 @@ export function Browsers({
           </div>
         </div>
 
-        {profiles.length === 0 ? (
+        {profiles.length === 0 && watcherStores.length === 0 ? (
           <div className="empty">No browsers yet.</div>
         ) : (
           <div className={`rows browser-rows ${showCart ? "has-cart" : ""}`}>
@@ -122,6 +143,16 @@ export function Browsers({
               <span className="col-actions" />
             </div>
 
+            {watcherStores.map((store) => (
+              <div className="row browser-row" key={`watcher-${store.id}`}>
+                <span className="state ready col-state">WATCHER</span>
+                <div className="col-name row-main"><span className="row-name">Storefront watcher</span><span className="row-meta">{store.name} · persistent direct profile</span></div>
+                <span className="col-route row-cell">Direct</span><span className="col-ip row-cell mono">—</span><span className="col-latency row-cell mono">—</span>
+                {showCart && <span className="col-cart row-cell">—</span>}
+                <div className="col-actions row-actions"><button onClick={() => void showHealth("WATCHER", store.id, "Storefront watcher")}>Details</button></div>
+              </div>
+            ))}
+
             {profiles.map((profile) => {
               const session = sessions[profile.id] ?? STOPPED_SESSION(profile.id);
               const cart = cartStatuses[profile.id] ?? EMPTY_CART(profile.id);
@@ -132,6 +163,7 @@ export function Browsers({
               const check = session.route.verification;
 
               const entries: MenuEntry[] = [
+                { kind: "item", label: "Details", onSelect: () => void showHealth("CHECKOUT", profile.id, profile.name) },
                 { kind: "item", label: "Restart", disabled: busy || !profile.enabled || busyState, onSelect: () => onProfile(profile.id, window.copify.sessions.restart) },
                 { kind: "item", label: "Rename", disabled: busy || active, onSelect: () => {
                   const name = window.prompt("Browser name", profile.name)?.trim();
@@ -216,6 +248,7 @@ export function Browsers({
           </div>
         )}
       </section>
+      <HealthDrawer detail={healthDetail} title={healthTitle} onClose={() => setHealthDetail(null)} />
     </div>
   );
 }

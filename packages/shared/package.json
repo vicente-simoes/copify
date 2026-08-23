@@ -1,6 +1,6 @@
 {
   "name": "@copify/shared",
-  "version": "0.5.15",
+  "version": "0.7.0",
   "private": true,
   "dependencies": { "zod": "^3.24.3" }
 }

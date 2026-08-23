@@ -2,7 +2,7 @@
 
 **Document:** `spec.md`  
 **Product:** Copify  
-**Status:** Living specification — implemented through v0.5.5  
+**Status:** Living specification — implemented through v0.7.0; drop-tuned input, speed & coherence architecture planned for v0.8+
 **Primary platform:** Windows  
 **Future platforms:** macOS, Linux  
 **Date:** 2026-08-23
@@ -118,7 +118,9 @@ The chosen initial stack is:
 - **React** — application UI.
 - **TypeScript** — all application and orchestration code.
 - **Node.js** — orchestration/runtime layer.
-- **Playwright** — browser automation and browser instrumentation.
+- **Playwright & `rebrowser-playwright` / `rebrowser-patches`** — hardened browser automation with CDP leak and `Runtime.enable` elimination.
+- **`ghost-cursor`** — humanized Bezier mouse trajectory generation and natural input modeling.
+- **`got-scraping` (Apify)** — decoupled TLS/JA3-spoofed and HTTP/2 storefront polling engine.
 - **Google Chrome** — headed persistent browser process.
 - **SQLite** — local structured application data.
 - **Electron `safeStorage`** — encryption/protection for stored secrets.
@@ -231,6 +233,18 @@ Every active browser session must have:
 
 No two concurrent persistent Chrome processes may use the same `userDataDir`.
 
+### 7.3 Stealth browser driver & CDP leak elimination
+
+Standard Playwright automation leaks critical bot signals (`--enable-automation`, `navigator.webdriver = true`, missing codec flags, and detectable `Runtime.enable` CDP side-effects in the JavaScript execution stack).
+
+Copify adopts **hardened stealth driver principles**:
+
+1. **Rebrowser Patches:** Integrates `rebrowser-patches` / `rebrowser-playwright` into the runner runtime to eliminate `Runtime.enable` leaks at the root level.
+2. **Flag Sanitization:** Strips automation flags from Chrome launch arguments, enforcing `--disable-blink-features=AutomationControlled`, `--no-first-run`, `--no-default-browser-check`, and avoiding `--enable-automation`.
+3. **Pluggable Driver Interface:**
+   - **NativeStealthDriver (Default):** Real local Chrome / Chromium hardened via rebrowser patches with persistent local `userDataDir`. Zero external cost.
+   - **AntiDetectDriver (Optional Power-User Extension):** Connects over CDP to external anti-detect daemons (AdsPower, GoLogin, Multilogin) for users with active anti-detect subscriptions.
+
 ---
 
 ## 8. Runner Process Model
@@ -253,14 +267,14 @@ Reasons:
 
 A runner process is responsible for:
 
-- Starting one persistent Chrome process.
-- Applying the assigned proxy configuration.
-- Navigating to the configured store.
-- Maintaining the browser profile.
-- Listening for target instructions.
-- Running the store adapter.
+- Starting one persistent Chrome process with stealth hardening.
+- Applying the assigned proxy configuration and coherent GeoIP environment.
+- Navigating to the configured store and keeping session pre-warmed.
+- Maintaining the browser profile and cookie state.
+- Listening for target instructions and variant IDs from the monitor.
+- Running the store adapter with direct-cart and human-input capabilities.
 - Producing structured events.
-- Detecting checkpoints.
+- Detecting checkpoints and 3DS payment handoffs.
 - Capturing allowed diagnostics.
 - Responding to orchestrator commands.
 - Clean shutdown.
@@ -270,10 +284,10 @@ A runner process is responsible for:
 The orchestrator is responsible for:
 
 - Starting/stopping runners.
-- Assigning profiles.
-- Assigning proxies.
+- Assigning profiles and coordinating proxy coherence.
+- Managing the decoupled high-frequency HTTP monitor.
 - Creating runs.
-- Broadcasting product events.
+- Broadcasting product events and exact `variantId` payloads.
 - Coordinating target execution.
 - Managing the global purchase.
 - Collecting events.
@@ -333,6 +347,14 @@ Example:
 ```
 
 Future macOS/Linux paths should use Electron's platform-resolved application data directories.
+
+### 10.1 Profile warming & trust score farming
+
+To avoid Cloudflare Turnstile and Shopify interactive CAPTCHAs on drop day, persistent profiles should be pre-conditioned ("warmed"):
+
+- **Google Account Authentication:** Users can log into dedicated Google/Gmail accounts within each persistent profile, establishing high human trust scores ($\ge 0.9$ reCAPTCHA v3 / Turnstile pass rates).
+- **Persistent Clearance Cookies:** Real browsing activity on the target storefront accumulates legitimate clearance tokens (`__cf_bm`, `cf_clearance`, `_shopify_s`).
+- **Warm Profile Workflow:** The application provides a "Warm Profile" action allowing pre-drop manual or assisted browsing sessions without arming drop targets.
 
 ---
 
@@ -412,6 +434,16 @@ Candidate reputable providers discussed:
 - Oxylabs.
 
 Provider branding must not be hardcoded into execution logic. All providers map to the generic `ProxyProfile` abstraction.
+
+### 11.4 Profile-proxy coherence engine
+
+Modern anti-fraud systems compare the public IP's GeoIP data against client-side browser attributes. Copify enforces 1:1 coherence:
+
+1. **Timezone Emulation:** Sets Chrome timezone via `--timezone=<ResolvedTimezone>` and Playwright `timezoneId` (e.g., `"Europe/Lisbon"`).
+2. **Locale & Language:** Sets `--lang=<Locale>` (e.g., `"pt-PT"`) and HTTP `Accept-Language` headers matching the proxy region.
+3. **Geolocation Coordinates:** Overrides geolocation coordinates (`context.setGeolocation`) to match the proxy city/region.
+4. **WebRTC Leak Prevention:** Launches Chrome with `--force-webrtc-ip-handling-policy=default_public_interface_only` to prevent local LAN IP leakage.
+5. **Strict 1:1 Affinity:** A profile should not switch between disparate countries (e.g., PT to US) to prevent cookie invalidation.
 
 ---
 
@@ -716,27 +748,27 @@ StoreAdapter
 
 ## 16. Supreme Adapter
 
-Supreme is the first supported store.
+Supreme is the first supported store (`eu.supreme.com` for EU/Portugal).
 
-The first version should use the **actual storefront through headed Chromium**.
-
-It should not depend on undocumented internal/private checkout APIs as its primary mechanism.
+The adapter operates through **headed Chromium** combined with direct-cart acceleration.
 
 ### 16.1 Supreme adapter responsibilities
 
 - Navigate to the appropriate Supreme storefront.
+- Support **Direct-Cart Flow** using `variantId`:
+  - In-page `fetch('/cart/add.js')` within the pre-warmed browser tab (< 400ms).
+  - Direct cart permalink fallback: `/cart/{variantId}:1`.
+  - Fallback to standard product detail page (PDP) UI navigation.
 - Detect product listing updates.
 - Locate target products by robust product-name rules.
-- Read product price.
-- Read available colors.
-- Read available sizes.
+- Read product price and enforce retail limits.
+- Read available colors and sizes.
 - Apply target priority rules.
-- Add the selected variant to cart.
 - Navigate to checkout.
-- Fill allowed non-sensitive checkout information.
-- Detect checkout queues.
-- Detect CAPTCHA/security checkpoints.
-- Detect payment/3DS handoff points.
+- Fill allowed non-sensitive checkout information or utilize **Shop Pay 1-click checkout**.
+- Detect checkout queues and waiting rooms.
+- Detect CAPTCHA/Turnstile security checkpoints.
+- Detect European PSD2 / 3DS banking verification handoff points.
 - Detect sold-out state.
 - Detect order success.
 
@@ -767,35 +799,45 @@ Product matching should support:
 
 The app should log why a product matched.
 
+### 16.4 Human input abstraction (Ghost-Cursor & Keystroke Simulation)
+
+To prevent anti-bot behavioral detection (Akamai / Cloudflare Turnstile / DataDome):
+
+1. **Bezier Mouse Movements (`ghost-cursor`):** Eliminates synthetic instant clicks. Mouse moves along curved Fitts's Law trajectories with `FAST_DROP` calibration (100–220ms duration) and natural CDP `mousedown`/`mouseup` dwell (40–75ms).
+2. **Accelerated Human Keystrokes:** Simulates natural keystroke intervals (15–35ms per character with variance) on text inputs.
+3. **Simulated Clipboard Paste (`Ctrl+V`):** Uses CDP keyboard shortcuts for instant, legitimate address field population without triggering synthetic input flags.
+4. **Natural Scrolling:** Uses smooth wheel delta events rather than abrupt `scrollIntoView`.
+
 ---
 
 ## 17. Monitoring Strategy
 
-A naive architecture would have every browser continuously poll the storefront.
+Copify decouples storefront monitoring from browser automation.
 
-Copify should instead support a **shared monitor + runner reaction model** where practical.
+A **decoupled TLS-spoofed HTTP monitor** performs high-frequency polling while persistent headed browsers remain pre-warmed in standby.
 
 ```text
-             Product Monitor
-                   │
-        TARGET BECOMES AVAILABLE
-                   │
-       ┌───────────┼───────────┐
-       ▼           ▼           ▼
-    Runner A    Runner B    Runner C
+ ┌─────────────────────────────────────────────────────────────┐
+ │               Decoupled HTTP Monitor (`got-scraping`)       │
+ │  • TLS / JA3 / JA4 and HTTP/2 pseudo-header emulation      │
+ │  • High frequency polling (500ms – 2s) with proxy rotation  │
+ │  • Extracts exact `variantId` from Shopify JSON/HTML feeds  │
+ └──────────────────────────────┬──────────────────────────────┘
+                                │
+                    PRODUCT_DETECTED (IPC Event)
+                    Payload: { productUrl, variantId, price }
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+   Runner A (Pre-Warmed)   Runner B (Pre-Warmed)   Runner C (Pre-Warmed)
+   Direct-Cart via         Direct-Cart via         Direct-Cart via
+   `/cart/add.js`          `/cart/add.js`          `/cart/add.js`
 ```
 
-Benefits:
-
-- fewer duplicate requests
-- consistent target detection time
-- easier debugging
-- lower store traffic
-- simpler timing comparison
-
-The shared monitor must itself use reasonable request/navigation behavior.
-
-A store adapter may choose browser-native monitoring if the storefront makes a shared monitor impractical.
+### 17.1 Benefits:
+- **Zero Headless Footprint:** Eliminates heavy headless Chrome polling, reducing memory usage and avoiding headless bot flags.
+- **Sub-Second Reaction:** Browsers are already open on the storefront with cookies loaded, executing direct carting the instant `PRODUCT_DETECTED` arrives.
+- **Resilience:** If storefront HTML changes slightly, the monitor still extracts raw JSON `variantId` payloads reliably.
 
 ---
 
@@ -830,29 +872,33 @@ Every transition must create a `RunEvent`.
 
 ---
 
-## 19. Human Handoff
+## 19. Human Handoff & Shop Pay 1-Click Fast Checkout
 
-Copify must detect situations that require user control.
+Copify detects situations that require human action:
 
-Examples:
+- Cloudflare Turnstile / CAPTCHA / hCaptcha challenges.
+- European PSD2 / 3D Secure (3DS) banking app approvals (MB WAY, Revolut, ActivoBank, Santander, CGD).
+- Shop Pay SMS verification / 1-click order review.
+- Checkout queue / waiting room progression.
+- Final purchase submission confirmation.
 
-- CAPTCHA.
-- hCaptcha.
-- reCAPTCHA.
-- unexpected checkpoint.
-- checkout queue requiring manual waiting.
-- payment verification.
-- 3DS.
-- unexpected site state.
+### 19.1 Shop Pay 1-Click fast checkout
+When a persistent browser profile is authenticated with Shop Pay:
+- Navigating to checkout automatically recognizes the session and skips manual address/card form filling.
+- Runner enters `READY_TO_CONFIRM`, brings the headed browser to the foreground, and prompts the user for 1-click confirmation or SMS code entry.
 
-When detected:
+### 19.2 European PSD2 / 3DS strong customer authentication
+- When bank 3DS verification is required, runner pauses automation, highlights the browser window, and plays an optional audio notification.
+- The user taps "Approve" in their banking app, and presses **Resume** to complete the run.
+
+### 19.3 Handoff sequence
 
 1. Runner enters `CHECKPOINT`.
 2. Automation pauses.
 3. Browser is brought to the foreground.
 4. UI highlights the affected session.
 5. Optional sound/desktop notification fires.
-6. User completes the challenge.
+6. User completes the challenge or bank approval.
 7. User presses **Resume**.
 8. The runner reevaluates the page before continuing.
 
@@ -1644,35 +1690,24 @@ the main process still validates.
 
 A typical drop-day workflow:
 
-### Before drop day
+### Days before drop day (Profile Warming & Setup)
 
-1. Create target.
-2. Set product keywords.
-3. Set color priority.
-4. Set size priority.
-5. Set maximum retail price.
-6. Assign browser profiles.
-7. Assign proxy/network routes.
-8. Test every route.
-9. Verify browser state.
-10. Verify shipping data.
-11. Run a low-risk dry run.
+1. Create and arm targets with keywords, color/size priorities, and maximum retail prices.
+2. Assign persistent browser profiles to dedicated static ISP / sticky residential routes.
+3. **Warm Profiles:** Launch browser profiles via "Warm Profile" mode to log into Google/Gmail accounts (farming $\ge 0.9$ trust scores) and authenticate Shop Pay / saved payment methods.
+4. Verify proxy health, GeoIP coherence (Lisbon timezone, Portuguese locale), and run a low-risk dry run.
 
-### Drop day
+### Drop day (T-minus 15 minutes)
 
-1. Launch Copify.
-2. Run preflight.
-3. Open all browser sessions.
-4. Confirm network health.
-5. Arm target.
-6. Start run recording.
-7. Start monitor.
-8. Wait for product.
-9. Let runners progress toward checkout.
-10. Handle human checkpoints.
-11. Checkout where possible.
-12. End run.
-13. Inspect run immediately afterward.
+1. Launch Copify and execute preflight verification.
+2. Open assigned browser sessions (launches persistent Chrome with `rebrowser-patches` stealth hardening).
+3. Browsers navigate to storefront standby (`https://eu.supreme.com/pages/shop`) to pre-warm connections and load session cookies.
+4. Arm target and start the decoupled TLS-spoofed HTTP monitor (`got-scraping`).
+5. Wait for release (16:00:00 Europe/Lisbon).
+6. **Drop execution:** Monitor extracts `variantId` $\rightarrow$ runners execute sub-400ms in-page direct carting $\rightarrow$ advance to checkout.
+7. **Human handoff:** If Turnstile challenge or European PSD2 / 3DS banking verification (MB WAY, Revolut, bank app) appears, approve on mobile/browser and click Resume.
+8. Confirm order via Shop Pay 1-click or saved details.
+9. Inspect run metrics in the Run Inspector.
 
 ---
 
@@ -1698,9 +1733,7 @@ Dry runs allow safe testing on ordinary products or test storefronts.
 
 ## 42. Development Roadmap
 
-### v0.1 — Browser Foundation
-
-Deliver:
+### v0.1 — Browser Foundation (DELIVERED)
 
 - Electron + React shell.
 - TypeScript project structure.
@@ -1711,174 +1744,149 @@ Deliver:
 - Basic runner IPC.
 - Session state display.
 
-Success criteria:
-
-- Three Chrome sessions run concurrently.
-- Each uses a separate persistent profile.
-- Closing/reopening Copify retains browser state.
-- One runner crash does not crash the app.
-
 ---
 
-### v0.2 — Proxy Profiles & Network Health
-
-Deliver:
+### v0.2 — Proxy Profiles & Network Health (DELIVERED)
 
 - Proxy profile CRUD.
 - HTTP/HTTPS/SOCKS support through Playwright.
-- Secret storage for proxy credentials.
+- Secret storage for proxy credentials (`safeStorage`).
 - Per-browser proxy assignment.
 - Generic proxy health benchmark.
-- Public IP verification.
-- Geolocation check.
+- Public IP verification and geolocation check.
 - Latency/jitter/failure measurement.
 - Proxy quality score.
 
-Success criteria:
-
-- Three sessions can run using three distinct configured routes.
-- Copify confirms the route used by every session.
-- Bad proxies are clearly identified before a run.
-
 ---
 
-### v0.3 — Run Engine & Inspector Foundation
+### v0.3 — Run Engine & Inspector Foundation (DELIVERED)
 
-Deliver:
-
-- Run creation.
-- Run sessions.
-- event logger.
-- monotonic timestamps.
+- Run creation and run sessions.
+- Structured event logger with monotonic timestamps.
 - SQLite persistence.
-- normal/diagnostic/deep-debug modes.
-- screenshot manager.
-- console capture.
-- sanitized network capture.
-- optional Playwright traces.
-- basic run timeline UI.
-
-Success criteria:
-
-- A complete browser session can be replayed conceptually from its event timeline.
-- Two sessions can be compared by timing.
-- No sensitive headers are written in Normal mode.
+- Normal/diagnostic/deep-debug modes.
+- Screenshot manager and console capture.
+- Sanitized network capture.
+- Basic run timeline UI.
 
 ---
 
-### v0.4 — Supreme Product Detection
+### v0.4 — Supreme Product Detection (DELIVERED)
+
+- StoreAdapter interface and SupremeAdapter.
+- Product matching with keywords and negative keywords.
+- Color, size, and price parsing.
+- Target engine and max-retail kill switch.
+- Target check and candidate evaluation.
+
+---
+
+### v0.5 — Cart & Checkout Assistance (DELIVERED)
+
+- Product navigation and variant selection.
+- Add-to-cart and cart confirmation.
+- Checkout navigation and shipping autofill.
+- Checkpoint detection, human handoff, and resume action.
+
+---
+
+### v0.5.5 — Interface and Store Modularity (DELIVERED)
+
+- Store registry and capability manifest (`storeId` string validation).
+- Capability-driven UI (monitorability, assisted eligibility, size inputs, currency).
+- Frameless window with integrated titlebar and collapsible sidebar.
+- Drop-workflow information architecture with blocking preflight.
+- Drawers for editing, overflow menus for secondary actions, transient toasts.
+
+---
+
+### v0.6 — Multi-Session Checkout Assistance (DELIVERED)
+
+- Multi-browser concurrent checkout progression to filled checkout page.
+- `READY_TO_CONFIRM` state.
+- Session failover and live session priority.
+- Action-required UI for checkpoints and cart status inspection.
+
+---
+
+### v0.7 — Driver Hardening & CDP Stealth (DELIVERED)
 
 Deliver:
 
-- StoreAdapter interface.
-- SupremeAdapter.
-- product matching.
-- color parsing.
-- size parsing.
-- price parsing.
-- target engine.
-- max-retail kill switch.
-- shared monitor where practical.
+- Replace standard Playwright launch with `rebrowser-playwright` / apply `rebrowser-patches`.
+- Eliminate `Runtime.enable` and CDP evaluation leak artifacts.
+- Enforce strict Chrome launch flag sanitization (`--disable-blink-features=AutomationControlled`).
+- Verify `navigator.webdriver === false` without prototype tampering.
+- Pluggable `BrowserDriver` interface (NativeStealthDriver default + optional Anti-Detect API driver).
 
 Success criteria:
 
-- Copify correctly identifies a configured Supreme target.
-- It reports available target variants.
-- It correctly chooses the highest-priority acceptable variant.
-- It refuses targets above max retail.
+- Cloudflare Turnstile bot detection tests and CreepJS fingerprint checks pass with zero automation flags detected.
 
 ---
 
-### v0.5 — Cart & Checkout Assistance
+### v0.8 — Drop-Tuned Human Input Engine
 
 Deliver:
 
-- product navigation.
-- variant selection.
-- add-to-cart.
-- cart confirmation.
-- checkout navigation.
-- shipping autofill.
-- checkpoint detection.
-- human handoff.
-- resume action.
+- Integrate `ghost-cursor` for natural Bezier mouse trajectory generation.
+- Implement `HumanInput` wrapper with `FAST_DROP` calibration (100–220ms movements).
+- Implement natural CDP mouse click dwell times (40–75ms `mousedown` to `mouseup`).
+- Implement simulated OS clipboard paste (`Ctrl+V`) and accelerated keystroke intervals (15–35ms) for shipping forms.
+- Natural smooth wheel scrolling.
 
 Success criteria:
 
-- On a safe test run, Copify reaches checkout from an armed target without manual browsing.
-- Security/payment challenges pause correctly.
+- Form interactions and clicks dispatch trusted CDP events with natural velocity curves that pass behavioral bot detection.
 
 ---
 
-### v0.5.5 — Interface and store modularity
-
-Delivered:
-
-- Store registry and capability manifest (section 15.1); `storeId` moves from a
-  fixed enum to a registry-validated string with no data migration.
-- Capability-driven UI: monitorability, assisted eligibility, cart columns, size
-  inputs and currency all read from the manifest instead of store-specific
-  branches.
-- Frameless window with an integrated titlebar and a collapsible sidebar.
-- Design tokens; near-white primary actions with colour reserved for state.
-- Information architecture reorganised around the drop workflow (section 33.1),
-  with Run as the drop console and a blocking preflight (section 39).
-- Rows with overflow menus in place of button-covered cards; drawers in place of
-  permanent forms; transient toasts in place of a persistent notice bar.
-- Run Inspector as a full view with the timeline from section 29.1.
-- Copy pass removing kickers, restated headings, architecture explanations, and
-  confirmations of already-visible changes.
-- Knobs removed: proxy provider branding, expected city, quantity, per-item
-  enabled checkboxes, raw benchmark history.
-
-Success criteria:
-
-- A new store adapter is added without editing the renderer, beyond dropping in
-  its brand art.
-- A misconfigured run cannot be started, and the reason is visible before trying.
-
----
-
-### v0.6 — Multi-Session Checkout Assistance
+### v0.9 — Decoupled TLS-Spoofed Monitor & Direct-Carting
 
 Deliver:
 
-- must be able to get to the filled out checkout page in multiple browsers by doing a run
-- READY_TO_CONFIRM state.
-- session failover.
-- live session priority.
-- improved action-required UI.
+- Implement decoupled `HttpStoreMonitor` using `got-scraping` (JA3/JA4 and HTTP/2 pseudo-header spoofing).
+- High-frequency polling (500ms – 2s) with proxy pool rotation.
+- Instant `variantId` extraction from Shopify listing JSON / embedded scripts.
+- Implement sub-400ms in-page `fetch('/cart/add.js')` direct carting within pre-warmed browsers.
+- Implement fallback direct URL navigation (`/cart/{variant_id}:1`).
+- Pre-warmed browser standby management on `/pages/shop`.
 
 Success criteria:
 
-- Three sessions may reach checkout.
+- Monitor detects target within 1 second of drop; pre-warmed browsers reach checkout in under 1.5 seconds total without loading the product detail page.
 
 ---
 
-### v0.7 — Historical Analytics
+### v0.10 — Profile-Proxy Coherence & Account Warming Workflow
 
 Deliver:
 
-- historical session metrics.
-- browser-profile reliability.
-- proxy reliability history.
-- percentile timings.
-- run-to-run comparison.
-- failure aggregation.
-- annotations.
+- Auto-sync Timezone (`--timezone`, `timezoneId`), Locale (`--lang`, `Accept-Language`), and Geolocation coordinates based on proxy GeoIP lookup.
+- Inject WebRTC leak prevention flags (`--force-webrtc-ip-handling-policy=default_public_interface_only`).
+- Add "Warm Profile" UI action for pre-drop Google login, Shop Pay setup, and cookie accumulation.
+- Preserve Shop Pay session tokens (`_shopify_essential`) for 1-click checkout acceleration.
+- Enhanced European PSD2 / 3DS Strong Customer Authentication handoff notifications.
 
-Possible metrics:
+Success criteria:
 
-```text
-Median product detection
-Median product page load
-Median ATC
-Median checkout load
-Checkout success rate
-Network error rate
-Checkpoint rate
-Runner crash rate
-```
+- Profiles maintain consistent GeoIP coherence and pass Turnstile challenges passively with 0 visual CAPTCHAs.
+
+---
+
+### v0.11 — Historical Drop Analytics & Post-Run Diagnostics
+
+Deliver:
+
+- Historical session metrics and drop comparison.
+- Monotonic timing breakdowns (`monitor_to_detect`, `detect_to_cart`, `cart_to_checkout`, `human_3ds_duration`).
+- Browser-profile and proxy reliability history.
+- Checkpoint and Turnstile rate analytics.
+- Run annotations and failure aggregation.
+
+Success criteria:
+
+- Post-run review highlights exact latency bottlenecks across routes and profiles.
 
 ---
 
@@ -1886,17 +1894,12 @@ Runner crash rate
 
 Requirements:
 
-- installer.
-- automatic database migrations.
-- safe update strategy.
-- robust error handling.
-- production logging.
-- profile backup/import strategy.
-- complete run inspector.
-- settings UI.
-- tested Windows Chrome discovery.
-- secure secret storage.
-- stable Supreme adapter.
+- Production installer.
+- Automatic database migrations.
+- Safe update strategy.
+- Robust error handling and production logging.
+- Profile backup/import strategy.
+- End-to-end verified Supreme drop readiness.
 
 ---
 
@@ -1906,10 +1909,8 @@ Requirements:
 
 - macOS packaging.
 - Keychain-backed `safeStorage`.
-- Chrome detection.
-- window focus behavior.
-- notifications.
-- filesystem validation.
+- Chrome detection and window focus behavior.
+- Platform notifications.
 
 ---
 
@@ -1917,12 +1918,9 @@ Requirements:
 
 Requirements:
 
-- packaging choice.
-- Chrome/Chromium detection strategy.
-- Secret Service/KWallet support.
-- desktop notification abstraction.
-- path handling.
-- distro compatibility policy.
+- Linux packaging (AppImage / deb).
+- Secret Service / KWallet support.
+- Desktop notification abstraction.
 
 ---
 
@@ -1939,16 +1937,18 @@ Test:
 - event serialization
 - proxy scoring
 - network redaction
+- direct cart payload building
+- human input trajectory math
 
 ### Integration tests
 
 Test:
 
-- persistent browser startup
-- profile reuse
-- proxy application
-- runner IPC
-- trace creation
+- persistent browser startup with rebrowser stealth patches
+- profile reuse and cookie retention
+- proxy application and GeoIP coherence
+- decoupled monitor polling and IPC broadcasting
+- direct-carting execution
 - crash recovery
 - run persistence
 
@@ -1957,7 +1957,7 @@ Test:
 Use:
 
 - local fixtures
-- saved sanitized HTML
+- saved sanitized HTML / Shopify JSON
 - controlled test pages
 
 Avoid relying exclusively on the live Supreme website for automated tests.
@@ -1975,7 +1975,7 @@ Copify should optimize for:
 1. Reliability.
 2. Determinism.
 3. Observability.
-4. Fast reaction.
+4. Fast reaction (< 400ms direct-carting).
 5. Low unnecessary network traffic.
 
 Do not optimize a 20 ms microbenchmark at the cost of session stability.
@@ -1986,16 +1986,13 @@ A stable 70 ms route is preferable to a 35 ms route with intermittent failures.
 
 ## 45. Metrics That Matter
 
-The most useful initial measurements are:
+The most useful measurements are:
 
 - `drop_to_product_detected_ms`
-- `product_detected_to_open_ms`
-- `product_open_to_variant_selected_ms`
-- `variant_selected_to_atc_ms`
-- `atc_to_cart_confirmed_ms`
+- `product_detected_to_direct_cart_ms`
 - `cart_to_checkout_ms`
 - `checkout_to_checkpoint_ms`
-- `human_checkpoint_duration_ms`
+- `human_checkpoint_or_3ds_duration_ms`
 - `checkout_to_ready_confirm_ms`
 - `total_run_duration_ms`
 - navigation error count
@@ -2020,17 +2017,16 @@ It should say:
 ```text
 FAILED — SOLD OUT
 
-Product detected        +92 ms
-Product opened          +171 ms
-Variant selected        +244 ms
-ATC                     +518 ms
-Checkout opened         +1.21 s
-Checkpoint detected     +1.84 s
-User resumed            +6.91 s
-Variant unavailable     +7.22 s
+Product detected        +82 ms  (Decoupled TLS Monitor)
+Direct-cart submitted   +140 ms (in-page cart/add.js)
+Cart confirmed          +310 ms
+Checkout reached        +680 ms
+Shop Pay recognized     +820 ms
+3DS approval completed  +3.10 s
+Stock exhausted         +4.20 s
 
 Likely bottleneck:
-Checkpoint handling added 5.07 s.
+3DS bank approval added 2.28 s.
 ```
 
 The value of Copify is not merely automation.
@@ -2051,50 +2047,30 @@ The first meaningful Copify milestone is reached when the following scenario wor
 4. Profile B uses a configured fixed/sticky proxy.
 5. Profile C uses another configured fixed/sticky proxy.
 6. User clicks **Open All**.
-7. Three independent headed Chrome processes launch.
-8. Every browser has its own persistent profile.
-9. Copify verifies the public route for each session.
-10. User creates a test run.
-11. Every runner sends structured events.
-12. User browses through each session.
-13. Copify records timing, screenshots, console errors, and sanitized network metadata.
-14. User ends the run.
-15. The Run Inspector displays all three session timelines side by side.
-16. Closing and reopening Copify preserves the browser profiles.
-17. No raw payment credentials or proxy passwords appear in logs.
-
-This milestone corresponds approximately to **v0.1 + v0.2 + the core of v0.3**.
-
-Only after this foundation is reliable should Supreme-specific purchase assistance become the development priority.
+7. Three independent headed Chrome processes launch with stealth hardening.
+8. Every browser has its own persistent profile and pre-warms on the storefront.
+9. Copify verifies the public route and GeoIP coherence for each session.
+10. Decoupled HTTP monitor checks for target release.
+11. On drop, runners execute direct carting and reach checkout concurrently.
+12. Copify records timing, screenshots, console errors, and sanitized network metadata.
+13. User completes human confirmation or 3DS verification.
+14. The Run Inspector displays all three session timelines side by side.
 
 ---
 
 ## 49. Immediate Implementation Order
 
-Recommended coding order:
+Next implementation steps (starting from current v0.7 state):
 
 ```text
-1. Repository + Electron/React/TypeScript scaffold
-2. Shared IPC/type contracts
-3. SQLite setup and migrations
-4. BrowserProfile CRUD
-5. Runner child-process protocol
-6. Persistent Chrome launcher
-7. Session dashboard
-8. ProxyProfile CRUD
-9. safeStorage secret handling
-10. Proxy application to runners
-11. Proxy benchmark
-12. Run model
-13. structured event logger
-14. Run artifacts directory
-15. Run Inspector timeline
-16. diagnostic modes
-17. StoreAdapter abstraction
-18. SupremeAdapter
-19. Target engine
-20. ATC/checkout assistance
-21. Historical analytics
+1. v0.8: Ghost-cursor Bezier mouse movement & drop-tuned click dwell
+2. v0.8: Simulated clipboard paste & human typing cadence for forms
+3. v0.9: Decoupled got-scraping HTTP monitor with JA3/JA4 TLS spoofing
+4. v0.9: Sub-400ms in-page direct carting (fetch('/cart/add.js')) & /cart/{id}:1
+5. v0.10: Automated GeoIP to Timezone/Locale/Geolocation coherence
+6. v0.10: WebRTC leak prevention & Profile Warmup workflow (Google / Shop Pay)
+7. v0.11: Historical drop metrics & post-run analytics
+8. v1.0: Windows production release & installer
 ```
 
 ---
@@ -2105,21 +2081,14 @@ These items are intentionally not finalized yet:
 
 - Whether Chrome only or Chrome + Edge are supported on Windows.
 - Exact proxy providers used in production.
-- Exact Supreme selector implementation.
-- Exact monitor implementation.
-- Whether final purchase confirmation is always manual or store-configurable.
+- Exact Supreme selector implementation for fallback PDP navigation.
 - Whether a companion browser extension is ever necessary.
 - Cloud sync or account system.
 - Commercial licensing/distribution model.
 - Auto-update mechanism.
 - macOS/Linux release packaging.
-- Whether per-store shipping addresses are needed, and the table behind them. The
-  assignment grid is built for extra columns but renders one until a second
-  checkout-capable adapter exists.
-- Whether preflight should move into a shared package so the main process and the
-  renderer enforce one implementation rather than two.
-- When to split `packages/stores` and `packages/observability` out of
-  `packages/runner`.
+- Whether per-store shipping addresses are needed.
+- When to split `packages/stores` and `packages/observability` out of `packages/runner`.
 
 These should be decided only when the preceding architecture gives enough evidence.
 
@@ -2131,48 +2100,19 @@ The following decisions are considered **locked unless new evidence justifies ch
 
 - Product name is **Copify**.
 - Copify is a local-first desktop application.
-- Windows is the first platform.
-- macOS and Linux come later.
-- Electron + React + TypeScript is the application stack.
-- Playwright controls real headed Chrome.
-- SQLite stores local structured data.
-- Browser architecture is **Model B: independent persistent Chrome processes**.
-- Each browser uses a unique persistent profile.
+- Windows is the first platform; macOS and Linux come later.
+- Stack: Electron + React + TypeScript + Node.js + SQLite (`node:sqlite` + Drizzle).
+- Automation architecture is **Model B: persistent headed Chrome processes** controlled via **`rebrowser-playwright`** (zero CDP `Runtime.enable` leaks).
+- Each browser uses a unique persistent profile (`userDataDir`).
 - Browser runners execute in separate Node child processes.
-- Proxies are modeled independently from browser profiles.
-- A session uses one fixed network route for its lifetime.
-- Proxy reliability matters more than raw latency.
-- Run inspection is a first-class feature.
-- Every drop attempt is modeled as a `Run`.
-- Every state transition becomes a structured event.
-- Both wall-clock and monotonic timestamps are recorded.
-- Normal logging is sanitized.
-- Playwright trace is optional diagnostic data.
-- Full HAR is not a default production artifact.
-- Sensitive credentials are protected through OS-backed secret storage.
-- Copify does not store raw card/CVV information.
-- The application is store-agnostic.
-- Supreme is the first store adapter.
-- Target configurations support keyword, color, and size priority.
-- Targets include a maximum retail-price kill switch.
-- Security challenges trigger human handoff.
-- Ideally all session checks out on the drops or at least as many as possible.
-- Development begins with browser/session infrastructure and observability before Supreme-specific automation.
-- Electron Vite is the build tooling; Drizzle schema over `node:sqlite` is the
-  persistence layer.
-- The renderer uses component state and IPC events, with no UI state library, no
-  component library, and no icon dependency.
-- Stores declare a capability manifest, and the interface renders from it rather
-  than branching on store identity.
-- A store with no adapter is an ordinary manifest, not a special case.
-- `storeId` is a registry-validated string, never an enum.
-- The interface is near-monochrome: primary actions are near-white and colour is
-  reserved for state.
-- The window is frameless with an app-drawn titlebar.
-- Navigation follows the drop workflow, and Run is both the landing page and the
-  drop console.
-- Preflight blocks on critical failures and passes on warnings.
-- Data is presented as rows with one primary action; the rest goes in an overflow
-  menu, and creating or editing happens in a drawer.
-- Interface copy states what is true and what will happen, and structural facts
-  render as data rather than prose.
+- Storefront monitoring is **decoupled** from browser sessions, using high-frequency TLS/JA3-spoofed HTTP requests (`got-scraping`).
+- Browser sessions remain **pre-warmed** in standby on the storefront prior to drop.
+- High-speed execution utilizes **Direct-Carting via `variantId`** (`cart/add.js` in-page execution and direct cart navigation).
+- Browser interactions utilize **human input abstraction (`ghost-cursor`)** with Bezier trajectories, natural click dwell, and simulated paste.
+- Profiles maintain **strict 1:1 GeoIP coherence** with their assigned proxy routes (Timezone, Locale, Geolocation, WebRTC leak prevention).
+- Persistent profiles support **Profile Warming** (retaining Google human trust scores $\ge 0.9$ and Shop Pay authentication).
+- Proxies are modeled independently from browser profiles; a session uses one fixed network route for its lifetime.
+- European PSD2 / 3DS banking approvals and security challenges trigger **human handoff**.
+- Every drop attempt is modeled as a `Run` with monotonic nanosecond precision.
+- UI is an operations console: near-monochrome, rows over cards, drawers for forms, frameless window with app-drawn titlebar.
+- Capability-driven store architecture: stores declare manifests in `packages/shared`, UI renders from capabilities rather than store branches.

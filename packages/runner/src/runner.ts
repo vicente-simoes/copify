@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { spawn, type ChildProcess } from "node:child_process";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
-import { IPC_VERSION, runnerCommandSchema, type BrowserLaunchMode, type ProductVariant, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
-import { findChromeExecutable, toPlaywrightProxy, verifyRoute } from "./network";
+import type { BrowserContext, Locator, Page } from "rebrowser-playwright";
+import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type ProductVariant, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
+import { verifyRoute } from "./network";
+import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
 
 let context: BrowserContext | undefined;
 let profileId: string | undefined;
+let profileUserDataDir: string | undefined;
 let stopping = false;
 let recording: RunnerRecording | undefined;
 let startedMono: bigint | undefined;
@@ -18,31 +19,38 @@ type CartInspection = { state: "EMPTY" } | { state: "ITEMS"; itemCount: number |
 let pendingAssist: AssistCommand | undefined;
 let cartResumeMode: "EMPTY_CART" | "TARGET_ONLY" | undefined;
 let tracingStoppedForPrivacy = false;
-let nativeChrome: ChildProcess | undefined;
-let cdpBrowser: Browser | undefined;
+let driverSession: DriverSession | undefined;
+let driverMetadata: BrowserDriverMetadata | undefined;
+let automationPausedUntil: number | null = null;
+let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
 
 process.on("message", async (message: unknown) => {
   const command = runnerCommandSchema.safeParse(message); if (!command.success) return;
-  if (command.data.type === "START") await start(command.data.profileId, command.data.userDataDir, command.data.launchMode, command.data.proxy, command.data.probeUrl, command.data.recording);
+  if (command.data.type === "START") await start(command.data.profileId, command.data.userDataDir, command.data.driver, command.data.proxy, command.data.probeUrl, command.data.recording);
   if (command.data.type === "END_RUN") await endRun(command.data.runSessionId);
   if (command.data.type === "ASSIST_TARGET") await assistTarget(command.data);
   if (command.data.type === "RESUME_ASSIST") await resumeAssist(command.data.runId, command.data.runSessionId);
   if (command.data.type === "CHECK_CART") await checkCart(command.data.profileId);
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
+  if (command.data.type === "PAUSE_AUTOMATION") pauseAutomation(command.data.until);
+  if (command.data.type === "RESUME_AUTOMATION") automationPausedUntil = null;
   if (command.data.type === "STOP") await stop();
 });
 
-async function start(id: string, userDataDir: string, launchMode: BrowserLaunchMode, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null): Promise<void> {
-  if (context) return; profileId = id; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false;
+async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null): Promise<void> {
+  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = [];
   try {
     await disableChromeTranslation(userDataDir);
-    const options: Parameters<typeof chromium.launchPersistentContext>[1] = { headless: false, executablePath: findChromeExecutable(), args: ["--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble", "--disable-features=Translate"], ignoreDefaultArgs: ["--no-sandbox"], proxy: proxy ? toPlaywrightProxy(proxy) : undefined };
+    const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
     if (recording?.diagnosticLevel === "DEEP_DEBUG" && !recording.assisted) {
       await mkdir(recording.artifactDir, { recursive: true });
-      options.recordHar = { path: join(recording.artifactDir, "network.har"), mode: "minimal", content: "omit" };
-      options.recordVideo = { dir: join(recording.artifactDir, "video") };
+      if (driver.kind === "NATIVE_STEALTH") {
+        persistentOptions.recordHar = { path: join(recording.artifactDir, "network.har"), mode: "minimal", content: "omit" };
+        persistentOptions.recordVideo = { dir: join(recording.artifactDir, "video") };
+      }
     }
-    context = launchMode === "NATIVE_CDP" ? await launchNativeContext(userDataDir, proxy) : await chromium.launchPersistentContext(userDataDir, options);
+    driverSession = await createBrowserDriver(driver).launch({ driver, userDataDir, proxy, persistentOptions });
+    context = driverSession.context; driverMetadata = driverSession.metadata;
     context.on("close", () => {
       context = undefined;
       if (!stopping) {
@@ -50,7 +58,10 @@ async function start(id: string, userDataDir: string, launchMode: BrowserLaunchM
         setTimeout(() => process.exit(0), 25).unref();
       }
     });
-    if (recording) await beginRecording(context, recording);
+    if (recording) {
+      await beginRecording(context, recording);
+      if (recording.diagnosticLevel === "DEEP_DEBUG" && driver.kind === "EXTERNAL_CDP") emitRun("DRIVER_CAPABILITY_UNAVAILABLE", { capability: "launchHarVideo", message: "External CDP attachment cannot add launch-time HAR or video recording." });
+    }
     if (context.pages().length === 0) await context.newPage();
     const route = await verifyRoute(context, proxy, probeUrl);
     emitRun("ROUTE_VERIFIED", { kind: route.kind, verification: route.verification });
@@ -58,52 +69,29 @@ async function start(id: string, userDataDir: string, launchMode: BrowserLaunchM
     // monitor performs its first check. This is a normal storefront warm-up,
     // not an artificial delay or stealth behavior.
     if (recording?.assisted) await warmStorefront(context).catch(() => undefined);
-    send({ type: "READY", version: IPC_VERSION, profileId: id, route });
+    send({ type: "READY", version: IPC_VERSION, profileId: id, route, driver: driverSession.metadata });
   } catch (error) {
     if (recording) emitRun("RECORDING_OR_LAUNCH_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
-    await cdpBrowser?.close().catch(() => undefined); cdpBrowser = undefined;
-    if (nativeChrome?.exitCode === null) nativeChrome.kill(); nativeChrome = undefined;
+    await driverSession?.stop().catch(() => undefined); driverSession = undefined;
     const classified = classifyLaunchError(error); send({ type: "ERROR", version: IPC_VERSION, profileId: id, code: classified.code, message: classified.message });
     setTimeout(() => process.exit(1), 25).unref();
   }
-}
-
-async function launchNativeContext(userDataDir: string, proxy: RunnerProxy | null): Promise<BrowserContext> {
-  if (proxy?.username || proxy?.password) throw new Error("Native Chrome + CDP does not yet support authenticated proxy profiles. Use Playwright launch for this browser profile.");
-  const executable = findChromeExecutable(); if (!executable) throw new Error("Google Chrome was not found.");
-  await mkdir(userDataDir, { recursive: true });
-  await rm(join(userDataDir, "DevToolsActivePort"), { force: true });
-  const args = ["--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble", "--disable-features=Translate", `--user-data-dir=${userDataDir}`, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", ...(proxy ? [`--proxy-server=${proxy.protocol}://${proxy.host}:${proxy.port}`] : [])];
-  const chrome = spawn(executable, args, { stdio: "ignore", windowsHide: true }); nativeChrome = chrome;
-  const endpoint = await readDevToolsEndpoint(userDataDir, chrome); cdpBrowser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
-  const connected = cdpBrowser.contexts()[0]; if (!connected) throw new Error("Chrome did not expose a default CDP context.");
-  chrome.once("exit", () => { nativeChrome = undefined; context = undefined; if (!stopping) process.exit(1); });
-  return connected;
-}
-
-async function readDevToolsEndpoint(userDataDir: string, chrome: ChildProcess): Promise<string> {
-  const file = join(userDataDir, "DevToolsActivePort"); const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (chrome.exitCode !== null) throw new Error("Native Chrome exited before opening its local control endpoint. Close any remaining Copify window for this profile and try again.");
-    try { const [port, path] = (await readFile(file, "utf8")).trim().split(/\r?\n/); if (/^\d+$/.test(port) && path?.startsWith("/devtools/browser/")) return `http://127.0.0.1:${port}`; } catch { /* Chrome has not written its local endpoint yet. */ }
-    await new Promise<void>((resolve) => setTimeout(resolve, 80));
-  }
-  throw new Error("Native Chrome did not open its local CDP endpoint.");
 }
 
 async function beginRecording(activeContext: BrowserContext, value: RunnerRecording): Promise<void> {
   await mkdir(value.artifactDir, { recursive: true });
   emitRun("RECORDING_STARTED", { diagnosticLevel: value.diagnosticLevel });
   activeContext.on("page", (page) => observePage(page));
+  activeContext.on("request", () => { requestCount += 1; });
   activeContext.on("requestfailed", (request) => emitRun("NETWORK_FAILED", sanitizeRequest(request.url(), request.method(), request.resourceType(), request.failure()?.errorText ?? "NETWORK_FAILED")));
   activeContext.on("response", (response) => {
-    const status = response.status(); if (status >= 400) emitRun("HTTP_STATUS", { ...sanitizeRequest(response.url(), response.request().method(), response.request().resourceType()), status });
+    const status = response.status(); if (status === 403) forbiddenCount += 1; if (status === 429) rateLimitedCount += 1; if (status >= 400) emitRun("HTTP_STATUS", { ...sanitizeRequest(response.url(), response.request().method(), response.request().resourceType()), status });
   });
   for (const page of activeContext.pages()) observePage(page);
   if (value.diagnosticLevel !== "NORMAL") {
     await activeContext.tracing.start({ screenshots: true, snapshots: true, sources: true, title: value.runId });
   }
-  if (value.diagnosticLevel === "DEEP_DEBUG" && !value.assisted) {
+  if (value.diagnosticLevel === "DEEP_DEBUG" && !value.assisted && driverMetadata?.capabilities.launchHarVideo) {
     emitArtifact("HAR", "network.har", true);
     emitArtifact("VIDEO", "video", true);
   }
@@ -111,7 +99,7 @@ async function beginRecording(activeContext: BrowserContext, value: RunnerRecord
 }
 
 function observePage(page: Page): void {
-  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) emitRun("NAVIGATION", sanitizeRequest(frame.url(), "GET", "document")); });
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) { navigationCount += 1; emitRun("NAVIGATION", sanitizeRequest(frame.url(), "GET", "document")); void page.evaluate(() => performance.getEntriesByType("navigation").at(-1)?.duration ?? null).then((value) => { if (typeof value === "number" && value >= 0) pageLoads.push(value); }).catch(() => undefined); } });
   page.on("pageerror", (error) => { emitRun("PAGE_ERROR", { message: sanitizeText(error.message) }); void screenshot(`error-${Date.now()}.png`, false); });
   page.on("console", (message) => { if (recording?.diagnosticLevel !== "NORMAL") emitRun("CONSOLE", { level: message.type(), text: sanitizeText(message.text()) }); });
 }
@@ -123,7 +111,7 @@ async function endRun(runSessionId: string): Promise<void> {
     if (recording.diagnosticLevel !== "NORMAL" && context && !tracingStoppedForPrivacy) {
       await context.tracing.stop({ path: join(recording.artifactDir, "trace.zip") }); emitArtifact("TRACE", "trace.zip", true);
     }
-    emitRun("RECORDING_ENDED", {});
+    emitRun("RECORDING_ENDED", {}); await emitHealth();
   } catch (error) {
     emitRun("RECORDING_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
   } finally {
@@ -134,7 +122,8 @@ async function endRun(runSessionId: string): Promise<void> {
 
 async function assistTarget(command: Extract<import("@copify/shared").RunnerCommand, { type: "ASSIST_TARGET" }>): Promise<void> {
   if (!context || !recording || recording.runId !== command.runId || recording.runSessionId !== command.runSessionId) return;
-  if (pendingAssist || assistState === "CHECKOUT_HANDOFF") return;
+  if (automationBlocked()) { checkpointForCircuit(); return; }
+  if (pendingAssist || assistState === "READY_TO_CONFIRM") return;
   pendingAssist = command;
   try {
     assistPage = context.pages().find((page) => !page.isClosed()) ?? await context.newPage(); await assistPage.bringToFront();
@@ -146,17 +135,19 @@ async function assistTarget(command: Extract<import("@copify/shared").RunnerComm
 
 async function resumeAssist(runId: string, runSessionId: string): Promise<void> {
   if (!pendingAssist || pendingAssist.runId !== runId || pendingAssist.runSessionId !== runSessionId || !assistPage) return;
+  if (automationBlocked()) { checkpointForCircuit(); return; }
   try {
     if (cartResumeMode === "EMPTY_CART") { transition("PRODUCT_OPEN", "CART_RECHECK_STARTED", {}); await continueFromEmptyCart(pendingAssist); return; }
     if (cartResumeMode === "TARGET_ONLY") { transition("CARTED", "CART_RECHECK_STARTED", {}); await continueFromTargetOnlyCart(pendingAssist); return; }
     if (await checkpoint(assistPage, false)) return;
     await stopSensitiveCapture(); await fillShipping(assistPage, pendingAssist.shipping); await acceptTerms(assistPage);
-    transition("CHECKOUT_HANDOFF", "CHECKOUT_HANDOFF", { message: "Checkpoint cleared. Shipping details were filled; complete payment manually." }); await assistPage.bringToFront();
+    transition("READY_TO_CONFIRM", "READY_TO_CONFIRM", { message: "Checkpoint cleared. Shipping details were filled; review payment and confirm manually." }); await assistPage.bringToFront();
   } catch (error) { recordAssistFailure(error, "Could not resume assisted checkout."); }
 }
 
 async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
   if (!assistPage) return;
+  if (automationBlocked()) { checkpointForCircuit(); return; }
   const cart = await inspectCart(assistPage, command.candidate.name, command.candidate.url);
   if (cart.state === "BLOCKED") { cartResumeMode = "EMPTY_CART"; return; }
   if (cart.state !== "EMPTY") { cartResumeMode = "EMPTY_CART"; await showCartForReview(assistPage, command.candidate.url); transition("CHECKPOINT", cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", { reason: cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify left the existing cart unchanged. Empty the cart manually, then resume this session." }); await assistPage.bringToFront(); return; }
@@ -167,7 +158,7 @@ async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
   await selectVariant(assistPage, command.variant);
   transition("VARIANT_SELECTED", "VARIANT_SELECTED", { color: command.variant.color, size: command.variant.size });
   transition("CARTING", "ADD_TO_CART_STARTED", {});
-  const added = await addToCart(assistPage);
+  atcAttempts += 1; const added = await addToCart(assistPage);
   if (!added) throw new AssistError("ATC_FAILED", "The storefront did not confirm that the item was added to cart.");
   transition("CARTED", "CART_CONFIRMED", { requestedQuantity: command.quantity, actualQuantity: 1 });
   if (command.quantity > 1) emitRun("QUANTITY_FALLBACK", { requestedQuantity: command.quantity, actualQuantity: 1 });
@@ -176,6 +167,7 @@ async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
 
 async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void> {
   if (!assistPage) return;
+  if (automationBlocked()) { checkpointForCircuit(); return; }
   const cart = await inspectCart(assistPage, command.candidate.name, command.candidate.url);
   if (cart.state === "BLOCKED") { cartResumeMode = "TARGET_ONLY"; return; }
   if (cart.state !== "ITEMS" || cart.itemCount !== 1 || !cart.hasTarget) { cartResumeMode = "TARGET_ONLY"; await showCartForReview(assistPage, command.candidate.url); transition("CHECKPOINT", "CART_CONTENT_CHANGED", { reason: "CART_CONTENT_CHANGED", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify will not continue until the cart contains exactly the detected target. Review the cart manually, then resume." }); await assistPage.bringToFront(); return; }
@@ -185,7 +177,7 @@ async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void>
   if (await checkpoint(assistPage)) return;
   await stopSensitiveCapture(); await fillShipping(assistPage, command.shipping); await acceptTerms(assistPage);
   if (await checkpoint(assistPage)) return;
-  transition("CHECKOUT_HANDOFF", "CHECKOUT_HANDOFF", { message: "Shipping details were filled. Complete payment and submission manually." }); await assistPage.bringToFront();
+  transition("READY_TO_CONFIRM", "READY_TO_CONFIRM", { message: "Shipping details were filled. Review payment and confirm manually." }); await assistPage.bringToFront();
 }
 
 async function inspectCart(page: Page, targetName: string, productUrl: string): Promise<CartInspection> {
@@ -292,7 +284,7 @@ async function emptyCart(id: string): Promise<void> {
   finally { await page.close().catch(() => undefined); }
 }
 
-function recordAssistFailure(error: unknown, fallback: string): void { const failure = error instanceof AssistError ? error : new AssistError("UNKNOWN", sanitizeText(error instanceof Error ? error.message : fallback)); transition("FAILED", "ASSIST_FAILED", { code: failure.code, message: failure.message }); }
+function recordAssistFailure(error: unknown, fallback: string): void { checkoutFailures += 1; const failure = error instanceof AssistError ? error : new AssistError("UNKNOWN", sanitizeText(error instanceof Error ? error.message : fallback)); transition("FAILED", "ASSIST_FAILED", { code: failure.code, message: failure.message }); }
 
 async function selectVariant(page: Page, variant: ProductVariant): Promise<void> {
   const selectByLabel = async (label: RegExp, value: string): Promise<boolean> => {
@@ -397,6 +389,7 @@ async function checkpoint(page: Page, emit = true): Promise<boolean> {
   const text = (await page.locator("body").innerText().catch(() => "")).slice(0, 20_000).toLowerCase();
   const reason = /captcha|recaptcha|hcaptcha/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
   if (!reason) return false;
+  challengeCount += 1;
   if (emit) transition("CHECKPOINT", "CHECKPOINT_DETECTED", { reason }); await page.bringToFront(); return true;
 }
 
@@ -498,7 +491,7 @@ export function splitShippingName(value: string): { firstName: string; lastName:
 export function shippingCountryNames(country: string): string[] { const code = country.trim().toUpperCase(); const displayName = new Intl.DisplayNames(["en"], { type: "region" }).of(code); return [...new Set([code, displayName].filter((value): value is string => Boolean(value)))]; }
 
 class AssistError extends Error { constructor(readonly code: string, message: string) { super(message); } }
-function transition(next: string, type: string, payload: Record<string, unknown>): void { const previous = assistState; assistState = next; emitRun(type, payload, previous, next); }
+function transition(next: string, type: string, payload: Record<string, unknown>): void { const previous = assistState; assistState = next; emitRun(type, payload, previous, next); void emitHealth(); }
 
 async function screenshot(name: string, sensitive: boolean): Promise<void> {
   if (tracingStoppedForPrivacy) return;
@@ -519,9 +512,24 @@ function emitArtifact(kind: RunArtifact["kind"], localPath: string, sensitive: b
   send({ type: "RUN_ARTIFACT", version: IPC_VERSION, profileId, artifact });
 }
 
+function automationBlocked(): boolean { return automationPausedUntil !== null && Date.now() < automationPausedUntil; }
+function pauseAutomation(until: number): void { automationPausedUntil = until; checkpointForCircuit(); }
+function checkpointForCircuit(): void {
+  if (!recording || assistState === "READY_TO_CONFIRM") return;
+  transition("CHECKPOINT", "AUTOMATION_PAUSED", { reason: "STOREFRONT_PROTECTION", until: automationPausedUntil });
+  void assistPage?.bringToFront();
+}
+async function emitHealth(): Promise<void> {
+  if (!profileId || !recording || !startedMono || !context) return;
+  const profileAgeMs = profileUserDataDir ? await stat(profileUserDataDir).then((value) => Math.max(0, Date.now() - value.birthtimeMs)).catch(() => null) : null;
+  const cookieCount = await context.cookies().then((value) => value.length).catch(() => null);
+  const minutes = Math.max(Number(process.hrtime.bigint() - startedMono) / 60_000_000_000, 1 / 60);
+  send({ type: "HEALTH", version: IPC_VERSION, profileId, health: { capturedAt: Date.now(), navigatorWebdriver: await (context.pages()[0]?.evaluate(() => navigator.webdriver).catch(() => null) ?? null), browserVersion: driverMetadata?.browserVersion ?? context.browser()?.version() ?? null, driverKind: driverMetadata?.kind ?? null, stealthStatus: driverMetadata?.stealthStatus ?? null, profileAgeMs, cookieCount, requestCount, requestsPerMinute: requestCount / minutes, navigationCount, navigationsPerMinute: navigationCount / minutes, atcAttempts, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures, averagePageLoadMs: pageLoads.length ? pageLoads.reduce((sum, value) => sum + value, 0) / pageLoads.length : null, circuit: null } });
+}
+
 async function stop(): Promise<void> {
   stopping = true; const id = profileId;
-  try { if (recording) await endRun(recording.runSessionId); if (nativeChrome) nativeChrome.kill(); else await context?.close(); await cdpBrowser?.close().catch(() => undefined); } finally { context = undefined; cdpBrowser = undefined; nativeChrome = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
+  try { if (recording) await endRun(recording.runSessionId); await driverSession?.stop(); } finally { context = undefined; driverSession = undefined; driverMetadata = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
 }
 
 function sanitizeRequest(url: string, method: string, resourceType: string, error?: string): Record<string, unknown> {
@@ -535,11 +543,9 @@ function sanitizeRequest(url: string, method: string, resourceType: string, erro
 function sanitizePayload(payload: Record<string, unknown>): Record<string, unknown> { return Object.fromEntries(Object.entries(payload).map(([key, value]) => [key, typeof value === "string" ? sanitizeText(value) : value])); }
 export function sanitizeText(value: string): string { return value.replace(/(authorization|cookie|set-cookie|password|token|secret|proxy[-_ ]?authorization)\s*[:=]\s*(?:bearer\s+)?[^\s;,&]+/gi, "$1=[REDACTED]").replace(/([?&](?:token|code|key|password|secret|session)=[^&\s]+)/gi, "[REDACTED_QUERY]").slice(0, 2_000); }
 function send(event: RunnerEvent): void { process.send?.(event); }
-function classifyLaunchError(error: unknown): { code: "BROWSER_START_FAILED" | "PROXY_CONNECTION_FAILED" | "PROXY_AUTH_FAILED" | "UNKNOWN"; message: string } {
+function classifyLaunchError(error: unknown): { code: Extract<RunnerEvent, { type: "ERROR" }>["code"]; message: string } {
+  if (error instanceof BrowserDriverError) return { code: error.code, message: error.message };
   const message = error instanceof Error ? error.message : "";
-  if (/Native Chrome \+ CDP.*authenticated proxy/i.test(message)) return { code: "PROXY_AUTH_FAILED", message: "Native Chrome + CDP cannot use this authenticated proxy. Switch this profile to Playwright launch." };
-  if (/Native Chrome exited before opening/i.test(message)) return { code: "BROWSER_START_FAILED", message: "Native Chrome closed before Copify could attach. Close any remaining Copify Chrome window for this profile, then try again." };
-  if (/local CDP endpoint|connectOverCDP|ECONNREFUSED/i.test(message)) return { code: "BROWSER_START_FAILED", message: "Chrome started but Copify could not attach through its local CDP endpoint. Try again, or use Playwright launch for this profile." };
   if (/407|proxy auth/i.test(message)) return { code: "PROXY_AUTH_FAILED", message: "Chrome could not authenticate with the configured proxy." };
   if (/ERR_PROXY|ERR_TUNNEL|proxy/i.test(message)) return { code: "PROXY_CONNECTION_FAILED", message: "Chrome could not connect through the configured proxy." };
   return { code: "BROWSER_START_FAILED", message: "Chrome could not be started." };

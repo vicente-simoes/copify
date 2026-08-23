@@ -1,9 +1,9 @@
 {
   "name": "@copify/runner",
-  "version": "0.5.15",
+  "version": "0.7.0",
   "private": true,
   "dependencies": {
     "@copify/shared": "workspace:*",
-    "playwright": "^1.52.0"
+    "rebrowser-playwright": "1.52.0"
   }
 }

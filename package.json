@@ -1,6 +1,6 @@
 {
   "name": "copify",
-  "version": "0.5.15",
+  "version": "0.7.0",
   "private": true,
   "packageManager": "pnpm@10.0.0",
   "pnpm": {
@@ -17,6 +17,8 @@
     "start": "pnpm --filter @copify/desktop preview",
     "typecheck": "pnpm --filter @copify/desktop typecheck",
     "test": "vitest run",
+    "test:stealth": "set COPIFY_STEALTH_SMOKE=1&& vitest run packages/runner/src/stealth.integration.test.ts",
+    "test:stealth:live": "set COPIFY_STEALTH_LIVE=1&& vitest run packages/runner/src/stealth.live.test.ts",
     "test:watch": "vitest"
   },
   "build": {

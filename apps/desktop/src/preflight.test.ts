@@ -6,12 +6,13 @@ const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
 
 const profile = (over: Partial<BrowserProfile> = {}): BrowserProfile => ({
   id: id(1), name: "Home", userDataDir: "C:/x", proxyProfileId: null, shippingProfileId: null,
-  launchMode: "PLAYWRIGHT", enabled: true, createdAt: 0, updatedAt: 0, ...over,
+  driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 0, updatedAt: 0, ...over,
 });
 
 const stopped = (profileId: string): SessionSnapshot => ({
   profileId, state: "STOPPED", error: null,
   route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } },
+  driver: null,
   updatedAt: 0,
 });
 
@@ -106,6 +107,18 @@ describe("preflight", () => {
     }));
     expect(noPriceLimit.canStart).toBe(false);
     expect(check(noPriceLimit, "price")?.status).toBe("fail");
+  });
+
+  it("blocks incomplete or proxy-conflicted external CDP profiles", () => {
+    const missing = preflight(base({ profiles: [profile({ driver: { kind: "EXTERNAL_CDP", endpointConfigured: false } })] }));
+    expect(check(missing, "drivers")?.status).toBe("fail");
+    const conflicted = preflight(base({ profiles: [profile({ driver: { kind: "EXTERNAL_CDP", endpointConfigured: true }, proxyProfileId: id(3) })] }));
+    expect(check(conflicted, "drivers")?.status).toBe("fail");
+  });
+
+  it("warns that external CDP cannot add launch-time HAR or video", () => {
+    const result = preflight(base({ diagnosticLevel: "DEEP_DEBUG", profiles: [profile({ driver: { kind: "EXTERNAL_CDP", endpointConfigured: true } })] }));
+    expect(result.canStart).toBe(true); expect(check(result, "drivers")?.status).toBe("warn");
   });
 
   it("blocks a saved selection when its browser was disabled or removed", () => {

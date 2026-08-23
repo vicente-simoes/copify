@@ -1,9 +1,9 @@
 import { useState } from "react";
-import type { BrowserProfile, ProxyBenchmark, ProxyProfile, SessionSnapshot, Store } from "@copify/shared";
+import type { BrowserDriverInput, BrowserProfile, ProxyBenchmark, ProxyProfile, SessionSnapshot, Store } from "@copify/shared";
 import type { ProxyDraft } from "../types";
 import { Field, Benchmark } from "../ui/primitives";
 import { Proxies } from "./Proxies";
-import { LaunchModes } from "./LaunchModes";
+import { BrowserDrivers } from "./LaunchModes";
 
 type Tab = "routes" | "stores" | "advanced" | "about";
 
@@ -40,7 +40,7 @@ export function Settings(props: {
   onSaveProxy: (event: React.FormEvent) => void;
   onCancelProxy: () => void;
   onToggleStore: (id: string, enabled: boolean) => void;
-  onLaunchMode: (id: string, mode: BrowserProfile["launchMode"]) => void;
+  onBrowserDriver: (id: string, driver: BrowserDriverInput) => void;
 }) {
   const [tab, setTab] = useState<Tab>("routes");
 
@@ -143,12 +143,12 @@ export function Settings(props: {
       )}
 
       {tab === "advanced" && (
-        <LaunchModes
+        <BrowserDrivers
           profiles={props.profiles}
           proxies={props.proxies}
           sessions={props.sessions}
           busy={props.busy}
-          onUpdate={props.onLaunchMode}
+          onUpdate={props.onBrowserDriver}
         />
       )}
 

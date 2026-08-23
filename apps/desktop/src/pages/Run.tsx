@@ -27,7 +27,10 @@ function LiveBoard({
   onResume: (profileId: string) => void;
   onEnd: () => void;
 }) {
-  const sessions = detail?.sessions ?? [];
+  const sessions = [...(detail?.sessions ?? [])].sort((left, right) => {
+    const rank = (state: string) => state === "READY_TO_CONFIRM" ? 0 : state === "CHECKPOINT" ? 1 : state === "FAILED" ? 3 : 2;
+    return rank(left.executionState) - rank(right.executionState) || left.startedAt - right.startedAt;
+  });
   const checkpointCopy = (reason: string | null) =>
     reason === "CART_NOT_EMPTY"
       ? "Cart is not empty. Copify left it alone — empty it, then recheck."
@@ -48,16 +51,19 @@ function LiveBoard({
       </div>
 
       <div className="rows live-board">
-        {sessions.map((session) => {
+        {sessions.map((session, index) => {
           const waiting = session.executionState === "CHECKPOINT";
+          const readyToConfirm = session.executionState === "READY_TO_CONFIRM";
           const cartCheckpoint = /^CART_/.test(session.checkpointReason ?? "");
           return (
-            <div key={session.id} className={`row ${waiting ? "needs-action" : ""}`}>
+            <div key={session.id} className={`row ${waiting || readyToConfirm ? "needs-action" : ""}`}>
               <span className={`state ${session.status.toLowerCase()}`}>{session.executionState}</span>
               <div className="row-main">
                 <span className="row-name">{session.browserProfileName}</span>
+                {readyToConfirm && index === 0 && <span className="badge">live priority</span>}
                 <Route route={session.route} />
                 {waiting && <span className="row-meta">{checkpointCopy(session.checkpointReason)}</span>}
+                {readyToConfirm && <span className="row-meta">Checkout is filled. Review payment and confirm manually in the browser.</span>}
                 {session.finalError && (
                   <span className="error-detail">{session.finalError.code}: {session.finalError.message}</span>
                 )}
@@ -155,6 +161,7 @@ export function Run({
 
   const status = preflight({
     mode,
+    diagnosticLevel: level,
     profiles,
     selectedProfileIds: selectedProfiles,
     session: getSession,

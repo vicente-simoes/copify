@@ -2,7 +2,16 @@
 
 Copify is a local Windows desktop console for isolated persistent Chrome sessions.
 
-Each browser profile can use either Playwright launch or Native Chrome + local CDP attachment. Playwright launch is the default for new and existing profiles; Native CDP remains an opt-in option. Native CDP currently supports direct and unauthenticated-proxy routes only.
+Each browser profile uses the Native Stealth driver by default: real persistent Google Chrome controlled through the exact-pinned Rebrowser Playwright runtime. Power users may instead attach Copify to an already-running local anti-detect browser through an encrypted, loopback-only external CDP endpoint. External browsers own their profile and network route.
+
+## v0.7
+
+- Native Stealth removes Playwright's automation flag, adds `AutomationControlled` hardening, and refuses startup unless `navigator.webdriver === false`.
+- Browser launch is isolated behind native-stealth and external-CDP drivers with explicit ownership and recording capabilities.
+- Existing Playwright and Native CDP profile choices migrate to Native Stealth.
+- External CDP endpoints are encrypted with Electron `safeStorage`, never returned to the renderer, and never logged.
+- Run health records driver kind, browser version, and stealth verification status.
+- `pnpm test:stealth` runs the opt-in local Chrome compatibility gate; `pnpm test:stealth:live` records third-party validation evidence.
 
 ## v0.5
 

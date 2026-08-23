@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { chromium, type Page, type Response } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response } from "rebrowser-playwright";
+import { stat } from "node:fs/promises";
 import { IPC_VERSION, getStoreManifest, monitorCommandSchema, type MonitorEvent, type ProductCandidate, type ProductVariant, type TargetCheck, type TargetDecision, type TargetSnapshot } from "@copify/shared";
 import { findChromeExecutable } from "./network";
+import { buildNativeStealthArgs } from "./drivers";
 
 const SUPREME_EU_LISTING_URL = "https://eu.supreme.com/collections/all";
 const NORMAL_POLL_INTERVAL_MS = 15_000;
@@ -11,7 +13,20 @@ let timer: NodeJS.Timeout | undefined;
 let running = false;
 let stopping = false;
 let activeRunId: string | null = null;
-let protectionResponseCount = 0;
+let activeTarget: TargetSnapshot | null = null;
+let paused = false;
+let context: BrowserContext | undefined;
+let monitorPage: Page | undefined;
+let startedAt = 0;
+let requestCount = 0;
+let navigationCount = 0;
+let forbiddenCount = 0;
+let rateLimitedCount = 0;
+let challengeCount = 0;
+let loads: number[] = [];
+let navigatorWebdriver: boolean | null = null;
+let browserVersion: string | null = null;
+let monitorUserDataDir: string | null = null;
 
 export interface StoreAdapter { id: string; locateProducts(target: TargetSnapshot): Promise<ProductCandidate[]>; }
 
@@ -111,85 +126,37 @@ export function parseSupremeProductJson(value: unknown, fallback: ListingProduct
 
 export class SupremeEuAdapter implements StoreAdapter {
   readonly id = "supreme-eu";
+  constructor(private readonly page: Page) {}
   async locateProducts(target: TargetSnapshot): Promise<ProductCandidate[]> {
-    const executablePath = findChromeExecutable(); if (!executablePath) throw new Error("Google Chrome was not found. Install Chrome or use the Chrome browser runner before testing a target.");
-    const browser = await chromium.launch({ headless: true, executablePath });
-    try {
-      const page = await browser.newPage(); const listingResponse = await page.goto(SUPREME_EU_LISTING_URL, { waitUntil: "commit", timeout: 30_000 }); assertStorefrontResponse(listingResponse);
-      await page.locator('a[href*="/products/"]').first().waitFor({ state: "attached", timeout: 15_000 }).catch((error: unknown) => throwIfStorefrontChallenge(page, error));
-      const links = await page.locator('a[href*="/products/"]').evaluateAll((anchors) => anchors.map((anchor, index) => {
-        const element = anchor as HTMLAnchorElement; const fallback = decodeURIComponent(new URL(element.href).pathname.split("/").filter(Boolean).pop() ?? "").replace(/[-_]+/g, " ");
+    const listing = await this.fetchHtml(SUPREME_EU_LISTING_URL);
+    const links = await this.page.evaluate((html) => {
+      const document = new DOMParser().parseFromString(html, "text/html");
+      return [...document.querySelectorAll<HTMLAnchorElement>('a[href*="/products/"]')].map((element, index) => {
+        const href = new URL(element.href, "https://eu.supreme.com").toString(); const fallback = decodeURIComponent(new URL(href).pathname.split("/").filter(Boolean).pop() ?? "").replace(/[-_]+/g, " ");
         const card = element.closest("article, li, [data-product], [class*='product'], [class*='Product']") ?? element.parentElement;
         const image = element.querySelector("img"); const imageAlt = image?.getAttribute("alt")?.trim() ?? "";
         const aria = element.getAttribute("aria-label")?.replace(/\s+product\s+link$/i, "").trim() ?? "";
-        const name = aria || imageAlt.split(" - ")[0]?.trim() || (element.textContent ?? "").trim() || element.getAttribute("title") || fallback;
-        return { href: element.href, name, imageAlt, imageUrl: image?.currentSrc || image?.getAttribute("src") || null, priceText: (card?.textContent ?? element.textContent ?? "").trim(), index };
-      }).filter((value) => value.href && value.name));
-      const seen = new Set<string>(); const matches: ListingProductLink[] = links
-        .filter((link) => !seen.has(link.href) && (seen.add(link.href), matchesName(link.name, target)))
-        .map((link) => ({ ...link, color: colorFromProductImageAlt(link.imageAlt, link.name), imageUrl: canonicalProductImageUrl(link.imageUrl) }))
-        .sort((left, right) => preferredColorRank(left.color, target.preferredColors) - preferredColorRank(right.color, target.preferredColors) || left.index - right.index)
-        .slice(0, 5);
-      const result: ProductCandidate[] = [];
-      for (const link of matches) {
-        const product = await this.readProduct(page, link, target);
-        // A Supreme product page exposes its other colors and their live sizes.
-        // Once this page proves the configured variant is purchasable, loading
-        // four more duplicate color URLs only adds latency and storefront load.
-        if (decideTarget(target, [product]).kind === "VARIANT_SELECTED") return [product];
-        result.push(product);
-      }
-      return result;
-    } finally { await browser.close(); }
+        return { href, name: aria || imageAlt.split(" - ")[0]?.trim() || (element.textContent ?? "").trim() || element.getAttribute("title") || fallback, imageAlt, imageUrl: image?.getAttribute("src") || null, priceText: (card?.textContent ?? element.textContent ?? "").trim(), index };
+      }).filter((value) => value.href && value.name);
+    }, listing);
+    const seen = new Set<string>(); const matches: ListingProductLink[] = links.filter((link) => !seen.has(link.href) && (seen.add(link.href), matchesName(link.name, target))).map((link) => ({ ...link, color: colorFromProductImageAlt(link.imageAlt, link.name), imageUrl: canonicalProductImageUrl(link.imageUrl) })).sort((left, right) => preferredColorRank(left.color, target.preferredColors) - preferredColorRank(right.color, target.preferredColors) || left.index - right.index).slice(0, 5);
+    const result: ProductCandidate[] = [];
+    for (const link of matches) {
+      const html = await this.fetchHtml(link.href);
+      const embedded = await this.page.evaluate((source) => { const document = new DOMParser().parseFromString(source, "text/html"); const script = [...document.scripts].find((item) => item.id.startsWith("product-") && item.id.endsWith("-json")); try { return script ? JSON.parse(script.textContent ?? "") : null; } catch { return null; } }, html);
+      const product = parseSupremeProductJson(embedded, link);
+      if (!product) continue;
+      if (decideTarget(target, [product]).kind === "VARIANT_SELECTED") return [product];
+      result.push(product);
+    }
+    return result;
   }
-  private async readProduct(page: Page, link: ListingProductLink, target: TargetSnapshot): Promise<ProductCandidate> {
-    const productResponse = await page.goto(link.href, { waitUntil: "commit", timeout: 30_000 }); assertStorefrontResponse(productResponse);
-    const embedded = await page.waitForFunction(() => Array.from(document.scripts).some((script) => script.id.startsWith("product-") && script.id.endsWith("-json")), { timeout: 8_000 })
-      .then(() => page.evaluate(() => { const script = Array.from(document.scripts).find((item) => item.id.startsWith("product-") && item.id.endsWith("-json")); try { return script ? JSON.parse(script.textContent ?? "") : null; } catch { return null; } }))
-      .catch(() => null);
-    const candidate = parseSupremeProductJson(embedded, link);
-    if (candidate) return candidate;
-    await page.waitForFunction(() => /[€£$]\s*\d/.test(document.body.innerText), { timeout: 15_000 }).catch(() => undefined);
-    const data = await page.evaluate(() => {
-      const text = (selector: string) => document.querySelector(selector)?.textContent?.trim() ?? "";
-      const name = text("h1") || document.title || "Product"; const body = document.body.innerText.slice(0, 20_000);
-      const selects = [...document.querySelectorAll("select")].map((select) => ({ key: `${select.getAttribute("name") ?? ""} ${select.getAttribute("id") ?? ""} ${select.getAttribute("aria-label") ?? ""}`.toLowerCase(), options: [...select.querySelectorAll("option")].map((option) => ({ text: option.textContent?.trim() ?? "", disabled: (option as HTMLOptionElement).disabled })) }));
-      const colorButtons = [...document.querySelectorAll("button[title]")].map((button) => ({ title: button.getAttribute("title") ?? "", disabled: (button as HTMLButtonElement).disabled || button.getAttribute("aria-disabled") === "true" }));
-      return { name, body, selects, colorButtons };
-    });
-    const values = (kind: "color" | "size") => data.selects.find((select) => select.key.includes(kind))?.options.filter((option) => option.text && !/select|choose/i.test(option.text)) ?? [];
-    const knownColors = data.colorButtons.map((button) => ({ ...button, color: colorFromThumbnailTitle(button.title) })).filter((button): button is { title: string; disabled: boolean; color: string } => Boolean(button.color)).filter((button, index, all) => all.findIndex((item) => item.color === button.color) === index);
-    const colors = knownColors.length ? (target.preferredColors.length ? knownColors.filter((button) => target.preferredColors.some((color) => normalizeMatch(color) === normalizeMatch(button.color))) : knownColors.slice(0, 1)) : [{ title: "", disabled: false, color: values("color")[0]?.text ?? "Default" }];
-    const variants: ProductVariant[] = [];
-    for (const color of colors) {
-      if (color.title) await page.getByTitle(color.title, { exact: true }).click({ timeout: 5_000 }).catch(() => undefined);
-      const sizes = await page.locator("select").evaluateAll((selects) => { const size = selects.find((select) => `${select.getAttribute("name") ?? ""} ${select.getAttribute("id") ?? ""} ${select.getAttribute("aria-label") ?? ""}`.toLowerCase().includes("size")); return size ? [...size.querySelectorAll("option")].map((option) => ({ text: option.textContent?.trim() ?? "", disabled: (option as HTMLOptionElement).disabled })).filter((option) => option.text && !/select|choose/i.test(option.text)) : []; });
-      for (const size of sizes.length ? sizes : [{ text: "Default", disabled: false }]) variants.push({ color: color.color, size: size.text, available: !color.disabled && !size.disabled });
-    }
-    const imageColor = target.preferredColors.find((color) => variants.some((variant) => variant.available && normalizeMatch(variant.color) === normalizeMatch(color))) ?? variants.find((variant) => variant.available)?.color ?? colors[0]?.color ?? "";
-    const imageButton = knownColors.find((button) => normalizeMatch(button.color) === normalizeMatch(imageColor));
-    if (imageButton?.title) {
-      await page.getByTitle(imageButton.title, { exact: true }).click({ timeout: 5_000 }).catch(() => undefined);
-    }
-    const imageUrl = canonicalProductImageUrl(await page.evaluate(({ productName, color }) => {
-      const normalize = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-      const name = normalize(productName);
-      const selectedColor = normalize(color);
-      const images = [...document.querySelectorAll<HTMLImageElement>("img")].map((image) => {
-        const source = image.currentSrc || image.getAttribute("src") || image.getAttribute("data-src") || "";
-        const url = source ? new URL(source, window.location.href) : null;
-        return { source: url?.href ?? "", alt: normalize(image.alt), width: image.naturalWidth, height: image.naturalHeight, shopify: url?.hostname.endsWith("shopify.com") ?? false };
-      }).filter((image) => image.source);
-      const primary = images.sort((left, right) => {
-        const leftColorMatch = Number(Boolean(selectedColor) && left.alt.includes(selectedColor));
-        const rightColorMatch = Number(Boolean(selectedColor) && right.alt.includes(selectedColor));
-        const leftNameMatch = Number(Boolean(name) && left.alt.includes(name));
-        const rightNameMatch = Number(Boolean(name) && right.alt.includes(name));
-        return rightColorMatch - leftColorMatch || rightNameMatch - leftNameMatch || Number(right.shopify) - Number(left.shopify) || right.width * right.height - left.width * left.height;
-      })[0];
-      return primary?.source ?? null;
-    }, { productName: data.name || link.name, color: imageColor }));
-    const parsed = parseDisplayedPrice(data.body || link.priceText); const url = new URL(link.href); return { name: data.name || link.name, url: `${url.origin}${url.pathname}`, imageUrl, priceMinor: parsed?.priceMinor ?? null, currency: parsed?.currency ?? null, variants, listingOrder: link.index };
+  private async fetchHtml(url: string): Promise<string> {
+    const result = await this.page.evaluate(async (resource) => { const response = await fetch(resource, { credentials: "same-origin", cache: "no-cache" }); return { status: response.status, text: await response.text() }; }, url);
+    if (result.status === 403) forbiddenCount += 1; if (result.status === 429) rateLimitedCount += 1;
+    if (result.status >= 400) throw new Error(`Storefront returned HTTP ${result.status}.`);
+    if (/captcha|access denied|security[ -]check|verify you are human|just a moment/i.test(result.text)) { challengeCount += 1; throw new Error("Storefront access challenge detected."); }
+    return result.text;
   }
 }
 
@@ -197,48 +164,63 @@ function matchesName(name: string, target: TargetSnapshot): boolean { return mat
 async function check(target: TargetSnapshot): Promise<TargetCheck> {
   const manifest = getStoreManifest(target.storeId);
   if (!manifest || manifest.capabilities.monitor === null) return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "NO_ADAPTER", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: null };
-  try { const candidates = await new SupremeEuAdapter().locateProducts(target); const decision = decideTarget(target, candidates); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: decision.kind === "ERROR" ? "ERROR" : "SUCCESS", decision, candidateCount: candidates.length, errorMessage: decision.kind === "ERROR" ? decision.message : null }; }
+  try { if (!monitorPage) throw new Error("The persistent monitor page is unavailable."); const candidates = await new SupremeEuAdapter(monitorPage).locateProducts(target); const decision = decideTarget(target, candidates); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: decision.kind === "ERROR" ? "ERROR" : "SUCCESS", decision, candidateCount: candidates.length, errorMessage: decision.kind === "ERROR" ? decision.message : null }; }
   catch (error) { const errorMessage = sanitizeMonitorError(error instanceof Error ? error.message : "The Supreme monitor failed."); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "The Supreme EU listing could not be checked.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage }; }
 }
 function sanitizeMonitorError(value: string): string { return value.replace(/https?:\/\/[^\s?]+\?[^\s]+/gi, "[URL query redacted]").replace(/(authorization|cookie|password|token|secret)\s*[:=]\s*[^\s;,&]+/gi, "$1=[REDACTED]").slice(0, 500); }
 function send(value: MonitorEvent): void { process.send?.(value); }
 async function poll(runId: string, target: TargetSnapshot): Promise<TargetCheck | undefined> {
-  if (running || stopping) return undefined;
+  if (running || stopping || paused) return undefined;
   running = true;
   try {
     const value = await check(target);
     send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId, eventType: value.status === "ERROR" ? "TARGET_MONITOR_FAILED" : value.decision.kind === "VARIANT_SELECTED" ? "TARGET_VARIANT_SELECTED" : value.decision.kind === "PRICE_LIMIT_EXCEEDED" ? "PRICE_LIMIT_EXCEEDED" : value.decision.kind === "CURRENCY_MISMATCH" ? "CURRENCY_MISMATCH" : "TARGET_POLLED", check: value });
-    return value;
+    await emitHealth(runId); return value;
   } finally { running = false; }
 }
-function nextPollDelay(value: TargetCheck | undefined): number {
-  const backoff = storefrontProtectionBackoffMs(value?.errorMessage ?? null, protectionResponseCount + 1);
-  if (!backoff) { protectionResponseCount = 0; return NORMAL_POLL_INTERVAL_MS; }
-  protectionResponseCount += 1;
-  return backoff;
-}
 function schedulePoll(runId: string, target: TargetSnapshot, delay: number): void {
-  if (stopping) return;
+  if (stopping || paused) return;
   timer = setTimeout(async () => {
     timer = undefined;
     const value = await poll(runId, target);
     if (stopping) return;
-    const nextDelay = nextPollDelay(value);
-    if (nextDelay > NORMAL_POLL_INTERVAL_MS) send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId, eventType: "TARGET_MONITOR_PAUSED", check: value ?? null });
-    schedulePoll(runId, target, nextDelay);
+    schedulePoll(runId, target, NORMAL_POLL_INTERVAL_MS);
   }, delay);
 }
 
 process.on("message", async (message: unknown) => {
   const parsed = monitorCommandSchema.safeParse(message); if (!parsed.success) return; const command = parsed.data;
-  if (command.type === "TEST_TARGET") { const value = await check(command.target); send({ type: "MONITOR_TEST_RESULT", version: IPC_VERSION, check: value }); return; }
+  if (command.type === "TEST_TARGET") { await startContext(command.userDataDir); const value = await check(command.target); await emitHealth(null); send({ type: "MONITOR_TEST_RESULT", version: IPC_VERSION, check: value }); await closeContext(); return; }
   if (command.type === "START_MONITOR") {
     if (timer || running) return;
-    activeRunId = command.runId; stopping = false; protectionResponseCount = 0;
+    activeRunId = command.runId; activeTarget = command.target; stopping = false; paused = false; await startContext(command.userDataDir);
     send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId: command.runId, eventType: "TARGET_MONITOR_STARTED", check: null });
     const value = await poll(command.runId, command.target);
-    if (!stopping) schedulePoll(command.runId, command.target, nextPollDelay(value));
+    if (!stopping) schedulePoll(command.runId, command.target, NORMAL_POLL_INTERVAL_MS);
     return;
   }
-  if (command.type === "STOP_MONITOR") { stopping = true; if (timer) clearTimeout(timer); timer = undefined; send({ type: "MONITOR_STOPPED", version: IPC_VERSION, runId: activeRunId }); activeRunId = null; }
+  if (command.type === "PAUSE_MONITOR") { paused = true; if (timer) clearTimeout(timer); timer = undefined; send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId: activeRunId, eventType: "TARGET_MONITOR_PAUSED", check: null }); return; }
+  if (command.type === "RESUME_MONITOR") { if (!activeRunId || !activeTarget || !paused) return; paused = false; send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId: activeRunId, eventType: "TARGET_MONITOR_RESUMED", check: null }); schedulePoll(activeRunId, activeTarget, 0); return; }
+  if (command.type === "STOP_MONITOR") { stopping = true; if (timer) clearTimeout(timer); timer = undefined; await emitHealth(activeRunId); await closeContext(); send({ type: "MONITOR_STOPPED", version: IPC_VERSION, runId: activeRunId }); activeRunId = null; activeTarget = null; }
 });
+
+async function startContext(userDataDir: string): Promise<void> {
+  if (context && monitorPage) return;
+  const executablePath = findChromeExecutable(); if (!executablePath) throw new Error("Google Chrome was not found. Install Chrome before starting a target monitor.");
+  monitorUserDataDir = userDataDir; startedAt = Date.now(); requestCount = navigationCount = forbiddenCount = rateLimitedCount = challengeCount = 0; loads = [];
+  context = await chromium.launchPersistentContext(userDataDir, { headless: true, executablePath, args: buildNativeStealthArgs(), ignoreDefaultArgs: ["--enable-automation", "--no-sandbox"] });
+  monitorPage = context.pages()[0] ?? await context.newPage();
+  context.on("request", () => { requestCount += 1; });
+  monitorPage.on("framenavigated", (frame) => { if (frame === monitorPage?.mainFrame()) navigationCount += 1; });
+  const started = Date.now(); const response = await monitorPage.goto(SUPREME_EU_LISTING_URL, { waitUntil: "domcontentloaded", timeout: 30_000 }); assertStorefrontResponse(response); loads.push(Date.now() - started);
+  navigatorWebdriver = await monitorPage.evaluate(() => navigator.webdriver).catch(() => null);
+  browserVersion = context.browser()?.version() ?? null;
+}
+
+async function closeContext(): Promise<void> { await context?.close().catch(() => undefined); context = undefined; monitorPage = undefined; }
+async function emitHealth(runId: string | null): Promise<void> {
+  const age = monitorUserDataDir ? await stat(monitorUserDataDir).then((value) => Math.max(0, Date.now() - value.birthtimeMs)).catch(() => null) : null;
+  const cookies = context ? await context.cookies().then((value) => value.length).catch(() => null) : null;
+  const minutes = Math.max((Date.now() - startedAt) / 60_000, 1 / 60);
+  send({ type: "MONITOR_HEALTH", version: IPC_VERSION, runId, health: { capturedAt: Date.now(), navigatorWebdriver, browserVersion, driverKind: null, stealthStatus: null, profileAgeMs: age, cookieCount: cookies, requestCount, requestsPerMinute: requestCount / minutes, navigationCount, navigationsPerMinute: navigationCount / minutes, atcAttempts: 0, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures: 0, averagePageLoadMs: loads.length ? loads.reduce((sum, value) => sum + value, 0) / loads.length : null, circuit: null } });
+}

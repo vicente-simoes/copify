@@ -1,6 +1,6 @@
 {
   "name": "@copify/core",
-  "version": "0.5.15",
+  "version": "0.7.0",
   "private": true,
   "dependencies": { "@copify/shared": "workspace:*" }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runnerCommandSchema, storeManifestSchema, supportsAssistedCheckout, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runExecutionStateSchema, runnerCommandSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -34,7 +34,7 @@ describe("store registry", () => {
 describe("shared contracts", () => {
   it("validates profile input", () => {
     expect(createBrowserProfileSchema.safeParse({ name: "  " }).success).toBe(false);
-    expect(createBrowserProfileSchema.parse({ name: " Home " })).toMatchObject({ name: "Home", launchMode: "PLAYWRIGHT" });
+    expect(createBrowserProfileSchema.parse({ name: " Home " })).toMatchObject({ name: "Home", driver: { kind: "NATIVE_STEALTH" } });
   });
   it("rejects malformed runner messages", () => {
     expect(runnerCommandSchema.safeParse({ type: "START", version: 1 }).success).toBe(false);
@@ -64,5 +64,16 @@ describe("shared contracts", () => {
     expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId }).executionMode).toBe("ASSISTED_CHECKOUT");
     expect(createShippingProfileSchema.parse({ name: "Home", details: { fullName: "Ada Lovelace", email: "ada@example.com", phone: "+351 1", address1: "1 Main St", postalCode: "1000", city: "Lisbon", country: "pt" } }).details.country).toBe("PT");
     expect(updateShippingProfileSchema.parse({ details: null })).toEqual({ details: null });
+  });
+  it("records the terminal assisted-checkout handoff as ready to confirm", () => {
+    expect(runExecutionStateSchema.parse("READY_TO_CONFIRM")).toBe("READY_TO_CONFIRM");
+  });
+  it("accepts only local external CDP endpoints and defaults profiles to Native Stealth", () => {
+    expect(createBrowserProfileSchema.parse({ name: "Home" }).driver).toEqual({ kind: "NATIVE_STEALTH" });
+    expect(externalCdpEndpointSchema.parse("http://127.0.0.1:9222/devtools/browser/token")).toContain("127.0.0.1");
+    expect(externalCdpEndpointSchema.safeParse("ws://localhost:9222/devtools/browser/token").success).toBe(true);
+    expect(externalCdpEndpointSchema.safeParse("https://remote.example/devtools").success).toBe(false);
+    expect(externalCdpEndpointSchema.safeParse("http://user:password@127.0.0.1:9222").success).toBe(false);
+    expect(updateBrowserProfileSchema.parse({ driver: { kind: "EXTERNAL_CDP", endpoint: null } })).toMatchObject({ driver: { kind: "EXTERNAL_CDP", endpoint: null } });
   });
 });

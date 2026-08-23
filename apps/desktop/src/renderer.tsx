@@ -146,7 +146,17 @@ function App() {
         [snapshot.profileId]: snapshot,
       })),
     );
-    const offRuns = window.copify.runs.onChanged(() => void reload());
+    const offRuns = window.copify.runs.onChanged(() => {
+      void reload();
+      setSelectedRun((current) => {
+        if (!current) return current;
+        const id = current.run.id;
+        void window.copify.runs.get(id).then((response) => {
+          if (response.ok) setSelectedRun((latest) => latest?.run.id === id ? response.value : latest);
+        });
+        return current;
+      });
+    });
     const offRunSetups = window.copify.runSetups.onChanged(() => void reload());
     const offCarts = window.copify.sessions.onCartChanged((status) => setCartStatuses((current) => ({ ...current, [status.profileId]: status })));
     const offTargets = window.copify.targets.onChanged(() => void reload());
@@ -544,8 +554,8 @@ function App() {
             onToggleStore={(id, enabled) =>
               void execute(() => window.copify.stores.update(id, enabled))
             }
-            onLaunchMode={(id, launchMode) =>
-              void execute(() => window.copify.profiles.update(id, { launchMode }))
+            onBrowserDriver={(id, driver) =>
+              void execute(() => window.copify.profiles.update(id, { driver }))
             }
           />
         )}

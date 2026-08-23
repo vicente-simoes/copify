@@ -25,7 +25,7 @@ describe("ProfileRepository", () => {
     const repo = repository();
     const profile = await repo.create({ name: "Home" });
     expect(profile.userDataDir).toContain(profile.id);
-    expect(profile.launchMode).toBe("PLAYWRIGHT");
+    expect(profile.driver).toEqual({ kind: "NATIVE_STEALTH" });
     expect(await repo.list()).toEqual([profile]);
     await expect(repo.create({ name: "Home" })).rejects.toThrow("already exists");
   });
@@ -67,17 +67,17 @@ describe("ProfileRepository", () => {
     database.exec("CREATE TABLE browser_profiles (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, user_data_dir TEXT NOT NULL, proxy_profile_id TEXT, shipping_profile_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version = 1;");
     database.prepare("INSERT INTO browser_profiles VALUES (?,?,?,?,?,?,?,?)").run("00000000-0000-4000-8000-000000000001", "Legacy", "C:/legacy", null, null, 1, 1, 1); database.close();
     const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo);
-    expect((await repo.list())[0]).toMatchObject({ name: "Legacy", launchMode: "PLAYWRIGHT" });
+    expect((await repo.list())[0]).toMatchObject({ name: "Legacy", driver: { kind: "NATIVE_STEALTH" } });
     expect(await repo.listProxies()).toEqual([]);
   });
 
-  it("resets v6 Native CDP choices to Playwright launch", async () => {
+  it("migrates v6 Native CDP choices to Native Stealth", async () => {
     const root = mkdtempSync(join(tmpdir(), "copify-v6-")); roots.push(root);
     const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(join(root, "copify.sqlite"));
     database.exec("CREATE TABLE browser_profiles (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, user_data_dir TEXT NOT NULL, proxy_profile_id TEXT, shipping_profile_id TEXT, launch_mode TEXT NOT NULL DEFAULT 'PLAYWRIGHT', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version = 6;");
     database.prepare("INSERT INTO browser_profiles VALUES (?,?,?,?,?,?,?,?,?)").run("00000000-0000-4000-8000-000000000006", "Native legacy", "C:/legacy", null, null, "NATIVE_CDP", 1, 1, 1); database.close();
     const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo);
-    expect((await repo.list())[0]).toMatchObject({ name: "Native legacy", launchMode: "PLAYWRIGHT" });
+    expect((await repo.list())[0]).toMatchObject({ name: "Native legacy", driver: { kind: "NATIVE_STEALTH" } });
   });
 
   it("migrates a v3 run database to targets and immutable target snapshots", async () => {
@@ -95,6 +95,33 @@ describe("ProfileRepository", () => {
     expect((await repo.getRun(detail.run.id))?.events.map((event) => event.type)).toEqual(["FIRST", "SECOND"]);
     expect(await repo.removeRun(detail.run.id)).toBe(true);
     expect(await repo.getRun(detail.run.id)).toBeUndefined();
+  });
+
+  it("migrates both v9 launch modes to Native Stealth without losing profiles", async () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-v9-")); roots.push(root);
+    const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(join(root, "copify.sqlite"));
+    database.exec("CREATE TABLE app_secrets (id TEXT PRIMARY KEY NOT NULL, ciphertext BLOB NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); CREATE TABLE browser_profiles (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, user_data_dir TEXT NOT NULL, proxy_profile_id TEXT, shipping_profile_id TEXT, launch_mode TEXT NOT NULL DEFAULT 'PLAYWRIGHT', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version = 9;");
+    database.prepare("INSERT INTO browser_profiles VALUES (?,?,?,?,?,?,?,?,?)").run("00000000-0000-4000-8000-000000000009", "Legacy Playwright", "C:/legacy-a", null, null, "PLAYWRIGHT", 1, 1, 1);
+    database.prepare("INSERT INTO browser_profiles VALUES (?,?,?,?,?,?,?,?,?)").run("00000000-0000-4000-8000-000000000010", "Legacy Native", "C:/legacy-b", null, null, "NATIVE_CDP", 1, 2, 2); database.close();
+    const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo);
+    expect((await repo.list()).map((profile) => profile.driver)).toEqual([{ kind: "NATIVE_STEALTH" }, { kind: "NATIVE_STEALTH" }]);
+  });
+
+  it("keeps an external CDP endpoint encrypted and write-only", async () => {
+    const repo = repository(); const ciphertext = Buffer.from("encrypted-local-endpoint");
+    const profile = await repo.create({ name: "External", driver: { kind: "EXTERNAL_CDP", endpoint: "http://127.0.0.1:9222" } }, ciphertext);
+    expect(profile.driver).toEqual({ kind: "EXTERNAL_CDP", endpointConfigured: true });
+    expect(JSON.stringify(profile)).not.toContain("9222");
+    expect((await repo.getStoredBrowserProfile(profile.id))?.externalCdpEndpointCiphertext).toEqual(ciphertext);
+    await repo.update(profile.id, { driver: { kind: "EXTERNAL_CDP", endpoint: null } }, null);
+    expect((await repo.get(profile.id))?.driver).toEqual({ kind: "EXTERNAL_CDP", endpointConfigured: false });
+  });
+
+  it("persists the latest browser and watcher health independently of the event log", async () => {
+    const repo = repository(); const profile = await repo.create({ name: "Home" }); const now = Date.now();
+    const snapshot = { id: randomUUID(), subjectKind: "CHECKOUT" as const, subjectId: profile.id, runId: null, capturedAt: now, navigatorWebdriver: true, browserVersion: "Chrome/1", driverKind: "NATIVE_STEALTH" as const, stealthStatus: "PASS" as const, profileAgeMs: 1, cookieCount: 2, requestCount: 3, requestsPerMinute: 4, navigationCount: 5, navigationsPerMinute: 6, atcAttempts: 7, forbiddenCount: 8, rateLimitedCount: 9, challengeCount: 10, checkoutFailures: 11, averagePageLoadMs: 12, circuit: { state: "CLOSED" as const, consecutiveProtectionSignals: 0, reopenAt: null } };
+    await repo.addBrowserHealthSnapshot(snapshot);
+    expect(await repo.getBrowserHealth("CHECKOUT", profile.id)).toMatchObject({ latest: snapshot, recent: [snapshot] });
   });
 
   it("saves reusable run setups separately from run history", async () => {

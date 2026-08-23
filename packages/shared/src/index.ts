@@ -3,8 +3,8 @@ import { STORE_GENERAL, storeCurrencySchema } from "./stores";
 
 export * from "./stores";
 
-export const IPC_VERSION = 8 as const;
-export const SCHEMA_VERSION = 8 as const;
+export const IPC_VERSION = 10 as const;
+export const SCHEMA_VERSION = 10 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -73,13 +73,33 @@ export type UpdateShippingProfileInput = z.input<typeof updateShippingProfileSch
 export const shippingProfileSnapshotSchema = z.object({ shippingProfileId: idSchema.nullable(), name: z.string().nullable(), country: z.string().regex(/^[A-Z]{2}$/).nullable(), complete: z.boolean() });
 export type ShippingProfileSnapshot = z.infer<typeof shippingProfileSnapshotSchema>;
 
-export const browserLaunchModeSchema = z.enum(["PLAYWRIGHT", "NATIVE_CDP"]);
-export type BrowserLaunchMode = z.infer<typeof browserLaunchModeSchema>;
-export const browserProfileSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(80), userDataDir: z.string().min(1), proxyProfileId: idSchema.nullable(), shippingProfileId: idSchema.nullable(), launchMode: browserLaunchModeSchema.default("PLAYWRIGHT"), enabled: z.boolean(), createdAt: timestampSchema, updatedAt: timestampSchema });
+export const browserDriverKindSchema = z.enum(["NATIVE_STEALTH", "EXTERNAL_CDP"]);
+export type BrowserDriverKind = z.infer<typeof browserDriverKindSchema>;
+export const externalCdpEndpointSchema = z.string().trim().min(1).max(2_048).superRefine((value, context) => {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) context.addIssue({ code: z.ZodIssueCode.custom, message: "Use an HTTP or WebSocket CDP endpoint." });
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname.toLowerCase())) context.addIssue({ code: z.ZodIssueCode.custom, message: "The external CDP endpoint must use the local loopback interface." });
+    if (url.username || url.password) context.addIssue({ code: z.ZodIssueCode.custom, message: "Do not place credentials in the endpoint authority." });
+  } catch {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid local CDP endpoint URL." });
+  }
+});
+export const browserDriverConfigSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("NATIVE_STEALTH") }),
+  z.object({ kind: z.literal("EXTERNAL_CDP"), endpointConfigured: z.boolean() }),
+]);
+export type BrowserDriverConfig = z.infer<typeof browserDriverConfigSchema>;
+export const browserDriverInputSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("NATIVE_STEALTH") }),
+  z.object({ kind: z.literal("EXTERNAL_CDP"), endpoint: externalCdpEndpointSchema.nullable().optional() }),
+]);
+export type BrowserDriverInput = z.input<typeof browserDriverInputSchema>;
+export const browserProfileSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(80), userDataDir: z.string().min(1), proxyProfileId: idSchema.nullable(), shippingProfileId: idSchema.nullable(), driver: browserDriverConfigSchema.default({ kind: "NATIVE_STEALTH" }), enabled: z.boolean(), createdAt: timestampSchema, updatedAt: timestampSchema });
 export type BrowserProfile = z.infer<typeof browserProfileSchema>;
-export const createBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80), launchMode: browserLaunchModeSchema.default("PLAYWRIGHT"), enabled: z.boolean().default(true) });
+export const createBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80), driver: browserDriverInputSchema.default({ kind: "NATIVE_STEALTH" }), enabled: z.boolean().default(true) });
 export type CreateBrowserProfileInput = z.input<typeof createBrowserProfileSchema>;
-export const updateBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80).optional(), enabled: z.boolean().optional(), launchMode: browserLaunchModeSchema.optional(), proxyProfileId: idSchema.nullable().optional(), shippingProfileId: idSchema.nullable().optional() }).refine((value) => value.name !== undefined || value.enabled !== undefined || value.launchMode !== undefined || value.proxyProfileId !== undefined || value.shippingProfileId !== undefined, { message: "Provide at least one field to update." });
+export const updateBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80).optional(), enabled: z.boolean().optional(), driver: browserDriverInputSchema.optional(), proxyProfileId: idSchema.nullable().optional(), shippingProfileId: idSchema.nullable().optional() }).refine((value) => value.name !== undefined || value.enabled !== undefined || value.driver !== undefined || value.proxyProfileId !== undefined || value.shippingProfileId !== undefined, { message: "Provide at least one field to update." });
 export type UpdateBrowserProfileInput = z.input<typeof updateBrowserProfileSchema>;
 
 export const routeVerificationSchema = z.object({ status: z.enum(["PENDING", "VERIFIED", "WARNING", "FAILED"]), publicIp: z.string().nullable(), country: z.string().nullable(), city: z.string().nullable(), verifiedAt: timestampSchema.nullable(), message: z.string().nullable() });
@@ -88,24 +108,70 @@ export const sessionRouteSchema = z.discriminatedUnion("kind", [z.object({ kind:
 export type SessionRoute = z.infer<typeof sessionRouteSchema>;
 export const sessionStateSchema = z.enum(["STOPPED", "STARTING", "READY", "STOPPING", "CRASHED", "ERROR"]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
-export const sessionErrorCodeSchema = z.enum(["BROWSER_START_FAILED", "PROXY_CONNECTION_FAILED", "PROXY_AUTH_FAILED", "SECRET_STORAGE_UNAVAILABLE", "RUNNER_CRASHED", "RUN_INTERRUPTED", "INVALID_COMMAND", "RECORDING_FAILED", "NAVIGATION_TIMEOUT", "STORE_UNAVAILABLE", "VARIANT_NOT_AVAILABLE", "ATC_FAILED", "CHECKOUT_NAV_FAILED", "CHECKPOINT_DETECTED", "UNKNOWN"]);
+export const sessionErrorCodeSchema = z.enum(["BROWSER_START_FAILED", "PROXY_CONNECTION_FAILED", "PROXY_AUTH_FAILED", "SECRET_STORAGE_UNAVAILABLE", "INVALID_DRIVER_ENDPOINT", "EXTERNAL_CDP_CONNECTION_FAILED", "DRIVER_CAPABILITY_UNAVAILABLE", "STEALTH_VERIFICATION_FAILED", "RUNNER_CRASHED", "RUN_INTERRUPTED", "INVALID_COMMAND", "RECORDING_FAILED", "NAVIGATION_TIMEOUT", "STORE_UNAVAILABLE", "VARIANT_NOT_AVAILABLE", "ATC_FAILED", "CHECKOUT_NAV_FAILED", "CHECKPOINT_DETECTED", "UNKNOWN"]);
 export const sessionErrorSchema = z.object({ code: sessionErrorCodeSchema, message: z.string() });
 export type SessionError = z.infer<typeof sessionErrorSchema>;
-export const sessionSnapshotSchema = z.object({ profileId: idSchema, state: sessionStateSchema, error: sessionErrorSchema.nullable(), route: sessionRouteSchema, updatedAt: timestampSchema });
+export const driverStealthStatusSchema = z.enum(["PASS", "FAIL", "EXTERNAL", "UNKNOWN"]);
+export const browserDriverMetadataSchema = z.object({ kind: browserDriverKindSchema, ownsBrowser: z.boolean(), browserVersion: z.string().nullable(), stealthStatus: driverStealthStatusSchema, capabilities: z.object({ managedProxy: z.boolean(), launchHarVideo: z.boolean() }) });
+export type BrowserDriverMetadata = z.infer<typeof browserDriverMetadataSchema>;
+export const sessionSnapshotSchema = z.object({ profileId: idSchema, state: sessionStateSchema, error: sessionErrorSchema.nullable(), route: sessionRouteSchema, driver: browserDriverMetadataSchema.nullable().default(null), updatedAt: timestampSchema });
 export type SessionSnapshot = z.infer<typeof sessionSnapshotSchema>;
 export const cartStatusSchema = z.object({ profileId: idSchema, status: z.enum(["UNKNOWN", "CHECKING", "EMPTY", "ITEMS", "ERROR"]), itemCount: z.number().int().min(0).nullable(), checkedAt: timestampSchema.nullable(), message: z.string().nullable() });
 export type CartStatus = z.infer<typeof cartStatusSchema>;
+
+/** A privacy-safe operational snapshot for either a checkout browser or the shared watcher. */
+export const healthSubjectKindSchema = z.enum(["CHECKOUT", "WATCHER"]);
+export type HealthSubjectKind = z.infer<typeof healthSubjectKindSchema>;
+export const circuitStateSchema = z.object({
+  state: z.enum(["CLOSED", "OPEN"]),
+  consecutiveProtectionSignals: z.number().int().min(0),
+  reopenAt: timestampSchema.nullable(),
+});
+export type CircuitState = z.infer<typeof circuitStateSchema>;
+export const browserHealthSnapshotSchema = z.object({
+  id: idSchema,
+  subjectKind: healthSubjectKindSchema,
+  subjectId: z.string().trim().min(1).max(120),
+  runId: idSchema.nullable(),
+  capturedAt: timestampSchema,
+  navigatorWebdriver: z.boolean().nullable(),
+  browserVersion: z.string().nullable(),
+  driverKind: browserDriverKindSchema.nullable().default(null),
+  stealthStatus: driverStealthStatusSchema.nullable().default(null),
+  profileAgeMs: z.number().int().nonnegative().nullable(),
+  cookieCount: z.number().int().nonnegative().nullable(),
+  requestCount: z.number().int().nonnegative(),
+  requestsPerMinute: z.number().nonnegative(),
+  navigationCount: z.number().int().nonnegative(),
+  navigationsPerMinute: z.number().nonnegative(),
+  atcAttempts: z.number().int().nonnegative(),
+  forbiddenCount: z.number().int().nonnegative(),
+  rateLimitedCount: z.number().int().nonnegative(),
+  challengeCount: z.number().int().nonnegative(),
+  checkoutFailures: z.number().int().nonnegative(),
+  averagePageLoadMs: z.number().nonnegative().nullable(),
+  circuit: circuitStateSchema.nullable(),
+});
+export type BrowserHealthSnapshot = z.infer<typeof browserHealthSnapshotSchema>;
+export const browserHealthDetailSchema = z.object({ latest: browserHealthSnapshotSchema.nullable(), recent: z.array(browserHealthSnapshotSchema) });
+export type BrowserHealthDetail = z.infer<typeof browserHealthDetailSchema>;
 
 export const runnerProxySchema = z.object({ proxyProfileId: idSchema, proxyName: z.string(), protocol: proxyProtocolSchema, host: z.string().min(1), port: z.number().int().min(1).max(65_535), username: z.string().min(1).optional(), password: z.string().min(1).optional(), expectedCountry: z.string().nullable(), expectedCity: z.string().nullable() });
 export type RunnerProxy = z.infer<typeof runnerProxySchema>;
 export const runnerShippingSchema = shippingDetailsSchema;
 export type RunnerShipping = z.infer<typeof runnerShippingSchema>;
 
+export const runnerBrowserDriverSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("NATIVE_STEALTH") }),
+  z.object({ kind: z.literal("EXTERNAL_CDP"), endpoint: externalCdpEndpointSchema }),
+]);
+export type RunnerBrowserDriver = z.infer<typeof runnerBrowserDriverSchema>;
+
 export const diagnosticLevelSchema = z.enum(["NORMAL", "DIAGNOSTIC", "DEEP_DEBUG"]);
 export type DiagnosticLevel = z.infer<typeof diagnosticLevelSchema>;
 export const runExecutionModeSchema = z.enum(["OBSERVATION", "ASSISTED_CHECKOUT"]);
 export type RunExecutionMode = z.infer<typeof runExecutionModeSchema>;
-export const runExecutionStateSchema = z.enum(["OBSERVING", "WAITING_FOR_TARGET", "PRODUCT_OPEN", "VARIANT_SELECTED", "CARTING", "CARTED", "CHECKOUT", "CHECKPOINT", "CHECKOUT_HANDOFF", "FAILED", "ENDED"]);
+export const runExecutionStateSchema = z.enum(["OBSERVING", "WAITING_FOR_TARGET", "PRODUCT_OPEN", "VARIANT_SELECTED", "CARTING", "CARTED", "CHECKOUT", "CHECKPOINT", "CHECKOUT_HANDOFF", "READY_TO_CONFIRM", "FAILED", "ENDED"]);
 export type RunExecutionState = z.infer<typeof runExecutionStateSchema>;
 export const runStatusSchema = z.enum(["STARTING", "RECORDING", "COMPLETED", "FAILED"]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
@@ -135,35 +201,41 @@ export const runnerRecordingSchema = z.object({ runId: idSchema, runSessionId: i
 export type RunnerRecording = z.infer<typeof runnerRecordingSchema>;
 
 export const runnerCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("START"), version: z.literal(IPC_VERSION), profileId: idSchema, userDataDir: z.string().min(1), launchMode: browserLaunchModeSchema, proxy: runnerProxySchema.nullable(), probeUrl: z.string().url(), recording: runnerRecordingSchema.nullable() }),
+  z.object({ type: z.literal("START"), version: z.literal(IPC_VERSION), profileId: idSchema, userDataDir: z.string().min(1), driver: runnerBrowserDriverSchema, proxy: runnerProxySchema.nullable(), probeUrl: z.string().url(), recording: runnerRecordingSchema.nullable() }),
   z.object({ type: z.literal("END_RUN"), version: z.literal(IPC_VERSION), runSessionId: idSchema }),
   z.object({ type: z.literal("ASSIST_TARGET"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, candidate: productCandidateSchema, variant: productVariantSchema, quantity: z.number().int().min(1).max(10), shipping: runnerShippingSchema }),
   z.object({ type: z.literal("RESUME_ASSIST"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
   z.object({ type: z.literal("CHECK_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("EMPTY_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
+  z.object({ type: z.literal("PAUSE_AUTOMATION"), version: z.literal(IPC_VERSION), until: timestampSchema }),
+  z.object({ type: z.literal("RESUME_AUTOMATION"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("STOP"), version: z.literal(IPC_VERSION) })
 ]);
 export type RunnerCommand = z.infer<typeof runnerCommandSchema>;
 export const runnerEventSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("READY"), version: z.literal(IPC_VERSION), profileId: idSchema, route: sessionRouteSchema }),
+  z.object({ type: z.literal("READY"), version: z.literal(IPC_VERSION), profileId: idSchema, route: sessionRouteSchema, driver: browserDriverMetadataSchema }),
   z.object({ type: z.literal("STOPPED"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("ERROR"), version: z.literal(IPC_VERSION), profileId: idSchema.nullable(), code: sessionErrorCodeSchema.exclude(["RUNNER_CRASHED", "INVALID_COMMAND", "SECRET_STORAGE_UNAVAILABLE"]), message: z.string() }),
   z.object({ type: z.literal("CART_STATUS"), version: z.literal(IPC_VERSION), profileId: idSchema, status: cartStatusSchema.omit({ profileId: true }) }),
   z.object({ type: z.literal("RUN_EVENT"), version: z.literal(IPC_VERSION), profileId: idSchema, event: runEventSchema }),
   z.object({ type: z.literal("RUN_ARTIFACT"), version: z.literal(IPC_VERSION), profileId: idSchema, artifact: runArtifactSchema }),
-  z.object({ type: z.literal("RUN_ENDED"), version: z.literal(IPC_VERSION), profileId: idSchema, runSessionId: idSchema })
+  z.object({ type: z.literal("RUN_ENDED"), version: z.literal(IPC_VERSION), profileId: idSchema, runSessionId: idSchema }),
+  z.object({ type: z.literal("HEALTH"), version: z.literal(IPC_VERSION), profileId: idSchema, health: browserHealthSnapshotSchema.omit({ id: true, subjectKind: true, subjectId: true, runId: true }) })
 ]);
 export type RunnerEvent = z.infer<typeof runnerEventSchema>;
 
 export const monitorCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("START_MONITOR"), version: z.literal(IPC_VERSION), runId: idSchema, target: targetSnapshotSchema }),
-  z.object({ type: z.literal("TEST_TARGET"), version: z.literal(IPC_VERSION), target: targetSnapshotSchema }),
+  z.object({ type: z.literal("START_MONITOR"), version: z.literal(IPC_VERSION), runId: idSchema, target: targetSnapshotSchema, userDataDir: z.string().min(1) }),
+  z.object({ type: z.literal("TEST_TARGET"), version: z.literal(IPC_VERSION), target: targetSnapshotSchema, userDataDir: z.string().min(1) }),
+  z.object({ type: z.literal("PAUSE_MONITOR"), version: z.literal(IPC_VERSION), until: timestampSchema }),
+  z.object({ type: z.literal("RESUME_MONITOR"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("STOP_MONITOR"), version: z.literal(IPC_VERSION) })
 ]);
 export type MonitorCommand = z.infer<typeof monitorCommandSchema>;
 export const monitorEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("MONITOR_EVENT"), version: z.literal(IPC_VERSION), runId: idSchema.nullable(), eventType: z.string().min(1).max(80), check: targetCheckSchema.nullable() }),
   z.object({ type: z.literal("MONITOR_TEST_RESULT"), version: z.literal(IPC_VERSION), check: targetCheckSchema }),
+  z.object({ type: z.literal("MONITOR_HEALTH"), version: z.literal(IPC_VERSION), runId: idSchema.nullable(), health: browserHealthSnapshotSchema.omit({ id: true, subjectKind: true, subjectId: true, runId: true }) }),
   z.object({ type: z.literal("MONITOR_STOPPED"), version: z.literal(IPC_VERSION), runId: idSchema.nullable() })
 ]);
 export type MonitorEvent = z.infer<typeof monitorEventSchema>;
@@ -177,6 +249,7 @@ export type ProxyBenchmark = z.infer<typeof proxyBenchmarkSchema>;
 
 export const profileIpc = { list: "profiles:list", create: "profiles:create", update: "profiles:update", remove: "profiles:remove" } as const;
 export const targetIpc = { list: "targets:list", create: "targets:create", update: "targets:update", remove: "targets:remove", test: "targets:test", changed: "targets:changed" } as const;
+export const healthIpc = { get: "health:get", changed: "health:changed" } as const;
 export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks" } as const;
 export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", changed: "shipping:changed" } as const;
 export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc,
-  type ApiResult, type AppInfo, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  healthIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc,
+  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 const api = {
@@ -55,6 +55,10 @@ const api = {
     end: (): Promise<ApiResult<RunDetail>> => ipcRenderer.invoke(runIpc.end), resume: (profileId: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.resume, profileId),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.remove, id),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(runIpc.changed, callback); return () => ipcRenderer.removeListener(runIpc.changed, callback); }
+  },
+  health: {
+    get: (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string): Promise<ApiResult<BrowserHealthDetail>> => ipcRenderer.invoke(healthIpc.get, subjectKind, subjectId),
+    onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(healthIpc.changed, callback); return () => ipcRenderer.removeListener(healthIpc.changed, callback); },
   },
   runSetups: {
     list: (): Promise<ApiResult<RunSetup[]>> => ipcRenderer.invoke(runSetupIpc.list),

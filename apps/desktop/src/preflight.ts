@@ -19,6 +19,7 @@ export type Preflight = {
 
 export type PreflightInput = {
   mode: "OBSERVATION" | "ASSISTED_CHECKOUT";
+  diagnosticLevel?: "NORMAL" | "DIAGNOSTIC" | "DEEP_DEBUG";
   profiles: BrowserProfile[];
   selectedProfileIds: string[];
   session: (profileId: string) => SessionSnapshot;
@@ -36,6 +37,7 @@ export function preflight(input: PreflightInput): Preflight {
     .filter((profile): profile is BrowserProfile => Boolean(profile));
   const missingProfiles = selectedProfileIds.filter((id) => !profiles.some((profile) => profile.id === id));
   const disabledProfiles = selected.filter((profile) => !profile.enabled);
+  const externalProfiles = selected.filter((profile) => profile.driver.kind === "EXTERNAL_CDP");
 
   const checks: PreflightCheck[] = [];
 
@@ -67,10 +69,23 @@ export function preflight(input: PreflightInput): Preflight {
     );
   }
 
+  const driverIssues = externalProfiles.flatMap((profile) => [
+    ...(profile.driver.kind === "EXTERNAL_CDP" && !profile.driver.endpointConfigured ? [`${profile.name}: no local CDP endpoint configured`] : []),
+    ...(profile.proxyProfileId ? [`${profile.name}: remove its Copify-managed proxy and configure the route in the external browser`] : []),
+  ]);
+  if (selected.length > 0) {
+    checks.push(driverIssues.length
+      ? { id: "drivers", label: "Browser drivers", status: "fail", detail: driverIssues.join(" · ") }
+      : input.diagnosticLevel === "DEEP_DEBUG" && externalProfiles.length
+        ? { id: "drivers", label: "Browser drivers", status: "warn", detail: `${externalProfiles.map((profile) => profile.name).join(", ")} cannot add launch-time HAR or video after external CDP attachment.` }
+        : { id: "drivers", label: "Browser drivers", status: "pass", detail: externalProfiles.length ? "External browsers expose configured local CDP endpoints." : "Native Stealth is configured for every selected browser." });
+  }
+
   // --- routes ---
   const routeIssues: string[] = [];
   const unverified: string[] = [];
   for (const profile of selected) {
+    if (profile.driver.kind === "EXTERNAL_CDP") continue;
     if (!profile.proxyProfileId) {
       if (!latestBenchmark("direct")) unverified.push(`${profile.name} (direct)`);
       continue;

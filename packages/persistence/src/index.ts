@@ -3,9 +3,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
   proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
+  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
   type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
@@ -18,6 +18,7 @@ export type EncryptedProxyCredentials = { username?: Buffer; password?: Buffer }
 export type EncryptedProxyCredentialUpdate = { username?: EncryptedCredential; password?: EncryptedCredential };
 export type StoredProxy = ProxyProfile & { usernameCiphertext: Buffer | null; passwordCiphertext: Buffer | null };
 export type StoredShippingProfile = ShippingProfile & { detailsCiphertext: Buffer | null };
+export type StoredBrowserProfile = BrowserProfile & { externalCdpEndpointCiphertext: Buffer | null };
 type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason">>;
 
 export function profileDirectory(profilesRoot: string, profileId: string): string {
@@ -118,7 +119,20 @@ export class ProfileRepository {
       );
       CREATE INDEX IF NOT EXISTS run_setups_created_idx ON run_setups(created_at ASC);`);
     }
-    this.sql.exec("PRAGMA user_version = 8;");
+    if (version < 9) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS browser_health_snapshots (
+        id TEXT PRIMARY KEY NOT NULL, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL, run_id TEXT,
+        captured_at INTEGER NOT NULL, payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS browser_health_subject_idx ON browser_health_snapshots(subject_kind, subject_id, captured_at DESC);
+      CREATE INDEX IF NOT EXISTS browser_health_run_idx ON browser_health_snapshots(run_id, captured_at DESC);`);
+    }
+    if (version < 10 && this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles'").get()) {
+      this.sql.exec(`ALTER TABLE browser_profiles ADD COLUMN driver_kind TEXT NOT NULL DEFAULT 'NATIVE_STEALTH';
+        ALTER TABLE browser_profiles ADD COLUMN external_cdp_endpoint_secret_id TEXT;
+        UPDATE browser_profiles SET driver_kind='NATIVE_STEALTH' WHERE launch_mode IN ('PLAYWRIGHT','NATIVE_CDP') OR driver_kind IS NULL;`);
+    }
+    this.sql.exec("PRAGMA user_version = 10;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -130,32 +144,51 @@ export class ProfileRepository {
     return row ? browserProfileSchema.parse(mapProfile(row)) : undefined;
   }
 
-  async create(input: CreateBrowserProfileInput): Promise<BrowserProfile> {
+  async getStoredBrowserProfile(id: string): Promise<StoredBrowserProfile | undefined> {
+    const row = this.getRow(`SELECT p.*, s.ciphertext AS external_cdp_endpoint_ciphertext FROM browser_profiles p
+      LEFT JOIN app_secrets s ON s.id=p.external_cdp_endpoint_secret_id WHERE p.id=?`, [id]);
+    return row ? { ...browserProfileSchema.parse(mapProfile(row)), externalCdpEndpointCiphertext: toBuffer(row.external_cdp_endpoint_ciphertext) } : undefined;
+  }
+
+  async create(input: CreateBrowserProfileInput, endpointCiphertext?: Buffer): Promise<BrowserProfile> {
     const parsed = createBrowserProfileSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, launchMode: parsed.launchMode, enabled: parsed.enabled, createdAt: now, updatedAt: now };
+    const endpointSecretId = endpointCiphertext ? randomUUID() : null;
+    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, driver: parsed.driver.kind === "EXTERNAL_CDP" ? { kind: "EXTERNAL_CDP", endpointConfigured: true } : { kind: "NATIVE_STEALTH" }, enabled: parsed.enabled, createdAt: now, updatedAt: now };
     try {
-      this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,launch_mode,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
-        .run(profile.id, profile.name, profile.userDataDir, null, null, profile.launchMode, profile.enabled ? 1 : 0, now, now);
+      this.transaction(() => {
+        if (endpointSecretId && endpointCiphertext) this.insertSecret(endpointSecretId, endpointCiphertext, now);
+        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,created_at,updated_at) VALUES (?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?)")
+          .run(profile.id, profile.name, profile.userDataDir, null, null, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, now, now);
+      });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not create the browser profile."); }
     return profile;
   }
 
-  async update(id: string, input: UpdateBrowserProfileInput): Promise<BrowserProfile> {
-    const parsed = updateBrowserProfileSchema.parse(input); const existing = await this.get(id);
-    if (!existing) throw new Error("Browser profile not found.");
+  async update(id: string, input: UpdateBrowserProfileInput, endpointCiphertext?: EncryptedCredential): Promise<BrowserProfile> {
+    const parsed = updateBrowserProfileSchema.parse(input); const existingRow = this.getRow("SELECT * FROM browser_profiles WHERE id=?", [id]);
+    if (!existingRow) throw new Error("Browser profile not found.");
+    const existing = browserProfileSchema.parse(mapProfile(existingRow));
     if (parsed.proxyProfileId !== undefined && parsed.proxyProfileId !== null && !(await this.getProxy(parsed.proxyProfileId))) throw new Error("Proxy profile not found.");
     if (parsed.shippingProfileId !== undefined && parsed.shippingProfileId !== null && !(await this.getShippingProfile(parsed.shippingProfileId))) throw new Error("Shipping profile not found.");
-    const updated = { ...existing, ...parsed, updatedAt: Date.now() };
+    const nextKind = parsed.driver?.kind ?? existing.driver.kind;
+    const endpointUpdate = nextKind === "NATIVE_STEALTH" ? null : endpointCiphertext;
+    const endpointSecretId = this.replaceSecret(existingRow.external_cdp_endpoint_secret_id, endpointUpdate, Date.now());
+    const { driver: _driver, ...plainUpdates } = parsed;
+    const updated = browserProfileSchema.parse({ ...existing, ...plainUpdates, driver: nextKind === "EXTERNAL_CDP" ? { kind: "EXTERNAL_CDP", endpointConfigured: Boolean(endpointSecretId) } : { kind: "NATIVE_STEALTH" }, updatedAt: Date.now() });
     try {
-      this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, launch_mode=?, proxy_profile_id=?, shipping_profile_id=?, updated_at=? WHERE id=?")
-        .run(updated.name, updated.enabled ? 1 : 0, updated.launchMode, updated.proxyProfileId, updated.shippingProfileId, updated.updatedAt, id);
+      this.transaction(() => {
+        this.updateSecret(existingRow.external_cdp_endpoint_secret_id, endpointSecretId, endpointUpdate, updated.updatedAt);
+        this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, driver_kind=?, external_cdp_endpoint_secret_id=?, proxy_profile_id=?, shipping_profile_id=?, updated_at=? WHERE id=?")
+          .run(updated.name, updated.enabled ? 1 : 0, updated.driver.kind, endpointSecretId, updated.proxyProfileId, updated.shippingProfileId, updated.updatedAt, id);
+      });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not update the browser profile."); }
     return updated;
   }
 
   async remove(id: string): Promise<boolean> {
-    const result = this.sql.prepare("DELETE FROM browser_profiles WHERE id = ?").run(id);
-    return result.changes > 0;
+    const existing = this.getRow("SELECT external_cdp_endpoint_secret_id FROM browser_profiles WHERE id=?", [id]); if (!existing) return false;
+    this.transaction(() => { this.sql.prepare("DELETE FROM browser_profiles WHERE id = ?").run(id); if (existing.external_cdp_endpoint_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(existing.external_cdp_endpoint_secret_id); });
+    return true;
   }
 
   async listShippingProfiles(): Promise<ShippingProfile[]> { return this.all("SELECT * FROM shipping_profiles ORDER BY created_at ASC").map((row) => shippingProfileSchema.parse(mapShipping(row))); }
@@ -362,11 +395,25 @@ export class ProfileRepository {
     return value;
   }
 
+  async addBrowserHealthSnapshot(snapshot: BrowserHealthSnapshot): Promise<BrowserHealthSnapshot> {
+    const value = browserHealthSnapshotSchema.parse(snapshot);
+    this.sql.prepare("INSERT INTO browser_health_snapshots (id,subject_kind,subject_id,run_id,captured_at,payload_json) VALUES (?,?,?,?,?,?)")
+      .run(value.id, value.subjectKind, value.subjectId, value.runId, value.capturedAt, JSON.stringify(value));
+    return value;
+  }
+
+  async getBrowserHealth(subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string, limit = 20): Promise<BrowserHealthDetail> {
+    const rows = this.all("SELECT payload_json FROM browser_health_snapshots WHERE subject_kind=? AND subject_id=? ORDER BY captured_at DESC LIMIT ?", [subjectKind, subjectId, limit]);
+    const recent = rows.map((row) => browserHealthSnapshotSchema.parse(JSON.parse(String(row.payload_json))));
+    return { latest: recent[0] ?? null, recent };
+  }
+
   async removeRun(id: string): Promise<boolean> {
     const existing = this.getRow("SELECT id FROM runs WHERE id = ?", [id]); if (!existing) return false;
     this.transaction(() => {
       this.sql.prepare("DELETE FROM run_artifacts WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM run_events WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM browser_health_snapshots WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM run_sessions WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM runs WHERE id = ?").run(id);
     });
@@ -408,7 +455,8 @@ export function openProfileRepository(databasePath: string, profilesRoot: string
 }
 
 function mapProfile(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, launchMode: row.launch_mode ?? "PLAYWRIGHT", enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  const kind = row.driver_kind === "EXTERNAL_CDP" ? "EXTERNAL_CDP" : "NATIVE_STEALTH";
+  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapProxy(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, provider: row.provider, type: row.type, protocol: row.protocol, host: row.host, port: Number(row.port), expectedCountry: row.expected_country ?? null, expectedCity: row.expected_city ?? null, usernameConfigured: Boolean(row.username_secret_id), passwordConfigured: Boolean(row.password_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };

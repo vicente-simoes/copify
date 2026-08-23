@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chromium, type BrowserContext } from "playwright";
+import { chromium, type BrowserContext } from "rebrowser-playwright";
 import { type ProxyBenchmark, type RunnerProxy, type SessionRoute } from "@copify/shared";
 
 type ProbePayload = { ip?: string; country?: string; country_code?: string; city?: string; success?: boolean };
@@ -24,7 +24,7 @@ export async function verifyRoute(context: BrowserContext, proxy: RunnerProxy | 
 export async function benchmarkRoute(proxy: RunnerProxy | null, probeUrl: string): Promise<ProxyBenchmark> {
   const startedAt = Date.now(); const samples: Sample[] = []; let lastError: unknown;
   try {
-    const browser = await chromium.launch({ headless: true, executablePath: findChromeExecutable(), proxy: proxy ? toPlaywrightProxy(proxy) : undefined });
+    const browser = await chromium.launch({ headless: true, executablePath: findChromeExecutable(), ignoreDefaultArgs: ["--enable-automation", "--no-sandbox"], proxy: proxy ? toPlaywrightProxy(proxy) : undefined });
     try { const context = await browser.newContext(); for (let index = 0; index < 7; index += 1) { try { samples.push(await probe(context, probeUrl)); } catch (error) { lastError = error; } } await context.close(); } finally { await browser.close(); }
   } catch (error) { lastError = error; }
   const successful = samples.filter((sample) => Boolean(sample.payload.ip)); const values = successful.map((sample) => sample.latencyMs); const ips = new Set(successful.map((sample) => sample.payload.ip)); const first = successful[0]?.payload;
