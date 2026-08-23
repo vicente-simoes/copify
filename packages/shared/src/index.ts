@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { STORE_GENERAL, storeCurrencySchema } from "./stores";
+
+export * from "./stores";
 
 export const IPC_VERSION = 8 as const;
 export const SCHEMA_VERSION = 7 as const;
@@ -7,20 +10,18 @@ export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 const idSchema = z.string().uuid();
 const timestampSchema = z.number().int().nonnegative();
 const jsonRecordSchema = z.record(z.string(), z.unknown());
-export const STORE_SUPREME_EU = "supreme-eu" as const;
-export const STORE_GENERAL = "general" as const;
-export const targetStoreSchema = z.enum([STORE_GENERAL, STORE_SUPREME_EU]);
-export type TargetStore = z.infer<typeof targetStoreSchema>;
+export const storeIdSchema = z.string().trim().min(1).max(64);
+export type StoreId = z.infer<typeof storeIdSchema>;
 
 const priorityListSchema = z.array(z.string().trim().min(1).max(120)).max(40);
-export const targetCurrencySchema = z.enum(["EUR", "GBP", "USD"]);
+export const targetCurrencySchema = storeCurrencySchema;
 export const targetSchema = z.object({
-  id: idSchema, name: z.string().trim().min(1).max(120), storeId: targetStoreSchema, productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema,
+  id: idSchema, name: z.string().trim().min(1).max(120), storeId: storeIdSchema, productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema,
   preferredColors: priorityListSchema, sizePriority: priorityListSchema, currency: targetCurrencySchema, maxRetailMinor: z.number().int().min(0), quantity: z.number().int().min(1).max(10), enabled: z.boolean(),
   latestCheck: z.lazy(() => targetCheckSchema).nullable(), createdAt: timestampSchema, updatedAt: timestampSchema
 });
 export type Target = z.infer<typeof targetSchema>;
-export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(120), storeId: targetStoreSchema.default(STORE_GENERAL), productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema.default([]), preferredColors: priorityListSchema.default([]), sizePriority: priorityListSchema.default([]), currency: targetCurrencySchema.default("EUR"), maxRetailMinor: z.coerce.number().int().min(0), quantity: z.coerce.number().int().min(1).max(10).default(1), enabled: z.boolean().default(true) });
+export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(120), storeId: storeIdSchema.default(STORE_GENERAL), productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema.default([]), preferredColors: priorityListSchema.default([]), sizePriority: priorityListSchema.default([]), currency: targetCurrencySchema.default("EUR"), maxRetailMinor: z.coerce.number().int().min(0), quantity: z.coerce.number().int().min(1).max(10).default(1), enabled: z.boolean().default(true) });
 export type CreateTargetInput = z.input<typeof createTargetSchema>;
 export const updateTargetSchema = createTargetSchema.partial().refine((value) => Object.keys(value).length > 0, "Provide at least one field to update.");
 export type UpdateTargetInput = z.input<typeof updateTargetSchema>;
@@ -174,6 +175,7 @@ export const profileIpc = { list: "profiles:list", create: "profiles:create", up
 export const targetIpc = { list: "targets:list", create: "targets:create", update: "targets:update", remove: "targets:remove", test: "targets:test", changed: "targets:changed" } as const;
 export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks" } as const;
 export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", changed: "shipping:changed" } as const;
+export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;
 export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe" } as const;
 export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
 export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", changed: "runs:changed" } as const;

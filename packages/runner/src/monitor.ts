@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chromium, type Page } from "playwright";
-import { IPC_VERSION, monitorCommandSchema, type MonitorEvent, type ProductCandidate, type ProductVariant, type TargetCheck, type TargetDecision, type TargetSnapshot } from "@copify/shared";
+import { IPC_VERSION, getStoreManifest, monitorCommandSchema, type MonitorEvent, type ProductCandidate, type ProductVariant, type TargetCheck, type TargetDecision, type TargetSnapshot } from "@copify/shared";
 import { findChromeExecutable } from "./network";
 
 const SUPREME_EU_LISTING_URL = "https://eu.supreme.com/collections/all";
@@ -120,7 +120,8 @@ export class SupremeEuAdapter implements StoreAdapter {
 
 function matchesName(name: string, target: TargetSnapshot): boolean { return matchesTarget(name, target); }
 async function check(target: TargetSnapshot): Promise<TargetCheck> {
-  if (target.storeId !== "supreme-eu") return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "This general target is saved for a future store adapter and cannot be monitored yet.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: "No monitor adapter is installed for this target preset." };
+  const manifest = getStoreManifest(target.storeId);
+  if (!manifest || manifest.capabilities.monitor === null) return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "NO_ADAPTER", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: null };
   try { const candidates = await new SupremeEuAdapter().locateProducts(target); const decision = decideTarget(target, candidates); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: decision.kind === "ERROR" ? "ERROR" : "SUCCESS", decision, candidateCount: candidates.length, errorMessage: decision.kind === "ERROR" ? decision.message : null }; }
   catch (error) { const errorMessage = sanitizeMonitorError(error instanceof Error ? error.message : "The Supreme monitor failed."); return { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "The Supreme EU listing could not be checked.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage }; }
 }

@@ -257,6 +257,19 @@ export class ProfileRepository {
     return value;
   }
 
+  async listStoreSettings(): Promise<Record<string, boolean>> {
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'store_settings'");
+    if (!row) return {};
+    try { const parsed: unknown = JSON.parse(String(row.value)); return parsed && typeof parsed === "object" ? Object.fromEntries(Object.entries(parsed as Record<string, unknown>).map(([id, enabled]) => [id, Boolean(enabled)])) : {}; }
+    catch { return {}; }
+  }
+
+  async setStoreEnabled(id: string, enabled: boolean): Promise<Record<string, boolean>> {
+    const next = { ...(await this.listStoreSettings()), [id]: enabled }; const now = Date.now();
+    this.sql.prepare("INSERT INTO app_settings (key,value,updated_at) VALUES ('store_settings',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run(JSON.stringify(next), now);
+    return next;
+  }
+
   async listTargets(): Promise<Target[]> { return this.all("SELECT * FROM targets ORDER BY created_at ASC").map((row) => targetSchema.parse(mapTarget(row))); }
   async getTarget(id: string): Promise<Target | undefined> { const row = this.getRow("SELECT * FROM targets WHERE id = ?", [id]); return row ? targetSchema.parse(mapTarget(row)) : undefined; }
   async createTarget(input: CreateTargetInput): Promise<Target> {

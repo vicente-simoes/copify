@@ -12,8 +12,8 @@ import type {
   ShippingProfile,
   Target,
 } from "@copify/shared";
+import { STORE_GENERAL, getStoreManifest, isMonitorable, listStoreManifests, type StoreManifest } from "@copify/shared";
 import appIcon from "../resources/icons/copify-icon-128.png";
-import supremeLogo from "../resources/brands/supreme-logo.svg";
 import "./styles.css";
 
 type Notice = { kind: "error" | "info"; message: string } | null;
@@ -74,7 +74,7 @@ const blankProxy = (): ProxyDraft => ({
   enabled: true,
 });
 const blankTarget = (): TargetDraft => ({
-  storeId: "general",
+  storeId: STORE_GENERAL,
   name: "",
   productKeywords: "",
   negativeKeywords: "",
@@ -85,13 +85,6 @@ const blankTarget = (): TargetDraft => ({
   quantity: 1,
   enabled: true,
 });
-const SUPREME_EU_APPAREL_SIZES = [
-  "Small",
-  "Medium",
-  "Large",
-  "XLarge",
-  "XXLarge",
-] as const;
 const blankShipping = (): ShippingDraft => ({
   name: "",
   fullName: "",
@@ -844,7 +837,7 @@ function Overview({
         />
         <Metric
           label="Monitorable targets"
-          value={targets.filter((target) => target.enabled && target.storeId === "supreme-eu").length}
+          value={targets.filter((target) => target.enabled && isMonitorable(target.storeId)).length}
           detail="Supreme EU read-only"
         />
         <Metric
@@ -1010,7 +1003,7 @@ function Runs({
               >
                 <option value="">Observation only — no target monitor</option>
                 {targets
-                  .filter((target) => target.enabled && target.storeId === "supreme-eu")
+                  .filter((target) => target.enabled && isMonitorable(target.storeId))
                   .map((target) => (
                     <option key={target.id} value={target.id}>
                       Supreme EU · {target.name}
@@ -1194,6 +1187,8 @@ function Targets({
   onToggle: (target: Target) => void;
   onRemove: (target: Target) => void;
 }) {
+  const draftManifest = getStoreManifest(draft.storeId);
+  const draftSizes: StoreManifest["variants"]["sizes"] = draftManifest?.variants.sizes ?? { kind: "freeform" };
   return (
     <div className="page-stack">
       <section className="page-intro">
@@ -1215,7 +1210,7 @@ function Targets({
           </div>
         )}
         {targets.map((target) => {
-          const monitorable = target.storeId === "supreme-eu";
+          const monitorable = isMonitorable(target.storeId);
           return <article key={target.id} className="profile-card target-card">
             <div className="profile-title">
               <div>
@@ -1287,24 +1282,18 @@ function Targets({
           <select
             value={draft.storeId}
             onChange={(event) => {
-              const storeId = event.target.value as Target["storeId"];
-              setDraft({
-                ...draft,
-                storeId,
-                currency: storeId === "supreme-eu" ? "EUR" : draft.currency,
-              });
+              const storeId = event.target.value;
+              setDraft({ ...draft, storeId, currency: getStoreManifest(storeId)?.currency ?? draft.currency });
             }}
           >
-            <option value="general">General — save for a future adapter</option>
-            <option value="supreme-eu">Supreme EU — direct monitor available</option>
+            {listStoreManifests().map((manifest) => (
+              <option key={manifest.id} value={manifest.id}>{manifest.name}</option>
+            ))}
           </select>
         </Field>
-        {draft.storeId === "supreme-eu" ? (
-          <div className="preset-notice supreme-preset-notice">
-            <img src={supremeLogo} alt="Supreme" />
-            <p>Common Supreme EU apparel spellings are Small, Medium, Large, XLarge, and XXLarge. Its monitor runs directly and read-only.</p>
-          </div>
-        ) : <p className="preset-notice">General targets keep free-form priorities but cannot be tested or attached to a run until their store adapter is added.</p>}
+        {draftManifest && draftManifest.capabilities.monitor === null && (
+          <p className="preset-notice">No adapter yet — saved as a template.</p>
+        )}
         <Field label="Target name">
           <input
             required
@@ -1312,7 +1301,7 @@ function Targets({
             onChange={(event) =>
               setDraft({ ...draft, name: event.target.value })
             }
-            placeholder={draft.storeId === "supreme-eu" ? "e.g. Navy zip hoodie" : "e.g. Leather jacket"}
+            placeholder="e.g. Leather jacket"
           />
         </Field>
         <Field label="Positive keywords">
@@ -1334,20 +1323,20 @@ function Targets({
             placeholder="Optional exclusions"
           />
         </Field>
-        <Field label={draft.storeId === "supreme-eu" ? "Supreme color priority" : "Color priority"}>
+        <Field label="Color priority">
           <input
             value={draft.preferredColors}
             onChange={(event) =>
               setDraft({ ...draft, preferredColors: event.target.value })
             }
-            placeholder={draft.storeId === "supreme-eu" ? "e.g. Navy, Black" : "First choice first"}
+            placeholder="First choice first"
           />
         </Field>
-        {draft.storeId === "supreme-eu" ? (
-          <Field label="Supreme apparel size priority">
+        {draftSizes.kind === "enum" ? (
+          <Field label="Size priority">
             <div className="preset-size-picker">
               <div className="preset-size-options">
-                {SUPREME_EU_APPAREL_SIZES.map((size) => {
+                {draftSizes.values.map((size) => {
                   const selected = list(draft.sizePriority).includes(size);
                   return <button key={size} className={`preset-size-option ${selected ? "selected" : ""}`} type="button" onClick={() => {
                     const current = list(draft.sizePriority);
@@ -1355,7 +1344,7 @@ function Targets({
                   }}>{size}</button>;
                 })}
               </div>
-              <input value={draft.sizePriority} onChange={(event) => setDraft({ ...draft, sizePriority: event.target.value })} placeholder="Choose above, or add an exact storefront size" />
+              <input value={draft.sizePriority} onChange={(event) => setDraft({ ...draft, sizePriority: event.target.value })} placeholder="Choose above, or type an exact storefront size" />
             </div>
           </Field>
         ) : (
@@ -1366,7 +1355,7 @@ function Targets({
         <Field label="Currency">
           <select
             value={draft.currency}
-            disabled={draft.storeId === "supreme-eu"}
+            disabled={Boolean(draftManifest)}
             onChange={(event) =>
               setDraft({
                 ...draft,

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, shippingIpc, targetIpc,
-  type ApiResult, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type SessionSnapshot, type ShippingProfile, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc,
+  type ApiResult, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 const api = {
@@ -33,6 +33,11 @@ const api = {
     update: (id: string, input: UpdateShippingProfileInput): Promise<ApiResult<ShippingProfile>> => ipcRenderer.invoke(shippingIpc.update, id, input),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(shippingIpc.remove, id),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(shippingIpc.changed, callback); return () => ipcRenderer.removeListener(shippingIpc.changed, callback); }
+  },
+  stores: {
+    list: (): Promise<ApiResult<Store[]>> => ipcRenderer.invoke(storeIpc.list),
+    update: (id: string, enabled: boolean): Promise<ApiResult<Store[]>> => ipcRenderer.invoke(storeIpc.update, id, enabled),
+    onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(storeIpc.changed, callback); return () => ipcRenderer.removeListener(storeIpc.changed, callback); }
   },
   settings: {
     getNetworkProbe: (): Promise<ApiResult<NetworkProbeSettings>> => ipcRenderer.invoke(settingsIpc.getNetworkProbe),
