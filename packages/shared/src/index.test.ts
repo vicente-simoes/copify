@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createShippingProfileSchema, createTargetSchema, getStoreManifest, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runnerCommandSchema, storeManifestSchema, supportsAssistedCheckout, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runnerCommandSchema, storeManifestSchema, supportsAssistedCheckout, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -11,6 +11,12 @@ describe("store registry", () => {
     expect(isMonitorable("supreme-eu")).toBe(true);
     expect(supportsAssistedCheckout("supreme-eu")).toBe(true);
     expect(getStoreManifest("supreme-eu")?.variants.sizes).toMatchObject({ kind: "enum" });
+  });
+  it("provides Supreme checkout's selectable shipping destinations", () => {
+    const destinations = getStoreShippingDestinations("supreme-eu");
+    expect(destinations.find((destination) => destination.country === "PT")).toMatchObject({ label: "Portugal" });
+    expect(destinations.find((destination) => destination.country === "PT")?.regions).toContain("Lisbon");
+    expect(getStoreShippingDestinations("general")).toEqual([]);
   });
   it("treats a store without an adapter as unmonitorable rather than unknown", () => {
     expect(isKnownStore("general")).toBe(true);
@@ -50,11 +56,12 @@ describe("shared contracts", () => {
     expect(createTargetSchema.safeParse({ name: "Jacket", storeId: "", productKeywords: ["Leather Jacket"], maxRetailMinor: 20_000 }).success).toBe(false);
     const profileId = "00000000-0000-4000-8000-000000000001";
     expect(createRunSchema.parse({ name: "Observe", diagnosticLevel: "NORMAL", profileIds: [profileId] }).targetId).toBeNull();
+    expect(createRunSetupSchema.parse({ name: "Sneakers", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId: null })).toMatchObject({ name: "Sneakers", profileIds: [profileId] });
   });
-  it("requires acknowledgement for assisted checkout and validates encrypted shipping input", () => {
+  it("requires a target for assisted checkout and validates encrypted shipping input", () => {
     const profileId = "00000000-0000-4000-8000-000000000001"; const targetId = "00000000-0000-4000-8000-000000000002";
-    expect(createRunSchema.safeParse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId }).success).toBe(false);
-    expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId, assistedAcknowledged: true }).executionMode).toBe("ASSISTED_CHECKOUT");
+    expect(createRunSchema.safeParse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId: null }).success).toBe(false);
+    expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId }).executionMode).toBe("ASSISTED_CHECKOUT");
     expect(createShippingProfileSchema.parse({ name: "Home", details: { fullName: "Ada Lovelace", email: "ada@example.com", phone: "+351 1", address1: "1 Main St", postalCode: "1000", city: "Lisbon", country: "pt" } }).details.country).toBe("PT");
     expect(updateShippingProfileSchema.parse({ details: null })).toEqual({ details: null });
   });

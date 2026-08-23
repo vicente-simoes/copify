@@ -97,6 +97,14 @@ describe("ProfileRepository", () => {
     expect(await repo.getRun(detail.run.id)).toBeUndefined();
   });
 
+  it("saves reusable run setups separately from run history", async () => {
+    const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Sneakers", productKeywords: ["Sneaker"], maxRetailMinor: 20_000 });
+    const setup = await repo.createRunSetup({ name: "Sneakers drop", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profile.id], targetId: target.id });
+    expect(await repo.listRunSetups()).toEqual([setup]);
+    expect(await repo.removeRunSetup(setup.id)).toBe(true);
+    expect(await repo.listRunSetups()).toEqual([]);
+  });
+
   it("recovers interrupted active runs after an app restart", async () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const startedAt = Date.now(); const sessionId = randomUUID();
     const detail = await repo.createRun({ name: "Interrupted", diagnosticLevel: "NORMAL", profileIds: [profile.id] }, { appVersion: "0.4.0", schemaVersion: 4, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: sessionId, runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "RECORDING", startedAt, endedAt: null, finalError: null }]);

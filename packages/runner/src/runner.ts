@@ -54,6 +54,10 @@ async function start(id: string, userDataDir: string, launchMode: BrowserLaunchM
     if (context.pages().length === 0) await context.newPage();
     const route = await verifyRoute(context, proxy, probeUrl);
     emitRun("ROUTE_VERIFIED", { kind: route.kind, verification: route.verification });
+    // Do not leave the visible browser on an unused blank tab while the target
+    // monitor performs its first check. This is a normal storefront warm-up,
+    // not an artificial delay or stealth behavior.
+    if (recording?.assisted) await warmStorefront(context).catch(() => undefined);
     send({ type: "READY", version: IPC_VERSION, profileId: id, route });
   } catch (error) {
     if (recording) emitRun("RECORDING_OR_LAUNCH_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
@@ -133,7 +137,7 @@ async function assistTarget(command: Extract<import("@copify/shared").RunnerComm
   if (pendingAssist || assistState === "CHECKOUT_HANDOFF") return;
   pendingAssist = command;
   try {
-    assistPage = await context.newPage(); await assistPage.bringToFront();
+    assistPage = context.pages().find((page) => !page.isClosed()) ?? await context.newPage(); await assistPage.bringToFront();
     await continueFromEmptyCart(command);
   } catch (error) {
     recordAssistFailure(error, "Assisted checkout failed.");
@@ -155,7 +159,7 @@ async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
   if (!assistPage) return;
   const cart = await inspectCart(assistPage, command.candidate.name, command.candidate.url);
   if (cart.state === "BLOCKED") { cartResumeMode = "EMPTY_CART"; return; }
-  if (cart.state !== "EMPTY") { cartResumeMode = "EMPTY_CART"; transition("CHECKPOINT", cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", { reason: cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify left the existing cart unchanged. Empty the cart manually, then resume this session." }); await assistPage.bringToFront(); return; }
+  if (cart.state !== "EMPTY") { cartResumeMode = "EMPTY_CART"; await showCartForReview(assistPage, command.candidate.url); transition("CHECKPOINT", cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", { reason: cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify left the existing cart unchanged. Empty the cart manually, then resume this session." }); await assistPage.bringToFront(); return; }
   cartResumeMode = undefined;
   transition("PRODUCT_OPEN", "PRODUCT_NAVIGATION_STARTED", { product: command.candidate.name, variant: command.variant, quantity: command.quantity });
   await assistPage.goto(command.candidate.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -174,7 +178,7 @@ async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void>
   if (!assistPage) return;
   const cart = await inspectCart(assistPage, command.candidate.name, command.candidate.url);
   if (cart.state === "BLOCKED") { cartResumeMode = "TARGET_ONLY"; return; }
-  if (cart.state !== "ITEMS" || cart.itemCount !== 1 || !cart.hasTarget) { cartResumeMode = "TARGET_ONLY"; transition("CHECKPOINT", "CART_CONTENT_CHANGED", { reason: "CART_CONTENT_CHANGED", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify will not continue until the cart contains exactly the detected target. Review the cart manually, then resume." }); await assistPage.bringToFront(); return; }
+  if (cart.state !== "ITEMS" || cart.itemCount !== 1 || !cart.hasTarget) { cartResumeMode = "TARGET_ONLY"; await showCartForReview(assistPage, command.candidate.url); transition("CHECKPOINT", "CART_CONTENT_CHANGED", { reason: "CART_CONTENT_CHANGED", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify will not continue until the cart contains exactly the detected target. Review the cart manually, then resume." }); await assistPage.bringToFront(); return; }
   cartResumeMode = undefined;
   transition("CHECKOUT", "CHECKOUT_NAVIGATION_STARTED", {});
   await goToCheckout(assistPage);
@@ -185,15 +189,62 @@ async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void>
 }
 
 async function inspectCart(page: Page, targetName: string, productUrl: string): Promise<CartInspection> {
-  const cartUrl = new URL("/cart", productUrl).toString(); await page.goto(cartUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-  if (await checkpoint(page)) return { state: "BLOCKED" };
-  const text = await page.locator("body").innerText().catch(() => ""); const normalized = normalizeVariantValue(text);
-  if (/(?:your )?(?:cart|shopping bag) (?:is |currently )?empty|there are no items in your cart/i.test(text)) return { state: "EMPTY" };
-  const quantityCount = await page.locator('input[type="number"], input[name="updates[]"], input[name*="quantity" i]').count().catch(() => 0);
-  const removeCount = await page.getByRole("button", { name: /remove/i }).count().catch(() => 0);
-  const count = text.match(/\b(\d+)\s+items?\s+in\s+cart\b/i)?.[1]; const itemCount = quantityCount || removeCount || (count ? Number(count) : null);
-  if (itemCount !== null || /\bsubtotal\b|\bcheckout(?:\s+now)?\b|\bremove\b/i.test(text)) return { state: "ITEMS", itemCount, hasTarget: normalized.includes(normalizeVariantValue(targetName)) };
-  return { state: "UNKNOWN" };
+  try {
+    // Supreme currently redirects a browser navigation to /cart to /pages/shop
+    // when the cart is empty. Read Shopify's public cart state through this
+    // browser context instead, which preserves its cookies without taking the
+    // assisted tab away from its current step.
+    const response = await page.context().request.get(new URL("/cart.js", productUrl).toString(), { timeout: 30_000 });
+    if (!response.ok()) return { state: "UNKNOWN" };
+    return parseShopifyCart(await response.json(), targetName) ?? { state: "UNKNOWN" };
+  } catch {
+    return { state: "UNKNOWN" };
+  }
+}
+
+async function warmStorefront(activeContext: BrowserContext): Promise<void> {
+  const page = activeContext.pages().find((item) => !item.isClosed()) ?? await activeContext.newPage();
+  await page.goto("https://eu.supreme.com/pages/shop", { waitUntil: "domcontentloaded", timeout: 15_000 });
+}
+
+async function inspectVisibleCart(page: Page, targetName: string): Promise<CartInspection> {
+  try {
+    // Keep this request in the page itself. Shopify can associate cart changes
+    // with browser-only session state that is not immediately reflected in the
+    // separate Playwright request context.
+    const response = await page.evaluate(async () => {
+      const value = await fetch("/cart.js", { credentials: "same-origin", headers: { Accept: "application/json" } });
+      return { ok: value.ok, body: await value.text() };
+    });
+    if (!response.ok) return { state: "UNKNOWN" };
+    return parseShopifyCart(JSON.parse(response.body), targetName) ?? { state: "UNKNOWN" };
+  } catch {
+    return { state: "UNKNOWN" };
+  }
+}
+
+async function showCartForReview(page: Page, productUrl: string): Promise<void> {
+  try {
+    await page.goto(new URL("/cart", productUrl).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
+  } catch {
+    // A storefront outage should still leave the user at a meaningful page,
+    // never at the blank page that the runner creates for its assisted flow.
+    await page.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+  }
+}
+
+export function parseShopifyCart(value: unknown, targetName: string): CartInspection | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const cart = value as Record<string, unknown>; const itemCount = cart.item_count;
+  if (!Number.isInteger(itemCount) || typeof itemCount !== "number" || itemCount < 0 || !Array.isArray(cart.items)) return null;
+  if (itemCount === 0) return { state: "EMPTY" };
+  const target = normalizeVariantValue(targetName);
+  const hasTarget = cart.items.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const product = item as Record<string, unknown>;
+    return [product.product_title, product.title, product.handle, product.url].some((candidate) => typeof candidate === "string" && normalizeVariantValue(candidate).includes(target));
+  });
+  return { state: "ITEMS", itemCount, hasTarget };
 }
 
 async function checkCart(id: string): Promise<void> {
@@ -214,14 +265,29 @@ async function emptyCart(id: string): Promise<void> {
     const initial = await inspectCart(page, "", "https://eu.supreme.com/");
     if (initial.state === "BLOCKED") throw new AssistError("CHECKPOINT_DETECTED", "A storefront checkpoint prevented cart removal.");
     if (initial.state === "UNKNOWN") throw new AssistError("STORE_UNAVAILABLE", "The cart could not be safely verified before removal.");
-    for (let attempts = 0; attempts < 20; attempts += 1) {
-      const remove = await firstVisible([page.getByRole("button", { name: /remove/i }).first(), page.getByText(/^remove$/i).first()], 2_000);
-      if (!remove) break;
-      await remove.click({ timeout: 10_000 }); await page.waitForTimeout(250);
+    if (initial.state === "EMPTY") { send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "EMPTY", itemCount: 0, checkedAt: Date.now(), message: "Cart is already empty." } }); return; }
+    // This action is explicitly confirmed by the user. Load the storefront
+    // first, then clear and verify through the page's live browser session.
+    await showCartForReview(page, "https://eu.supreme.com/");
+    if (await checkpoint(page, false)) throw new AssistError("CHECKPOINT_DETECTED", "A storefront checkpoint prevented cart removal.");
+    const cleared = await page.evaluate(async () => {
+      const response = await fetch("/cart/clear.js", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } });
+      return { ok: response.ok, status: response.status };
+    });
+    if (!cleared.ok) throw new AssistError("STORE_UNAVAILABLE", `The storefront refused to clear the cart (${cleared.status}).`);
+    let cart: CartInspection = { state: "UNKNOWN" };
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      cart = await inspectVisibleCart(page, "");
+      if (cart.state === "EMPTY") break;
+      await page.waitForTimeout(300);
     }
-    const cart = await inspectCart(page, "", "https://eu.supreme.com/");
-    if (cart.state !== "EMPTY") throw new AssistError("STORE_UNAVAILABLE", "Copify could not confirm that every cart item was removed.");
-    send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "EMPTY", itemCount: 0, checkedAt: Date.now(), message: "Cart emptied manually through Copify." } });
+    if (cart.state !== "EMPTY") {
+      const message = cart.state === "ITEMS"
+        ? `The storefront still reports ${cart.itemCount ?? "some"} cart item${cart.itemCount === 1 ? "" : "s"} after removal.`
+        : "Copify could not verify the cart after removal.";
+      throw new AssistError("STORE_UNAVAILABLE", message);
+    }
+    send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "EMPTY", itemCount: 0, checkedAt: Date.now(), message: "Cart emptied." } });
   } catch (error) { send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "ERROR", itemCount: null, checkedAt: Date.now(), message: sanitizeText(error instanceof Error ? error.message : "Cart removal failed.") } }); }
   finally { await page.close().catch(() => undefined); }
 }
@@ -252,7 +318,6 @@ async function selectVariant(page: Page, variant: ProductVariant): Promise<void>
           const button = buttons.nth(index); const title = await button.getAttribute("title");
           if (!title || !isColorThumbnailTitle(title, color) || await button.isDisabled()) continue;
           await button.click({ timeout: 10_000 });
-          await page.waitForTimeout(250);
           return true;
         }
         await page.waitForTimeout(100);
@@ -260,7 +325,7 @@ async function selectVariant(page: Page, variant: ProductVariant): Promise<void>
       return false;
     } catch { return false; }
   };
-  if (variant.color !== "Default" && !await selectByLabel(/color/i, variant.color) && !await selectColorThumbnail(variant.color)) throw new AssistError("VARIANT_NOT_AVAILABLE", `The configured color “${variant.color}” was not available.`);
+  if (variant.color !== "Default" && !await selectColorThumbnail(variant.color) && !await selectByLabel(/color/i, variant.color)) throw new AssistError("VARIANT_NOT_AVAILABLE", `The configured color “${variant.color}” was not available.`);
   if (variant.size !== "Default" && !await selectByLabel(/size/i, variant.size)) throw new AssistError("VARIANT_NOT_AVAILABLE", `The configured size “${variant.size}” was not available.`);
 }
 
@@ -342,27 +407,40 @@ async function stopSensitiveCapture(): Promise<void> {
 }
 
 async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void> {
-  const fill = async (pattern: RegExp, value: string, required = true): Promise<void> => {
-    const fillTextControl = async (field: Locator): Promise<boolean> => {
-      if (!await field.count()) return false;
-      const tag = await field.evaluate((element) => element.tagName.toLocaleLowerCase()).catch(() => "");
-      if (tag !== "input" && tag !== "textarea" && tag !== "[contenteditable]") return false;
-      await field.fill(value); return true;
-    };
-    if (await fillTextControl(page.getByLabel(pattern).first())) return;
-    if (await fillTextControl(page.locator(`input[name*="${pattern.source.replace(/[^a-z]/gi, "").toLowerCase()}"]`).first())) return;
-    if (required) throw new AssistError("CHECKOUT_NAV_FAILED", `The required checkout field ${pattern.source} was not found.`);
-  };
   await selectShippingCountry(page, shipping.country);
-  const firstName = page.getByLabel(/first.?name/i).first(); const lastName = page.getByLabel(/last.?name/i).first();
-  if (await firstName.count() && await lastName.count()) { const name = splitShippingName(shipping.fullName); await firstName.fill(name.firstName); await lastName.fill(name.lastName); }
-  else await fill(/full.?name|name/i, shipping.fullName);
-  await fill(/email/i, shipping.email); await fill(/phone/i, shipping.phone); await fill(/address.*1|address/i, shipping.address1); if (shipping.address2) await fill(/address.*2|apartment|unit/i, shipping.address2, false); await fill(/postal|zip/i, shipping.postalCode); await fill(/city/i, shipping.city); if (shipping.region) await fill(/state|region/i, shipping.region, false);
+  await selectShippingRegion(page, shipping.region);
+  const fill = async (label: string, value: string, labels: RegExp, names: string[], autocomplete: string[], required = true): Promise<boolean> => {
+    const candidates: Locator[] = [page.getByLabel(labels).first()];
+    for (const name of names) candidates.push(page.locator(`input[name*="${name}" i], textarea[name*="${name}" i]`).first());
+    for (const hint of autocomplete) candidates.push(page.locator(`input[autocomplete="${hint}" i], textarea[autocomplete="${hint}" i]`).first());
+    for (const field of candidates) {
+      try {
+        if (!await field.count() || !await field.isVisible()) continue;
+        const tag = await field.evaluate((element) => element.tagName.toLocaleLowerCase());
+        if (tag !== "input" && tag !== "textarea") continue;
+        await field.fill(value);
+        return true;
+      } catch { /* A country/region update can replace a field; try the next semantic match. */ }
+    }
+    if (required) throw new AssistError("CHECKOUT_NAV_FAILED", `The required checkout field ${label} was not found.`);
+    return false;
+  };
+  const name = splitShippingName(shipping.fullName);
+  const firstName = await fill("first name", name.firstName, /first.?name/i, ["first_name", "firstname", "given_name"], ["given-name"], false);
+  const lastName = await fill("last name", name.lastName, /last.?name/i, ["last_name", "lastname", "family_name"], ["family-name"], false);
+  if (!firstName && !lastName) await fill("full name", shipping.fullName, /full.?name/i, ["full_name", "fullname"], ["name"]);
+  else if (!firstName || !lastName) throw new AssistError("CHECKOUT_NAV_FAILED", "The checkout did not expose both first and last name fields.");
+  await fill("email", shipping.email, /email/i, ["email"], ["email"]);
+  await fill("phone", shipping.phone, /phone|mobile/i, ["phone", "mobile"], ["tel"]);
+  await fill("address", shipping.address1, /address(?:\s|\b).*1|street/i, ["address1", "address_1", "street"], ["address-line1"]);
+  if (shipping.address2) await fill("address line 2", shipping.address2, /address(?:\s|\b).*2|apartment|unit/i, ["address2", "address_2", "apartment", "unit"], ["address-line2"], false);
+  await fill("postal code", shipping.postalCode, /postal|zip/i, ["postal", "zip"], ["postal-code"]);
+  await fill("city", shipping.city, /city|town/i, ["city", "town"], ["address-level2"]);
   emitRun("SHIPPING_FILLED", { country: shipping.country });
 }
 
 async function selectShippingCountry(page: Page, country: string): Promise<void> {
-  const candidates = [page.getByLabel(/country|region/i).first(), page.locator("select").first()]; const names = shippingCountryNames(country);
+  const candidates = [page.locator('select[name*="country" i], select[autocomplete="country" i]').first(), page.getByLabel(/country(?:\/region)?/i).first(), page.locator("select").first()]; const names = shippingCountryNames(country);
   for (const field of candidates) {
     if (!await field.count()) continue;
     const option = await field.locator("option").evaluateAll((options, values) => options.map((item) => ({ value: (item as HTMLOptionElement).value, text: item.textContent?.trim() ?? "" })).find((item) => values.some((value) => item.value.trim().toUpperCase() === value.toUpperCase() || item.text.trim().toLocaleLowerCase() === value.toLocaleLowerCase())), names).catch(() => undefined);
@@ -370,6 +448,26 @@ async function selectShippingCountry(page: Page, country: string): Promise<void>
     try { await field.selectOption({ value: option.value }); return; } catch { /* Try the next semantic country selector. */ }
   }
   throw new AssistError("CHECKOUT_NAV_FAILED", `The shipping country ${country} was not available at checkout.`);
+}
+
+async function selectShippingRegion(page: Page, region: string | undefined): Promise<void> {
+  if (!region) return;
+  const deadline = Date.now() + 7_500;
+  while (Date.now() < deadline) {
+    // Supreme's checkout region control is not consistently associated with a
+    // label or a stable name. Include every native select and identify the
+    // correct one by the region option it exposes.
+    const selects = page.locator("select");
+    const candidates = [page.locator('select[name*="region" i], select[name*="state" i], select[name*="province" i]').first(), page.getByLabel(/^(?:region|state|province)/i).first(), ...Array.from({ length: await selects.count() }, (_, index) => selects.nth(index))];
+    for (const field of candidates) {
+      if (!await field.count()) continue;
+      const option = await field.locator("option").evaluateAll((options, value) => options.map((item) => ({ value: (item as HTMLOptionElement).value, text: item.textContent?.trim() ?? "" })).find((item) => item.value.trim().toLocaleLowerCase() === value.toLocaleLowerCase() || item.text.trim().toLocaleLowerCase() === value.toLocaleLowerCase()), region).catch(() => undefined);
+      if (!option) continue;
+      try { await field.selectOption({ value: option.value }); return; } catch { /* The checkout can replace this selector after a country change. */ }
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new AssistError("CHECKOUT_NAV_FAILED", `The shipping region ${region} was not available at checkout.`);
 }
 
 async function acceptTerms(page: Page): Promise<void> {

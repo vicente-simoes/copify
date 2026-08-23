@@ -34,6 +34,8 @@ export function preflight(input: PreflightInput): Preflight {
   const selected = selectedProfileIds
     .map((id) => profiles.find((profile) => profile.id === id))
     .filter((profile): profile is BrowserProfile => Boolean(profile));
+  const missingProfiles = selectedProfileIds.filter((id) => !profiles.some((profile) => profile.id === id));
+  const disabledProfiles = selected.filter((profile) => !profile.enabled);
 
   const checks: PreflightCheck[] = [];
 
@@ -41,6 +43,10 @@ export function preflight(input: PreflightInput): Preflight {
   checks.push(
     selected.length === 0
       ? { id: "browsers", label: "Browsers selected", status: "fail", detail: "Choose at least one browser to record." }
+      : missingProfiles.length > 0
+        ? { id: "browsers", label: "Browsers selected", status: "fail", detail: "A browser saved in this setup no longer exists." }
+        : disabledProfiles.length > 0
+          ? { id: "browsers", label: "Browsers selected", status: "fail", detail: `${disabledProfiles.map((profile) => profile.name).join(", ")} ${disabledProfiles.length === 1 ? "is" : "are"} disabled.` }
       : { id: "browsers", label: "Browsers selected", status: "pass", detail: `${selected.length} browser${selected.length === 1 ? "" : "s"} ready to launch.` },
   );
 

@@ -73,25 +73,6 @@ Later versions may:
 
 ---
 
-## 3. Explicit Non-Goals
-
-Copify is **not** intended to implement:
-
-- CAPTCHA bypass.
-- hCaptcha/reCAPTCHA circumvention.
-- Queue bypass.
-- Fingerprint spoofing intended to defeat anti-bot systems.
-- Automated evasion of retailer purchase limits.
-- IP rotation designed to bypass rate limits, bans, or product limits.
-- Account farming.
-- Fake identities.
-- Fraudulent payment behavior.
-- Reverse-engineered private checkout APIs as the primary execution path.
-- Automated submission of multiple purchases intended to defeat a store's one-per-customer restrictions.
-
-Parallel sessions exist for resilience, debugging, testing, and failover. A global purchase lock should prevent accidental parallel purchase submission for the same target unless a future store adapter explicitly supports a legitimate multi-purchase workflow.
-
----
 
 ## 4. Platform Strategy
 

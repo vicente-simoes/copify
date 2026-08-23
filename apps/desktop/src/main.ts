@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type ApiResult, type AppInfo, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  type ApiResult, type AppInfo, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -20,11 +20,13 @@ type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; 
 let activeRun: ActiveRun | undefined;
 const cartStatuses = new Map<string, CartStatus>();
 const closeAfterCartCheck = new Set<string>();
+const intentionallyStoppedMonitors = new WeakSet<ChildProcess>();
 
 function result<T>(action: () => T): ApiResult<T> { try { return { ok: true, value: action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 async function resultAsync<T>(action: () => Promise<T>): Promise<ApiResult<T>> { try { return { ok: true, value: await action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : "Unexpected application error."; }
 function emitRunsChanged(): void { void profiles.listRuns().then((runs) => mainWindow?.webContents.send(runIpc.changed, { runs, activeRunId: activeRun?.detail.run.id ?? null })); }
+function emitRunSetupsChanged(): void { void profiles.listRunSetups().then((setups) => mainWindow?.webContents.send(runSetupIpc.changed, setups)); }
 function emitTargetsChanged(): void { void profiles.listTargets().then((targets) => mainWindow?.webContents.send(targetIpc.changed, targets)); }
 function emitShippingChanged(): void { void profiles.listShippingProfiles().then((shipping) => mainWindow?.webContents.send(shippingIpc.changed, shipping)); }
 
@@ -93,7 +95,13 @@ function registerIpc(): void {
   ipcMain.handle(sessionIpc.closeAll, async (): Promise<ApiResult<SessionSnapshot[]>> => { await orchestrator.shutdown(); return { ok: true, value: orchestrator.list() }; });
   ipcMain.handle(sessionIpc.carts, (): ApiResult<CartStatus[]> => result(() => [...cartStatuses.values()]));
   ipcMain.handle(sessionIpc.checkCart, (_event, id: string): Promise<ApiResult<CartStatus>> => resultAsync(async () => { if (activeRun) throw new Error("End the active run before checking a cart."); const profile = await requireProfile(id); if (!profile.enabled) throw new Error("Disabled profiles cannot check their cart."); const wasActive = orchestrator.isActive(id); const checking: CartStatus = { profileId: id, status: "CHECKING", itemCount: null, checkedAt: null, message: null }; cartStatuses.set(id, checking); mainWindow?.webContents.send(sessionIpc.cartChanged, checking); await openSession(id); if (!wasActive) closeAfterCartCheck.add(id); orchestrator.checkCart(id); return checking; }));
-  ipcMain.handle(sessionIpc.emptyCart, (_event, id: string): Promise<ApiResult<CartStatus>> => resultAsync(async () => { if (activeRun) throw new Error("End the active run before emptying a cart."); const profile = await requireProfile(id); if (!profile.enabled) throw new Error("Disabled profiles cannot empty their cart."); const wasActive = orchestrator.isActive(id); const checking: CartStatus = { profileId: id, status: "CHECKING", itemCount: null, checkedAt: null, message: "Removing cart items…" }; cartStatuses.set(id, checking); mainWindow?.webContents.send(sessionIpc.cartChanged, checking); await openSession(id); if (!wasActive) closeAfterCartCheck.add(id); orchestrator.emptyCart(id); return checking; }));
+  ipcMain.handle(sessionIpc.emptyCart, (_event, id: string): Promise<ApiResult<CartStatus>> => resultAsync(() => requestCartEmpty(id)));
+  ipcMain.handle(sessionIpc.emptyCarts, (): Promise<ApiResult<CartStatus[]>> => resultAsync(async () => {
+    if (activeRun) throw new Error("End the active run before emptying carts.");
+    const enabled = (await profiles.list()).filter((profile) => profile.enabled);
+    if (!enabled.length) throw new Error("There are no enabled browser profiles.");
+    return Promise.all(enabled.map((profile) => requestCartEmpty(profile.id)));
+  }));
 
   ipcMain.handle(runIpc.list, (): Promise<ApiResult<{ runs: import("@copify/shared").Run[]; activeRunId: string | null }>> => resultAsync(async () => ({ runs: await profiles.listRuns(), activeRunId: activeRun?.detail.run.id ?? null })));
   ipcMain.handle(runIpc.get, (_event, id: string): Promise<ApiResult<RunDetail | null>> => resultAsync(async () => (await profiles.getRun(id)) ?? null));
@@ -101,6 +109,9 @@ function registerIpc(): void {
   ipcMain.handle(runIpc.end, (): Promise<ApiResult<RunDetail>> => resultAsync(() => endRun()));
   ipcMain.handle(runIpc.resume, (_event, profileId: string): Promise<ApiResult<boolean>> => resultAsync(() => resumeRunSession(profileId)));
   ipcMain.handle(runIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(() => removeRun(id)));
+  ipcMain.handle(runSetupIpc.list, (): Promise<ApiResult<import("@copify/shared").RunSetup[]>> => resultAsync(() => profiles.listRunSetups()));
+  ipcMain.handle(runSetupIpc.create, (_event, input: unknown): Promise<ApiResult<import("@copify/shared").RunSetup>> => resultAsync(async () => { const parsed = createRunSetupSchema.parse(input); await assertRunSetupReferences(parsed); const created = await profiles.createRunSetup(parsed); emitRunSetupsChanged(); return created; }));
+  ipcMain.handle(runSetupIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { const removed = await profiles.removeRunSetup(id); emitRunSetupsChanged(); return removed; }));
 }
 
 async function startRun(input: CreateRunInput): Promise<RunDetail> {
@@ -126,6 +137,12 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   emitRunsChanged(); return (await profiles.getRun(detail.run.id))!;
 }
 
+async function assertRunSetupReferences(input: CreateRunSetupInput): Promise<void> {
+  const available = await profiles.list();
+  if (input.profileIds.some((id) => !available.some((profile) => profile.id === id))) throw new Error("One or more selected browser profiles no longer exist.");
+  if (input.targetId) await requireTarget(input.targetId);
+}
+
 async function endRun(): Promise<RunDetail> {
   const active = activeRun; if (!active) throw new Error("No run is currently recording."); active.ending = true;
   if (active.monitor) await appendMonitorEvent(active.detail.run.id, "TARGET_MONITOR_STOPPED", null, "The shared target monitor was stopped when the run ended.");
@@ -144,6 +161,18 @@ async function removeRun(id: string): Promise<boolean> {
 }
 
 async function openSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.open(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
+async function requestCartEmpty(id: string): Promise<CartStatus> {
+  if (activeRun) throw new Error("End the active run before emptying a cart.");
+  const profile = await requireProfile(id);
+  if (!profile.enabled) throw new Error("Disabled profiles cannot empty their cart.");
+  const wasActive = orchestrator.isActive(id);
+  const checking: CartStatus = { profileId: id, status: "CHECKING", itemCount: null, checkedAt: null, message: "Removing cart items…" };
+  cartStatuses.set(id, checking); mainWindow?.webContents.send(sessionIpc.cartChanged, checking);
+  await openSession(id);
+  if (!wasActive) closeAfterCartCheck.add(id);
+  orchestrator.emptyCart(id);
+  return checking;
+}
 async function restartSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.restart(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
 async function requireProfile(id: string): Promise<BrowserProfile> { const profile = await profiles.get(id); if (!profile) throw new Error("Browser profile not found."); return profile; }
 async function listStores(): Promise<Store[]> { const settings = await profiles.listStoreSettings(); return listStoreManifests().map((manifest) => ({ ...manifest, enabled: settings[manifest.id] ?? true })); }
@@ -168,10 +197,20 @@ function elapsedSince(active: ActiveRun): string { return (BigInt(Date.now() - a
 
 function startMonitor(runId: string, target: TargetSnapshot): ChildProcess {
   const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
-  worker.on("message", (value) => { void onMonitorEvent(value); }); worker.once("exit", () => { if (activeRun?.detail.run.id === runId && !activeRun.ending) void appendMonitorEvent(runId, "TARGET_MONITOR_FAILED", null, "The shared monitor exited unexpectedly."); });
+  worker.on("message", (value) => { void onMonitorEvent(value); }); worker.once("exit", () => {
+    if (intentionallyStoppedMonitors.delete(worker)) return;
+    if (activeRun?.detail.run.id === runId && !activeRun.ending) void appendMonitorEvent(runId, "TARGET_MONITOR_FAILED", null, "The shared monitor exited unexpectedly.");
+  });
   worker.send({ type: "START_MONITOR", version: IPC_VERSION, runId, target }); return worker;
 }
-function stopMonitor(active: ActiveRun): void { if (!active.monitor) return; active.monitor.send({ type: "STOP_MONITOR", version: IPC_VERSION }); setTimeout(() => active.monitor?.kill(), 3_000).unref(); active.monitor = undefined; }
+function stopMonitor(active: ActiveRun): void {
+  const worker = active.monitor;
+  if (!worker) return;
+  intentionallyStoppedMonitors.add(worker);
+  worker.send({ type: "STOP_MONITOR", version: IPC_VERSION });
+  setTimeout(() => { if (worker.exitCode === null) worker.kill(); }, 3_000).unref();
+  active.monitor = undefined;
+}
 async function testTarget(target: Target): Promise<TargetCheck> {
   const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "ignore", "ignore", "ipc"] }); const snapshot = snapshotTarget(target);
   return new Promise<TargetCheck>((resolve, reject) => {
@@ -184,7 +223,13 @@ async function testTarget(target: Target): Promise<TargetCheck> {
 async function onMonitorEvent(value: unknown): Promise<void> {
   const parsed = monitorEventSchema.safeParse(value); if (!parsed.success) return; const event: MonitorEvent = parsed.data; if (event.type !== "MONITOR_EVENT") return; const active = activeRun; if (!active || event.runId !== active.detail.run.id) return;
   await appendMonitorEvent(active.detail.run.id, event.eventType, event.check, null);
-  if (active.detail.run.executionMode === "ASSISTED_CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) { active.assistedDispatched = true; active.pendingAssist = event.check; await dispatchAssistedTarget(active, event.check); }
+  if (active.detail.run.executionMode === "ASSISTED_CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) {
+    active.assistedDispatched = true;
+    active.pendingAssist = event.check;
+    await dispatchAssistedTarget(active, event.check);
+    await appendMonitorEvent(active.detail.run.id, "TARGET_MONITOR_STOPPED", null, "A target was dispatched to the assisted sessions, so monitoring stopped.");
+    stopMonitor(active);
+  }
   emitRunsChanged();
 }
 

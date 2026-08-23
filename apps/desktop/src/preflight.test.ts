@@ -108,6 +108,13 @@ describe("preflight", () => {
     expect(check(noPriceLimit, "price")?.status).toBe("fail");
   });
 
+  it("blocks a saved selection when its browser was disabled or removed", () => {
+    const disabled = preflight(base({ profiles: [profile({ enabled: false })] }));
+    expect(check(disabled, "browsers")?.status).toBe("fail");
+    const missing = preflight(base({ selectedProfileIds: [id(99)] }));
+    expect(check(missing, "browsers")?.status).toBe("fail");
+  });
+
   it("warns when only some selected browsers can check out", () => {
     const result = preflight(base({
       mode: "ASSISTED_CHECKOUT",

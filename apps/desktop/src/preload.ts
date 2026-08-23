@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  profileIpc, proxyIpc, runIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc,
-  type ApiResult, type AppInfo, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc,
+  type ApiResult, type AppInfo, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 const api = {
@@ -45,7 +45,7 @@ const api = {
     appInfo: (): Promise<ApiResult<AppInfo>> => ipcRenderer.invoke(settingsIpc.appInfo)
   },
   sessions: {
-    list: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.list), open: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.open, id), close: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.close, id), restart: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.restart, id), openAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.openAll), closeAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.closeAll), carts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.carts), checkCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.checkCart, id), emptyCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.emptyCart, id),
+    list: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.list), open: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.open, id), close: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.close, id), restart: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.restart, id), openAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.openAll), closeAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.closeAll), carts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.carts), checkCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.checkCart, id), emptyCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.emptyCart, id), emptyCarts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.emptyCarts),
     onChanged: (listener: (snapshot: SessionSnapshot) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, snapshot: SessionSnapshot) => listener(snapshot); ipcRenderer.on(sessionIpc.changed, callback); return () => ipcRenderer.removeListener(sessionIpc.changed, callback); }, onCartChanged: (listener: (status: CartStatus) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, status: CartStatus) => listener(status); ipcRenderer.on(sessionIpc.cartChanged, callback); return () => ipcRenderer.removeListener(sessionIpc.cartChanged, callback); }
   },
   runs: {
@@ -55,6 +55,12 @@ const api = {
     end: (): Promise<ApiResult<RunDetail>> => ipcRenderer.invoke(runIpc.end), resume: (profileId: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.resume, profileId),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.remove, id),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(runIpc.changed, callback); return () => ipcRenderer.removeListener(runIpc.changed, callback); }
+  },
+  runSetups: {
+    list: (): Promise<ApiResult<RunSetup[]>> => ipcRenderer.invoke(runSetupIpc.list),
+    create: (input: CreateRunSetupInput): Promise<ApiResult<RunSetup>> => ipcRenderer.invoke(runSetupIpc.create, input),
+    remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runSetupIpc.remove, id),
+    onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(runSetupIpc.changed, callback); return () => ipcRenderer.removeListener(runSetupIpc.changed, callback); }
   }
 };
 contextBridge.exposeInMainWorld("copify", api);

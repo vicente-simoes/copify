@@ -1,6 +1,7 @@
-import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type ProxyBenchmark, type ProxyProfile, type RunDetail, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 import { preflight, type PreflightCheck } from "../preflight";
 import { Field, Route } from "../ui/primitives";
+import { Menu, type MenuEntry } from "../ui/Menu";
 
 type Mode = "OBSERVATION" | "ASSISTED_CHECKOUT";
 
@@ -85,6 +86,7 @@ export function Run({
   latest,
   getSession,
   runs,
+  setups,
   activeRun,
   selected,
   name,
@@ -93,7 +95,6 @@ export function Run({
   selectedProfiles,
   targetId,
   acknowledged,
-  assistedAcknowledged,
   busy,
   onName,
   onLevel,
@@ -101,11 +102,13 @@ export function Run({
   onTarget,
   onToggle,
   onAck,
-  onAssistedAck,
   onStart,
   onEnd,
   onResume,
   onShow,
+  onSaveSetup,
+  onLoadSetup,
+  onRemoveSetup,
 }: {
   profiles: BrowserProfile[];
   targets: Target[];
@@ -114,6 +117,7 @@ export function Run({
   latest: (id: string) => ProxyBenchmark | undefined;
   getSession: (id: string) => SessionSnapshot;
   runs: RunDetail["run"][];
+  setups: RunSetup[];
   activeRun: boolean;
   selected: RunDetail | null;
   name: string;
@@ -122,7 +126,6 @@ export function Run({
   selectedProfiles: string[];
   targetId: string;
   acknowledged: boolean;
-  assistedAcknowledged: boolean;
   busy: boolean;
   onName: (value: string) => void;
   onLevel: (value: DiagnosticLevel) => void;
@@ -130,11 +133,13 @@ export function Run({
   onTarget: (value: string) => void;
   onToggle: (id: string) => void;
   onAck: (value: boolean) => void;
-  onAssistedAck: (value: boolean) => void;
   onStart: () => void;
   onEnd: () => void;
   onResume: (profileId: string) => void;
   onShow: (id: string) => void;
+  onSaveSetup: () => void;
+  onLoadSetup: (setup: RunSetup) => void;
+  onRemoveSetup: (setup: RunSetup) => void;
 }) {
   if (activeRun) {
     return (
@@ -162,8 +167,7 @@ export function Run({
   const blocked =
     !status.canStart ||
     busy ||
-    (level === "DEEP_DEBUG" && !acknowledged) ||
-    (mode === "ASSISTED_CHECKOUT" && !assistedAcknowledged);
+    (level === "DEEP_DEBUG" && !acknowledged);
 
   return (
     <div className="page-stack">
@@ -175,7 +179,10 @@ export function Run({
               Copify opens the selected browsers itself so it can record from the first page.
             </p>
           </div>
-          <button className="primary" disabled={blocked} onClick={onStart}>Start run</button>
+          <div className="row-actions">
+            <button disabled={busy || !name.trim() || selectedProfiles.length === 0} onClick={onSaveSetup}>Save setup</button>
+            <button className="primary" disabled={blocked} onClick={onStart}>Start run</button>
+          </div>
         </div>
 
         <ul className="preflight">
@@ -224,16 +231,10 @@ export function Run({
             {selectable.length === 0 && <p className="muted">No enabled browsers yet.</p>}
           </fieldset>
 
-          <Field label="Run name">
-            <input value={name} onChange={(event) => onName(event.target.value)} maxLength={120} placeholder="Untitled run" />
+          <Field label="Run / setup name">
+            <input value={name} onChange={(event) => onName(event.target.value)} maxLength={120} placeholder="e.g. Air Max 95 drop" />
           </Field>
 
-          {mode === "ASSISTED_CHECKOUT" && (
-            <label className="check warning">
-              <input type="checkbox" checked={assistedAcknowledged} onChange={(event) => onAssistedAck(event.target.checked)} />
-              Assisted mode carts and fills shipping. It never pays or submits.
-            </label>
-          )}
           {level === "DEEP_DEBUG" && (
             <label className="check warning">
               <input type="checkbox" checked={acknowledged} onChange={(event) => onAck(event.target.checked)} />
@@ -241,6 +242,39 @@ export function Run({
             </label>
           )}
         </div>
+      </section>
+
+      <section className="panel">
+        <div className="section-title">
+          <div>
+            <h2>Saved setups</h2>
+            <p className="muted">Load a prepared target, capture mode, and browser selection before a drop.</p>
+          </div>
+        </div>
+        {setups.length === 0 ? (
+          <div className="empty">Save the current run configuration to reuse it later.</div>
+        ) : (
+          <div className="rows">
+            {setups.map((setup) => {
+              const setupTarget = targets.find((item) => item.id === setup.targetId);
+              const browserNames = setup.profileIds.map((id) => profiles.find((profile) => profile.id === id)?.name ?? "Missing browser");
+              const entries: MenuEntry[] = [{ kind: "item", label: "Remove", danger: true, disabled: busy, onSelect: () => onRemoveSetup(setup) }];
+              return (
+                <div className="row" key={setup.id}>
+                  <div className="row-main">
+                    <span className="row-name">{setup.name}</span>
+                    <span className="row-meta">{setupTarget?.name ?? (setup.targetId ? "Missing target" : "No target")} · {browserNames.join(", ")}</span>
+                  </div>
+                  <span className="dim">{setup.executionMode === "ASSISTED_CHECKOUT" ? "Assisted" : "Observe"} · {setup.diagnosticLevel.toLowerCase()}</span>
+                  <div className="row-actions">
+                    <button className="primary" disabled={busy} onClick={() => onLoadSetup(setup)}>Load</button>
+                    <Menu entries={entries} label={`Actions for ${setup.name}`} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="panel">

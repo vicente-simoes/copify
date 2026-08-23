@@ -52,6 +52,11 @@ export const runArtifacts = sqliteTable("run_artifacts", {
   relativePath: text("relative_path").notNull(), sensitive: integer("sensitive", { mode: "boolean" }).notNull(), createdAt: integer("created_at").notNull()
 });
 
+export const runSetups = sqliteTable("run_setups", {
+  id: text("id").primaryKey(), name: text("name").notNull().unique(), diagnosticLevel: text("diagnostic_level").notNull(), executionMode: text("execution_mode").notNull(),
+  profileIdsJson: text("profile_ids_json").notNull(), targetId: text("target_id"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+});
+
 export const targets = sqliteTable("targets", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), storeId: text("store_id").notNull(), productKeywordsJson: text("product_keywords_json").notNull(), negativeKeywordsJson: text("negative_keywords_json").notNull(),
   preferredColorsJson: text("preferred_colors_json").notNull(), sizePriorityJson: text("size_priority_json").notNull(), currency: text("currency").notNull(), maxRetailMinor: integer("max_retail_minor").notNull(), quantity: integer("quantity").notNull(),

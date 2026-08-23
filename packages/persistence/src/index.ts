@@ -3,10 +3,10 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createShippingProfileSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
-  type CreateRunInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
+  type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
@@ -111,7 +111,14 @@ export class ProfileRepository {
     if (version < 7 && this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles'").get()) {
       this.sql.exec("UPDATE browser_profiles SET launch_mode = 'PLAYWRIGHT' WHERE launch_mode = 'NATIVE_CDP';");
     }
-    this.sql.exec("PRAGMA user_version = 7;");
+    if (version < 8) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS run_setups (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, diagnostic_level TEXT NOT NULL, execution_mode TEXT NOT NULL,
+        profile_ids_json TEXT NOT NULL, target_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS run_setups_created_idx ON run_setups(created_at ASC);`);
+    }
+    this.sql.exec("PRAGMA user_version = 8;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -302,6 +309,22 @@ export class ProfileRepository {
     return (await this.getRun(id))!;
   }
 
+  async listRunSetups(): Promise<RunSetup[]> {
+    return this.all("SELECT * FROM run_setups ORDER BY created_at ASC").map((row) => runSetupSchema.parse(mapRunSetup(row)));
+  }
+
+  async createRunSetup(input: CreateRunSetupInput): Promise<RunSetup> {
+    const parsed = createRunSetupSchema.parse(input); const id = randomUUID(); const now = Date.now();
+    try { this.sql.prepare("INSERT INTO run_setups (id,name,diagnostic_level,execution_mode,profile_ids_json,target_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.diagnosticLevel, parsed.executionMode, JSON.stringify(parsed.profileIds), parsed.targetId, now, now); }
+    catch (error) { throw new Error(isUniqueError(error) ? "A saved run setup with that name already exists." : "Could not save the run setup."); }
+    return runSetupSchema.parse({ id, ...parsed, createdAt: now, updatedAt: now });
+  }
+
+  async removeRunSetup(id: string): Promise<boolean> {
+    return this.sql.prepare("DELETE FROM run_setups WHERE id = ?").run(id).changes > 0;
+  }
+
   async listRuns(limit = 100): Promise<Run[]> {
     return this.all("SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", [limit]).map((row) => runSchema.parse(mapRun(row)));
   }
@@ -398,6 +421,9 @@ function mapBenchmark(row: Row): Record<string, unknown> {
 }
 function mapRun(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode ?? "OBSERVATION", status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+}
+function mapRunSetup(row: Row): Record<string, unknown> {
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapTarget(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };

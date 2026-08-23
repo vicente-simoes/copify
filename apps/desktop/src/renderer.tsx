@@ -7,6 +7,7 @@ import type {
   ProxyBenchmark,
   ProxyProfile,
   RunDetail,
+  RunSetup,
   SessionSnapshot,
   ShippingProfile,
   Store,
@@ -49,6 +50,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [runs, setRuns] = useState<RunDetail["run"][]>([]);
+  const [runSetups, setRunSetups] = useState<RunSetup[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
   const [runName, setRunName] = useState("");
@@ -59,7 +61,6 @@ function App() {
   const [runProfiles, setRunProfiles] = useState<string[]>([]);
   const [runTargetId, setRunTargetId] = useState("");
   const [deepDebugAcknowledged, setDeepDebugAcknowledged] = useState(false);
-  const [assistedAcknowledged, setAssistedAcknowledged] = useState(false);
   const [targets, setTargets] = useState<Target[]>([]);
   const [targetDraft, setTargetDraft] = useState<TargetDraft>(blankTarget());
   const [editingTargetId, setEditingTargetId] = useState<string | null>(null);
@@ -79,6 +80,7 @@ function App() {
       sessionResult,
       settingResult,
       runResult,
+      runSetupResult,
       targetResult,
       shippingResult,
       cartResult,
@@ -89,6 +91,7 @@ function App() {
       window.copify.sessions.list(),
       window.copify.settings.getNetworkProbe(),
       window.copify.runs.list(),
+      window.copify.runSetups.list(),
       window.copify.targets.list(),
       window.copify.shipping.list(),
       window.copify.sessions.carts(),
@@ -119,6 +122,7 @@ function App() {
       setRuns(runResult.value.runs);
       setActiveRunId(runResult.value.activeRunId);
     }
+    if (runSetupResult.ok) setRunSetups(runSetupResult.value);
     const results = await Promise.all(
       [null, ...proxyResult.value.map((proxy) => proxy.id)].map(
         async (id) =>
@@ -143,12 +147,14 @@ function App() {
       })),
     );
     const offRuns = window.copify.runs.onChanged(() => void reload());
+    const offRunSetups = window.copify.runSetups.onChanged(() => void reload());
     const offCarts = window.copify.sessions.onCartChanged((status) => setCartStatuses((current) => ({ ...current, [status.profileId]: status })));
     const offTargets = window.copify.targets.onChanged(() => void reload());
     const offShipping = window.copify.shipping.onChanged(() => void reload());
     return () => {
       offSessions();
       offRuns();
+      offRunSetups();
       offCarts();
       offTargets();
       offShipping();
@@ -269,7 +275,6 @@ function App() {
         profileIds: runProfiles,
         targetId: runTargetId || null,
         deepDebugAcknowledged,
-        assistedAcknowledged,
       });
       if (response.ok) {
         setSelectedRun(response.value);
@@ -277,6 +282,17 @@ function App() {
       }
       return response;
     });
+  };
+  const saveRunSetup = async () => {
+    await execute(
+      () => window.copify.runSetups.create({ name: runName.trim(), diagnosticLevel: runLevel, executionMode: runMode, profileIds: runProfiles, targetId: runTargetId || null }),
+      "Run setup saved.",
+    );
+  };
+  const loadRunSetup = (setup: RunSetup) => {
+    setRunName(setup.name); setRunLevel(setup.diagnosticLevel); setRunMode(setup.executionMode); setRunProfiles(setup.profileIds); setRunTargetId(setup.targetId ?? "");
+    setDeepDebugAcknowledged(false);
+    setNotice({ kind: "info", message: `Loaded “${setup.name}”. Review preflight, then start when ready.` });
   };
   const saveShipping = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -373,7 +389,6 @@ function App() {
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <TitleBar
         crumb={inspecting ? selectedRun!.run.name : undefined}
-        onBack={inspecting ? () => setSelectedRun(null) : undefined}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
         recordingSince={recordingSince}
@@ -387,6 +402,7 @@ function App() {
           selectedRun && !activeRunId ? (
             <RunInspector
               detail={selectedRun}
+              onBack={() => setSelectedRun(null)}
               onDelete={() => {
                 if (window.confirm(`Delete "${selectedRun.run.name}" and its local artifacts?`))
                   void execute(async () => {
@@ -405,6 +421,7 @@ function App() {
               latest={latest}
               getSession={session}
               runs={runs}
+              setups={runSetups}
               activeRun={Boolean(activeRunId)}
               selected={selectedRun}
               name={runName}
@@ -413,11 +430,10 @@ function App() {
               selectedProfiles={runProfiles}
               targetId={runTargetId}
               acknowledged={deepDebugAcknowledged}
-              assistedAcknowledged={assistedAcknowledged}
               busy={busy}
               onName={setRunName}
               onLevel={(value) => { setRunLevel(value); setDeepDebugAcknowledged(false); }}
-              onMode={(value) => { setRunMode(value); setAssistedAcknowledged(false); }}
+              onMode={setRunMode}
               onTarget={setRunTargetId}
               onToggle={(id) =>
                 setRunProfiles((current) =>
@@ -425,7 +441,6 @@ function App() {
                 )
               }
               onAck={setDeepDebugAcknowledged}
-              onAssistedAck={setAssistedAcknowledged}
               onStart={() => void beginRun()}
               onEnd={() =>
                 void execute(async () => {
@@ -438,6 +453,11 @@ function App() {
                 void execute(() => window.copify.runs.resume(profileId))
               }
               onShow={(id) => void showRun(id)}
+              onSaveSetup={() => void saveRunSetup()}
+              onLoadSetup={loadRunSetup}
+              onRemoveSetup={(setup) => {
+                if (window.confirm(`Remove saved setup “${setup.name}”?`)) void execute(() => window.copify.runSetups.remove(setup.id));
+              }}
             />
           )
         )}
@@ -470,7 +490,11 @@ function App() {
             onCheckCart={(id) => void execute(() => window.copify.sessions.checkCart(id))}
             onEmptyCart={(id) => {
               if (window.confirm("Remove every item from this cart?"))
-                void execute(() => window.copify.sessions.emptyCart(id), "Cart emptied.");
+                void execute(() => window.copify.sessions.emptyCart(id));
+            }}
+            onEmptyCarts={() => {
+              if (window.confirm("Check every enabled browser and remove all cart items? Browsers opened only for this task will close automatically."))
+                void execute(() => window.copify.sessions.emptyCarts());
             }}
             onOpenAll={() => void execute(() => window.copify.sessions.openAll())}
             onCloseAll={() => void execute(() => window.copify.sessions.closeAll())}

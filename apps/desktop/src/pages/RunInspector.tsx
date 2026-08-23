@@ -1,6 +1,7 @@
 import { type RunDetail, type RunEvent, type RunSession } from "@copify/shared";
 import { fromMinor } from "../types";
 import { Route } from "../ui/primitives";
+import { BackIcon } from "../ui/icons";
 
 const ms = (elapsedNs: string) => Number(elapsedNs) / 1_000_000;
 
@@ -72,7 +73,7 @@ function Gantt({ detail }: { detail: RunDetail }) {
   );
 }
 
-export function RunInspector({ detail, onDelete }: { detail: RunDetail; onDelete: () => void }) {
+export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; onBack: () => void; onDelete: () => void }) {
   const target = detail.run.targetSnapshot;
   const duration = detail.run.endedAt ? detail.run.endedAt - detail.run.startedAt : null;
   const recording = detail.run.status === "STARTING" || detail.run.status === "RECORDING";
@@ -80,6 +81,10 @@ export function RunInspector({ detail, onDelete }: { detail: RunDetail; onDelete
   return (
     <div className="page-stack">
       <section className="panel">
+        <button className="text inspector-back" onClick={onBack}>
+          <BackIcon className="nav-icon" />
+          Back to runs
+        </button>
         <div className="section-title">
           <div>
             <h2>{detail.run.name}</h2>

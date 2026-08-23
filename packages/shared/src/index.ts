@@ -4,7 +4,7 @@ import { STORE_GENERAL, storeCurrencySchema } from "./stores";
 export * from "./stores";
 
 export const IPC_VERSION = 8 as const;
-export const SCHEMA_VERSION = 7 as const;
+export const SCHEMA_VERSION = 8 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -125,8 +125,12 @@ export const runArtifactSchema = z.object({ id: idSchema, runId: idSchema, runSe
 export type RunArtifact = z.infer<typeof runArtifactSchema>;
 export const runDetailSchema = z.object({ run: runSchema, sessions: z.array(runSessionSchema), events: z.array(runEventSchema), artifacts: z.array(runArtifactSchema) });
 export type RunDetail = z.infer<typeof runDetailSchema>;
-export const createRunSchema = z.object({ name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable().default(null), deepDebugAcknowledged: z.boolean().default(false), assistedAcknowledged: z.boolean().default(false) }).superRefine((value, context) => { if (value.diagnosticLevel === "DEEP_DEBUG" && !value.deepDebugAcknowledged) context.addIssue({ code: z.ZodIssueCode.custom, message: "Deep Debug requires acknowledgement because HAR and video can contain sensitive browser state.", path: ["deepDebugAcknowledged"] }); if (value.executionMode === "ASSISTED_CHECKOUT" && !value.targetId) context.addIssue({ code: z.ZodIssueCode.custom, message: "Assisted checkout requires a target.", path: ["targetId"] }); if (value.executionMode === "ASSISTED_CHECKOUT" && !value.assistedAcknowledged) context.addIssue({ code: z.ZodIssueCode.custom, message: "Assisted checkout requires acknowledgement.", path: ["assistedAcknowledged"] }); });
+export const createRunSchema = z.object({ name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable().default(null), deepDebugAcknowledged: z.boolean().default(false) }).superRefine((value, context) => { if (value.diagnosticLevel === "DEEP_DEBUG" && !value.deepDebugAcknowledged) context.addIssue({ code: z.ZodIssueCode.custom, message: "Deep Debug requires acknowledgement because HAR and video can contain sensitive browser state.", path: ["deepDebugAcknowledged"] }); if (value.executionMode === "ASSISTED_CHECKOUT" && !value.targetId) context.addIssue({ code: z.ZodIssueCode.custom, message: "Assisted checkout requires a target.", path: ["targetId"] }); });
 export type CreateRunInput = z.input<typeof createRunSchema>;
+export const runSetupSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema, profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable(), createdAt: timestampSchema, updatedAt: timestampSchema });
+export type RunSetup = z.infer<typeof runSetupSchema>;
+export const createRunSetupSchema = runSetupSchema.pick({ name: true, diagnosticLevel: true, executionMode: true, profileIds: true, targetId: true });
+export type CreateRunSetupInput = z.input<typeof createRunSetupSchema>;
 export const runnerRecordingSchema = z.object({ runId: idSchema, runSessionId: idSchema, diagnosticLevel: diagnosticLevelSchema, assisted: z.boolean().default(false), artifactDir: z.string().min(1), startedAt: timestampSchema });
 export type RunnerRecording = z.infer<typeof runnerRecordingSchema>;
 
@@ -178,7 +182,8 @@ export const shippingIpc = { list: "shipping:list", create: "shipping:create", u
 export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;
 export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", appInfo: "settings:app-info" } as const;
 export type AppInfo = { version: string; electronVersion: string; chromeVersion: string | null; osVersion: string };
-export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
+export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", emptyCarts: "sessions:empty-carts", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
 export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", changed: "runs:changed" } as const;
+export const runSetupIpc = { list: "run-setups:list", create: "run-setups:create", remove: "run-setups:remove", changed: "run-setups:changed" } as const;
 export type ApiResult<T> = { ok: true; value: T } | { ok: false; error: string };
 export function defaultRoute(): SessionRoute { return { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }; }

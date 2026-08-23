@@ -165,9 +165,9 @@
 .history span:first-child { color: var(--fg-muted); }
 
 .cart-status { color: var(--fg-muted); font-size: var(--text-sm); }
-.cart-status.items { color: var(--warn); }
-.cart-status.empty { color: var(--accent); }
-.cart-status.error { color: var(--danger); }
+.cart-status.cart-items { color: var(--warn); }
+.cart-status.cart-empty { color: var(--accent); }
+.cart-status.cart-error { color: var(--danger); }
 
 /* ---- targets ---- */
 
@@ -445,6 +445,7 @@
 .assignment-note { margin-top: 12px; }
 
 /* ---- run inspector ---- */
+.inspector-back { display: inline-flex; align-items: center; gap: 6px; margin: -2px 0 12px -6px; }
 
 .run-target { margin-top: 10px; }
 

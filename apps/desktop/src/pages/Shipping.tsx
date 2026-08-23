@@ -1,4 +1,4 @@
-import { type BrowserProfile, type ShippingProfile, type Store } from "@copify/shared";
+import { getStoreShippingDestinations, type BrowserProfile, type ShippingProfile, type Store } from "@copify/shared";
 import { type ShippingDraft } from "../types";
 import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
@@ -46,6 +46,9 @@ export function Shipping({
   // checkout-capable adapter exists rather than rendered with nowhere to save.
   const checkoutStores = stores.filter((store) => store.enabled && store.capabilities.checkoutAutofill);
   const columns: AssignmentColumn[] = [{ id: "default", label: checkoutStores.length > 1 ? "Default" : "Address" }];
+  const destinations = getStoreShippingDestinations(checkoutStores[0]?.id ?? stores.find((store) => store.capabilities.checkoutAutofill)?.id ?? "");
+  const selectedDestination = destinations.find((destination) => destination.country === draft.country);
+  const regions = selectedDestination?.regions ?? [];
 
   const usable = shipping.filter((item) => item.enabled && item.complete);
 
@@ -187,18 +190,23 @@ export function Shipping({
           <Field label="City">
             <input required value={draft.city} onChange={(event) => setDraft({ ...draft, city: event.target.value })} />
           </Field>
-          <Field label="Region">
-            <input value={draft.region} onChange={(event) => setDraft({ ...draft, region: event.target.value })} placeholder="Optional" />
-          </Field>
           <Field label="Country">
-            <input
+            <select
               required
-              maxLength={2}
               value={draft.country}
-              onChange={(event) => setDraft({ ...draft, country: event.target.value.toUpperCase() })}
-              placeholder="PT"
-            />
+              onChange={(event) => setDraft({ ...draft, country: event.target.value, region: "" })}
+            >
+              {destinations.map((destination) => <option key={destination.country} value={destination.country}>{destination.label}</option>)}
+            </select>
           </Field>
+          {regions.length > 0 && (
+            <Field label="Region">
+              <select required value={draft.region} onChange={(event) => setDraft({ ...draft, region: event.target.value })}>
+                <option value="" disabled>Select region</option>
+                {regions.map((region) => <option key={region} value={region}>{region}</option>)}
+              </select>
+            </Field>
+          )}
         </form>
       </Drawer>
     </div>

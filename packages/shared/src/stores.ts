@@ -58,3 +58,49 @@ export const storeSettingsSchema = z.object({ id: z.string().min(1).max(64), ena
 export type StoreSettings = z.infer<typeof storeSettingsSchema>;
 export const storeSchema = storeManifestSchema.extend({ enabled: z.boolean() });
 export type Store = z.infer<typeof storeSchema>;
+
+export type StoreShippingDestination = {
+  country: string;
+  label: string;
+  regions: readonly string[];
+};
+
+const SUPREME_EU_SHIPPING_DESTINATIONS: readonly StoreShippingDestination[] = [
+  { country: "AT", label: "Austria", regions: [] },
+  { country: "BE", label: "Belgium", regions: [] },
+  { country: "BG", label: "Bulgaria", regions: [] },
+  { country: "HR", label: "Croatia", regions: [] },
+  { country: "CY", label: "Cyprus", regions: [] },
+  { country: "CZ", label: "Czech Republic", regions: [] },
+  { country: "DK", label: "Denmark", regions: [] },
+  { country: "EE", label: "Estonia", regions: [] },
+  { country: "FI", label: "Finland", regions: [] },
+  { country: "FR", label: "France", regions: [] },
+  { country: "DE", label: "Germany", regions: [] },
+  { country: "GR", label: "Greece", regions: [] },
+  { country: "HU", label: "Hungary", regions: [] },
+  { country: "IE", label: "Ireland", regions: [] },
+  { country: "IT", label: "Italy", regions: [] },
+  { country: "LV", label: "Latvia", regions: [] },
+  { country: "LT", label: "Lithuania", regions: [] },
+  { country: "LU", label: "Luxembourg", regions: [] },
+  { country: "MT", label: "Malta", regions: [] },
+  { country: "NL", label: "Netherlands", regions: [] },
+  { country: "PL", label: "Poland", regions: [] },
+  { country: "PT", label: "Portugal", regions: ["Azores", "Aveiro", "Beja", "Braga", "Bragança", "Castelo Branco", "Coimbra", "Évora", "Faro", "Guarda", "Leiria", "Lisbon", "Madeira", "Portalegre", "Porto", "Santarém", "Setúbal", "Viana do Castelo", "Vila Real", "Viseu"] },
+  { country: "RO", label: "Romania", regions: [] },
+  { country: "SK", label: "Slovakia", regions: [] },
+  { country: "SI", label: "Slovenia", regions: [] },
+  { country: "ES", label: "Spain", regions: [] },
+  { country: "SE", label: "Sweden", regions: [] },
+  { country: "CH", label: "Switzerland", regions: [] },
+  { country: "GB", label: "United Kingdom", regions: [] },
+];
+
+const SHIPPING_DESTINATIONS = new Map<string, readonly StoreShippingDestination[]>([
+  [STORE_SUPREME_EU, SUPREME_EU_SHIPPING_DESTINATIONS],
+]);
+
+export function getStoreShippingDestinations(id: string): readonly StoreShippingDestination[] {
+  return SHIPPING_DESTINATIONS.get(id) ?? [];
+}

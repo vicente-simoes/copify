@@ -40,6 +40,7 @@ export function Browsers({
   onRemoveProfile,
   onCheckCart,
   onEmptyCart,
+  onEmptyCarts,
   onOpenAll,
   onCloseAll,
 }: {
@@ -62,6 +63,7 @@ export function Browsers({
   onRemoveProfile: (profile: BrowserProfile) => void;
   onCheckCart: (id: string) => void;
   onEmptyCart: (id: string) => void;
+  onEmptyCarts: () => void;
   onOpenAll: () => void;
   onCloseAll: () => void;
 }) {
@@ -102,6 +104,7 @@ export function Browsers({
               Open all
             </button>
             <button disabled={busy || activeCount === 0} onClick={onCloseAll}>Close all</button>
+            {showCart && <button disabled={busy || !profiles.some((profile) => profile.enabled)} onClick={onEmptyCarts}>Empty carts</button>}
           </div>
         </div>
 
@@ -169,6 +172,7 @@ export function Browsers({
                   <div className="col-name row-main">
                     <span className="row-name">{profile.name}</span>
                     {!profile.enabled && <span className="row-meta">Disabled</span>}
+                    {cart.status === "ERROR" && cart.message && <span className="error-detail">{cart.message}</span>}
                     {session.error && <span className="error-detail">{session.error.message}</span>}
                     {check.status === "FAILED" && !session.error && (
                       <span className="error-detail">{check.message ?? "Route not confirmed"}</span>
@@ -184,7 +188,7 @@ export function Browsers({
                     {benchmark?.medianLatencyMs == null ? "—" : `${Math.round(benchmark.medianLatencyMs)} ms`}
                   </span>
                   {showCart && (
-                    <span className={`col-cart row-cell cart-status ${cart.status.toLowerCase()}`}>{cartLabel(cart)}</span>
+                    <span className={`col-cart row-cell cart-status cart-${cart.status.toLowerCase()}`} title={cart.message ?? undefined}>{cartLabel(cart)}</span>
                   )}
 
                   <div className="col-actions row-actions">

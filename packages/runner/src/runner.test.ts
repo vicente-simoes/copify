@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isColorThumbnailTitle, sanitizeText, shippingCountryNames, splitShippingName, withChromeTranslationDisabled } from "./runner";
+import { isColorThumbnailTitle, parseShopifyCart, sanitizeText, shippingCountryNames, splitShippingName, withChromeTranslationDisabled } from "./runner";
 
 describe("runner recording redaction", () => {
   it("removes credential-like headers and query values before event persistence", () => {
@@ -20,5 +20,10 @@ describe("runner recording redaction", () => {
   });
   it("keeps existing Chrome preferences while disabling the translate offer", () => {
     expect(withChromeTranslationDisabled({ homepage: "https://example.test", translate: { enabled: true, blocked: ["example.test"] } })).toEqual({ homepage: "https://example.test", translate: { enabled: false, blocked: ["example.test"] } });
+  });
+  it("reads Shopify cart JSON without navigating the assisted browser tab", () => {
+    expect(parseShopifyCart({ item_count: 0, items: [] }, "Capital Hooded Sweatshirt")).toEqual({ state: "EMPTY" });
+    expect(parseShopifyCart({ item_count: 1, items: [{ product_title: "Capital Hooded Sweatshirt", title: "Capital Hooded Sweatshirt - Black" }] }, "Capital Hooded Sweatshirt")).toEqual({ state: "ITEMS", itemCount: 1, hasTarget: true });
+    expect(parseShopifyCart({ item_count: "1", items: [] }, "Capital Hooded Sweatshirt")).toBeNull();
   });
 });
