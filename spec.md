@@ -275,7 +275,7 @@ The orchestrator is responsible for:
 - Creating runs.
 - Broadcasting product events.
 - Coordinating target execution.
-- Managing the global purchase/commit lock.
+- Managing the global purchase.
 - Collecting events.
 - Persisting run summaries.
 - Controlling UI-visible state.
@@ -295,7 +295,6 @@ The main entities are:
 - `Runner`
 - `StoreAdapter`
 - `RunEvent`
-- `CommitLock`
 
 ---
 
@@ -861,56 +860,6 @@ Copify must not implement automated challenge circumvention.
 
 ---
 
-## 20. Purchase Commit Lock
-
-Multiple sessions may reach checkout simultaneously.
-
-Copify should include a **global target-level commit lock**.
-
-Purpose:
-
-- preserve redundancy
-- prevent accidental duplicate submissions
-- allow failover
-- improve post-run analysis
-
-Concept:
-
-```ts
-interface CommitLock {
-  targetId: string;
-  ownerSessionId?: string;
-
-  claim(sessionId: string): boolean;
-  release(sessionId: string): void;
-}
-```
-
-Behavior:
-
-```text
-Runner A reaches READY_TO_CONFIRM
-    ↓
-claims CommitLock
-    ↓
-becomes active purchase path
-
-Runner B reaches READY_TO_CONFIRM
-    ↓
-cannot claim lock
-    ↓
-remains paused fallback
-
-Runner A fails
-    ↓
-lock released
-    ↓
-Runner B may claim lock
-```
-
-This lock is an intentional core design decision.
-
----
 
 ## 21. Run Model
 
@@ -1721,7 +1670,7 @@ A typical drop-day workflow:
 8. Wait for product.
 9. Let runners progress toward checkout.
 10. Handle human checkpoints.
-11. Commit through one active session.
+11. Checkout where possible.
 12. End run.
 13. Inspect run immediately afterward.
 
@@ -1890,22 +1839,19 @@ Success criteria:
 
 ---
 
-### v0.6 — Multi-Session Failover
+### v0.6 — Multi-Session Checkout Assistance
 
 Deliver:
 
-- global `CommitLock`.
+- must be able to get to the filled out checkout page in multiple browsers by doing a run
 - READY_TO_CONFIRM state.
 - session failover.
-- lock release/reassignment.
 - live session priority.
 - improved action-required UI.
 
 Success criteria:
 
 - Three sessions may reach checkout.
-- Only one is allowed to become the active commit path.
-- A failed active session can hand off to a waiting fallback.
 
 ---
 
@@ -1990,7 +1936,6 @@ Test:
 - variant priority
 - price limits
 - state transitions
-- commit lock
 - event serialization
 - proxy scoring
 - network redaction
@@ -2096,27 +2041,6 @@ The long-term differentiator is:
 
 ---
 
-## 47. Branding
-
-**Product name:** Copify
-
-The name should be used independently of Supreme or Shopify branding.
-
-Avoid names such as:
-
-- Supreme Copify
-- Shopify Copify
-
-Store names should only appear as supported adapters/integrations.
-
-Potential internal tagline:
-
-> **Prepare. Run. Inspect. Improve.**
-
-This is an internal positioning line, not a finalized marketing slogan.
-
----
-
 ## 48. Initial Definition of Done
 
 The first meaningful Copify milestone is reached when the following scenario works:
@@ -2170,8 +2094,7 @@ Recommended coding order:
 18. SupremeAdapter
 19. Target engine
 20. ATC/checkout assistance
-21. CommitLock/failover
-22. Historical analytics
+21. Historical analytics
 ```
 
 ---
@@ -2233,7 +2156,7 @@ The following decisions are considered **locked unless new evidence justifies ch
 - Target configurations support keyword, color, and size priority.
 - Targets include a maximum retail-price kill switch.
 - Security challenges trigger human handoff.
-- Parallel sessions use a global commit/purchase lock.
+- Ideally all session checks out on the drops or at least as many as possible.
 - Development begins with browser/session infrastructure and observability before Supreme-specific automation.
 - Electron Vite is the build tooling; Drizzle schema over `node:sqlite` is the
   persistence layer.
