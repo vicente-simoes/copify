@@ -19,6 +19,7 @@
     "test": "vitest run",
     "test:stealth": "set COPIFY_STEALTH_SMOKE=1&& vitest run packages/runner/src/stealth.integration.test.ts",
     "test:stealth:live": "set COPIFY_STEALTH_LIVE=1&& vitest run packages/runner/src/stealth.live.test.ts",
+    "test:input": "set COPIFY_INPUT_SMOKE=1&& vitest run packages/runner/src/human-input.integration.test.ts",
     "test:watch": "vitest"
   },
   "build": {

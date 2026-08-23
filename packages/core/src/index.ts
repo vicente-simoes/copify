@@ -51,6 +51,8 @@ export class SessionOrchestrator extends EventEmitter {
   resumeAssist(profileId: string, runId: string, runSessionId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "RESUME_ASSIST", version: IPC_VERSION, runId, runSessionId }); }
   pauseAutomation(profileId: string, until: number): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "PAUSE_AUTOMATION", version: IPC_VERSION, until }); }
   resumeAutomation(profileId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "RESUME_AUTOMATION", version: IPC_VERSION }); }
+  grantClipboardLease(profileId: string, requestId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "CLIPBOARD_LEASE_GRANTED", version: IPC_VERSION, requestId }); }
+  denyClipboardLease(profileId: string, requestId: string, reason: "CLIPBOARD_NOT_EMPTY" | "CLIPBOARD_UNAVAILABLE" | "QUEUE_TIMEOUT" | "SESSION_ENDED"): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "CLIPBOARD_LEASE_DENIED", version: IPC_VERSION, requestId, reason }); }
   checkCart(profileId: string): void { this.pendingCartActions.set(profileId, "CHECK_CART"); this.dispatchCartAction(profileId); }
   emptyCart(profileId: string): void { this.pendingCartActions.set(profileId, "EMPTY_CART"); this.dispatchCartAction(profileId); }
 
@@ -60,7 +62,7 @@ export class SessionOrchestrator extends EventEmitter {
     if (event.type === "READY") { this.setState(profileId, "READY", null, event.route, event.driver); this.dispatchCartAction(profileId); }
     if (event.type === "STOPPED") this.setState(profileId, "STOPPED");
     if (event.type === "ERROR") this.setState(profileId, "ERROR", { code: event.code, message: event.message });
-    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "CART_STATUS" || event.type === "HEALTH") this.emit("runner-event", event);
+    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE") this.emit("runner-event", event);
   }
 
   private onRunnerExit(profileId: string, active: ActiveRunner): void {

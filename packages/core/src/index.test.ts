@@ -54,6 +54,20 @@ describe("SessionOrchestrator", () => {
     expect(runners[0].commands.slice(-2)).toEqual([{ type: "PAUSE_AUTOMATION", version: IPC_VERSION, until: 123_456 }, { type: "RESUME_AUTOMATION", version: IPC_VERSION }]);
   });
 
+  it("forwards clipboard lease events and sends responses only to their runner", async () => {
+    const runners: FakeRunner[] = []; const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
+    const selected = profile(); await orchestrator.open(selected); const requestId = randomUUID(); const received: unknown[] = [];
+    orchestrator.on("runner-event", (event) => received.push(event));
+    runners[0].emit("message", { type: "CLIPBOARD_LEASE_REQUEST", version: IPC_VERSION, profileId: selected.id, requestId, value: "shipping" });
+    expect(received).toHaveLength(1);
+    orchestrator.grantClipboardLease(selected.id, requestId);
+    orchestrator.denyClipboardLease(selected.id, requestId, "CLIPBOARD_NOT_EMPTY");
+    expect(runners[0].commands.slice(-2)).toEqual([
+      { type: "CLIPBOARD_LEASE_GRANTED", version: IPC_VERSION, requestId },
+      { type: "CLIPBOARD_LEASE_DENIED", version: IPC_VERSION, requestId, reason: "CLIPBOARD_NOT_EMPTY" },
+    ]);
+  });
+
   it("does not launch disabled or already starting profiles twice", async () => {
     const runners: FakeRunner[] = [];
     const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });

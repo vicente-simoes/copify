@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runExecutionStateSchema, runnerCommandSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -38,6 +38,13 @@ describe("shared contracts", () => {
   });
   it("rejects malformed runner messages", () => {
     expect(runnerCommandSchema.safeParse({ type: "START", version: 1 }).success).toBe(false);
+  });
+  it("validates clipboard leases without accepting oversized or mismatched IPC versions", () => {
+    const profileId = "00000000-0000-4000-8000-000000000001"; const requestId = "00000000-0000-4000-8000-000000000002";
+    expect(runnerEventSchema.safeParse({ type: "CLIPBOARD_LEASE_REQUEST", version: IPC_VERSION, profileId, requestId, value: "1 Main St" }).success).toBe(true);
+    expect(runnerEventSchema.safeParse({ type: "CLIPBOARD_LEASE_REQUEST", version: IPC_VERSION, profileId, requestId, value: "x".repeat(513) }).success).toBe(false);
+    expect(runnerCommandSchema.safeParse({ type: "CLIPBOARD_LEASE_GRANTED", version: IPC_VERSION - 1, requestId }).success).toBe(false);
+    expect(runnerCommandSchema.safeParse({ type: "CLIPBOARD_LEASE_DENIED", version: IPC_VERSION, requestId, reason: "CLIPBOARD_NOT_EMPTY" }).success).toBe(true);
   });
   it("validates optional proxy configuration and credential updates", () => {
     expect(createProxyProfileSchema.parse({ name: "PT ISP", host: "proxy.example", port: 8080 }).protocol).toBe("http");

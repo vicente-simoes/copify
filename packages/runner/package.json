@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "@copify/shared": "workspace:*",
+    "ghost-cursor": "1.4.2",
     "rebrowser-playwright": "1.52.0"
   }
 }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, clipboard, ipcMain, safeStorage } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -10,11 +10,13 @@ import {
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
 import { benchmarkRoute } from "@copify/runner";
+import { ClipboardCoordinator } from "./clipboard-coordinator";
 import { canStartTargetMonitor } from "./run-monitor";
 
 let mainWindow: BrowserWindow | undefined;
 let profiles: ProfileRepository;
 let orchestrator: SessionOrchestrator;
+let clipboardCoordinator: ClipboardCoordinator;
 let benchmarkRunning = false;
 let runsRoot = "";
 let watcherProfilesRoot = "";
@@ -151,6 +153,7 @@ async function assertRunSetupReferences(input: CreateRunSetupInput): Promise<voi
 
 async function endRun(): Promise<RunDetail> {
   const active = activeRun; if (!active) throw new Error("No run is currently recording."); active.ending = true;
+  clipboardCoordinator.cancelAll();
   if (active.monitor) await appendMonitorEvent(active.detail.run.id, "TARGET_MONITOR_STOPPED", null, "The shared target monitor was stopped when the run ended.");
   stopMonitor(active);
   const activeProfiles = [...active.profileSessions.entries()].filter(([profileId]) => orchestrator.isActive(profileId)); active.pendingEnd = new Set(activeProfiles.map(([, session]) => session.id));
@@ -298,6 +301,7 @@ async function appendMonitorEvent(runId: string, type: string, check: TargetChec
 }
 
 async function onSessionChanged(snapshot: SessionSnapshot): Promise<void> {
+  if (snapshot.state === "STOPPED" || snapshot.state === "ERROR" || snapshot.state === "CRASHED") clipboardCoordinator.cancelProfile(snapshot.profileId);
   mainWindow?.webContents.send(sessionIpc.changed, snapshot); const active = activeRun; const runSession = active?.profileSessions.get(snapshot.profileId); if (!active || !runSession) return;
   if (canStartTargetMonitor(Boolean(active.detail.run.targetSnapshot), Boolean(active.monitor), active.ending, snapshot.state)) active.monitor = startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!);
   if (snapshot.state === "READY") { runSession.status = "RECORDING"; runSession.route = snapshot.route; await profiles.setRunSession(runSession.id, "RECORDING", snapshot.route); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: runSession.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "SESSION_READY", stateBefore: "STARTING", stateAfter: "RECORDING", payload: { route: snapshot.route.kind, verification: snapshot.route.verification.status } }); await profiles.setRunStatus(active.detail.run.id, "RECORDING"); if (active.pendingAssist) await dispatchAssistedTarget(active, active.pendingAssist); emitRunsChanged(); }
@@ -321,6 +325,8 @@ async function recordSessionFailure(profileId: string, session: RunSession, erro
   emitRunsChanged();
 }
 async function onRunnerEvent(event: RunnerEvent): Promise<void> {
+  if (event.type === "CLIPBOARD_LEASE_REQUEST") { clipboardCoordinator.request(event); return; }
+  if (event.type === "CLIPBOARD_LEASE_RELEASE") { clipboardCoordinator.release(event.profileId, event.requestId); return; }
   if (event.type === "CART_STATUS") { const status: CartStatus = { profileId: event.profileId, ...event.status }; cartStatuses.set(event.profileId, status); mainWindow?.webContents.send(sessionIpc.cartChanged, status); if (closeAfterCartCheck.delete(event.profileId)) void orchestrator.close(event.profileId); return; }
   if (event.type === "HEALTH") {
     const active = activeRun; if (!active) return;
@@ -341,7 +347,16 @@ async function resumeRunSession(profileId: string): Promise<boolean> {
 
 app.whenReady().then(async () => {
   const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); watcherProfilesRoot = join(dataRoot, "watcher-profiles"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
+  clipboardCoordinator = new ClipboardCoordinator({
+    availableFormats: () => clipboard.availableFormats(),
+    writeLease: (value, requestId) => clipboard.write({ text: value, html: `<span data-copify-clipboard-lease="${requestId}"></span>` }),
+    ownsLease: (value, requestId) => clipboard.readText() === value && clipboard.readHTML().includes(`data-copify-clipboard-lease="${requestId}"`),
+    clear: () => clipboard.clear(),
+  }, {
+    grant: (profileId, requestId) => orchestrator.grantClipboardLease(profileId, requestId),
+    deny: (profileId, requestId, reason) => orchestrator.denyClipboardLease(profileId, requestId, reason),
+  });
   orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
-app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });
+app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); clipboardCoordinator?.cancelAll(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });

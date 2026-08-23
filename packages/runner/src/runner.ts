@@ -5,6 +5,7 @@ import type { BrowserContext, Locator, Page } from "rebrowser-playwright";
 import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type ProductVariant, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
 import { verifyRoute } from "./network";
 import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
+import { HumanInput, type ClipboardPasteClient, type HumanInputTelemetry } from "./human-input";
 
 let context: BrowserContext | undefined;
 let profileId: string | undefined;
@@ -22,6 +23,9 @@ let tracingStoppedForPrivacy = false;
 let driverSession: DriverSession | undefined;
 let driverMetadata: BrowserDriverMetadata | undefined;
 let automationPausedUntil: number | null = null;
+let humanInputs = new WeakMap<Page, HumanInput>();
+const pendingClipboardLeases = new Map<string, (granted: boolean) => void>();
+let heldClipboardLeaseId: string | undefined;
 let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
 
 process.on("message", async (message: unknown) => {
@@ -34,11 +38,13 @@ process.on("message", async (message: unknown) => {
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
   if (command.data.type === "PAUSE_AUTOMATION") pauseAutomation(command.data.until);
   if (command.data.type === "RESUME_AUTOMATION") automationPausedUntil = null;
+  if (command.data.type === "CLIPBOARD_LEASE_GRANTED") resolveClipboardLease(command.data.requestId, true);
+  if (command.data.type === "CLIPBOARD_LEASE_DENIED") resolveClipboardLease(command.data.requestId, false);
   if (command.data.type === "STOP") await stop();
 });
 
 async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null): Promise<void> {
-  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = [];
+  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = [];
   try {
     await disableChromeTranslation(userDataDir);
     const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
@@ -295,7 +301,7 @@ async function selectVariant(page: Page, variant: ProductVariant): Promise<void>
         if (!await selector.count()) continue;
         const option = await selector.locator("option").evaluateAll((options, wanted) => options.map((item) => ({ value: (item as HTMLOptionElement).value, text: item.textContent?.trim() ?? "", disabled: (item as HTMLOptionElement).disabled })).find((item) => !item.disabled && (item.value.trim().toLocaleLowerCase() === wanted.toLocaleLowerCase() || item.text.trim().toLocaleLowerCase() === wanted.toLocaleLowerCase())), value).catch(() => undefined);
         if (!option) continue;
-        try { await selector.selectOption({ value: option.value }); return true; } catch { /* Supreme can replace its option element after a color selection; retry the current page. */ }
+        try { await humanInputFor(page).selectOption(selector, [option.value]); return true; } catch { /* Supreme can replace its option element after a color selection; retry the current page. */ }
       }
       await page.waitForTimeout(100);
     }
@@ -309,7 +315,7 @@ async function selectVariant(page: Page, variant: ProductVariant): Promise<void>
         for (let index = 0; index < count; index += 1) {
           const button = buttons.nth(index); const title = await button.getAttribute("title");
           if (!title || !isColorThumbnailTitle(title, color) || await button.isDisabled()) continue;
-          await button.click({ timeout: 10_000 });
+          await humanInputFor(page).click(button);
           return true;
         }
         await page.waitForTimeout(100);
@@ -349,7 +355,7 @@ async function disableChromeTranslation(userDataDir: string): Promise<void> {
 
 async function addToCart(page: Page): Promise<boolean> {
   const button = page.getByRole("button", { name: /add to cart/i }).first(); if (!await button.count()) throw new AssistError("ATC_FAILED", "The add-to-cart control was not found.");
-  await button.click({ timeout: 15_000 });
+  await humanInputFor(page).click(button);
   const miniCartCheckout = page.locator('[data-testid="mini-cart-checkout-link"]').first();
   const inCart = page.getByText(/^in cart$/i).first();
   return Boolean(await firstVisible([miniCartCheckout, inCart], 8_000));
@@ -364,12 +370,12 @@ async function goToCheckout(page: Page): Promise<void> {
   if (!control) {
     const cart = page.getByRole("link", { name: /view\/edit cart|cart/i }).first();
     if (!await cart.count()) throw new AssistError("CHECKOUT_NAV_FAILED", "The checkout control was not found after the item was added to cart.");
-    await cart.click({ timeout: 15_000 });
+    await humanInputFor(page).click(cart);
     control = await firstVisible([miniCartCheckout, checkoutText, checkoutLink, checkoutButton], 8_000);
   }
   if (!control) throw new AssistError("CHECKOUT_NAV_FAILED", "The checkout control was not ready after the item was added to cart.");
   emitRun("CHECKOUT_CONTROL_READY", {});
-  await control.click({ timeout: 15_000 });
+  await humanInputFor(page).click(control);
   emitRun("CHECKOUT_CONTROL_CLICKED", {});
   try { await page.waitForURL((url) => /\/(?:checkouts?|queue)(?:\/|$)/i.test(url.pathname), { timeout: 30_000 }); }
   catch { throw new AssistError("CHECKOUT_NAV_FAILED", "The storefront did not navigate to checkout after the checkout control was selected."); }
@@ -411,7 +417,8 @@ async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void>
         if (!await field.count() || !await field.isVisible()) continue;
         const tag = await field.evaluate((element) => element.tagName.toLocaleLowerCase());
         if (tag !== "input" && tag !== "textarea") continue;
-        await field.fill(value);
+        if (/address/i.test(label) || /[^\x20-\x7e]/.test(value)) await humanInputFor(page).paste(field, value);
+        else await humanInputFor(page).type(field, value);
         return true;
       } catch { /* A country/region update can replace a field; try the next semantic match. */ }
     }
@@ -438,7 +445,7 @@ async function selectShippingCountry(page: Page, country: string): Promise<void>
     if (!await field.count()) continue;
     const option = await field.locator("option").evaluateAll((options, values) => options.map((item) => ({ value: (item as HTMLOptionElement).value, text: item.textContent?.trim() ?? "" })).find((item) => values.some((value) => item.value.trim().toUpperCase() === value.toUpperCase() || item.text.trim().toLocaleLowerCase() === value.toLocaleLowerCase())), names).catch(() => undefined);
     if (!option) continue;
-    try { await field.selectOption({ value: option.value }); return; } catch { /* Try the next semantic country selector. */ }
+    try { await humanInputFor(page).selectOption(field, [option.value]); return; } catch { /* Try the next semantic country selector. */ }
   }
   throw new AssistError("CHECKOUT_NAV_FAILED", `The shipping country ${country} was not available at checkout.`);
 }
@@ -456,7 +463,7 @@ async function selectShippingRegion(page: Page, region: string | undefined): Pro
       if (!await field.count()) continue;
       const option = await field.locator("option").evaluateAll((options, value) => options.map((item) => ({ value: (item as HTMLOptionElement).value, text: item.textContent?.trim() ?? "" })).find((item) => item.value.trim().toLocaleLowerCase() === value.toLocaleLowerCase() || item.text.trim().toLocaleLowerCase() === value.toLocaleLowerCase()), region).catch(() => undefined);
       if (!option) continue;
-      try { await field.selectOption({ value: option.value }); return; } catch { /* The checkout can replace this selector after a country change. */ }
+      try { await humanInputFor(page).selectOption(field, [option.value]); return; } catch { /* The checkout can replace this selector after a country change. */ }
     }
     await page.waitForTimeout(100);
   }
@@ -479,12 +486,59 @@ async function acceptTerms(page: Page): Promise<void> {
   }
   for (const box of candidates) {
     if (!await box.isVisible().catch(() => false)) continue;
-    if (!await box.isChecked()) await box.check({ timeout: 10_000 });
+    if (!await box.isChecked()) await humanInputFor(page).check(box);
     if (!await box.isChecked()) continue;
     emitRun("TERMS_ACCEPTED", {});
     return;
   }
   throw new AssistError("CHECKOUT_NAV_FAILED", "The required terms and conditions acknowledgement was not found.");
+}
+
+function humanInputFor(page: Page): HumanInput {
+  const existing = humanInputs.get(page); if (existing) return existing;
+  const input = new HumanInput(page, { clipboard: runnerClipboard, telemetry: emitHumanInputTelemetry }); humanInputs.set(page, input); return input;
+}
+
+const runnerClipboard: ClipboardPasteClient = {
+  acquire: async (value) => {
+    if (!profileId || heldClipboardLeaseId) return false;
+    const requestId = randomUUID();
+    const granted = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        if (!pendingClipboardLeases.delete(requestId)) return;
+        if (profileId) send({ type: "CLIPBOARD_LEASE_RELEASE", version: IPC_VERSION, profileId, requestId });
+        resolve(false);
+      }, 10_250); timer.unref();
+      pendingClipboardLeases.set(requestId, (value) => { clearTimeout(timer); resolve(value); });
+      send({ type: "CLIPBOARD_LEASE_REQUEST", version: IPC_VERSION, profileId: profileId!, requestId, value });
+    });
+    if (granted) heldClipboardLeaseId = requestId;
+    return granted;
+  },
+  release: async () => {
+    const requestId = heldClipboardLeaseId; heldClipboardLeaseId = undefined;
+    if (requestId && profileId) send({ type: "CLIPBOARD_LEASE_RELEASE", version: IPC_VERSION, profileId, requestId });
+  },
+};
+
+function resolveClipboardLease(requestId: string, granted: boolean): void {
+  const resolve = pendingClipboardLeases.get(requestId);
+  if (!resolve) {
+    if (granted && profileId) send({ type: "CLIPBOARD_LEASE_RELEASE", version: IPC_VERSION, profileId, requestId });
+    return;
+  }
+  pendingClipboardLeases.delete(requestId); resolve(granted);
+}
+
+function emitHumanInputTelemetry(event: HumanInputTelemetry): void {
+  emitRun(event.fallback ? "HUMAN_INPUT_FALLBACK" : "HUMAN_INPUT_ACTION", {
+    action: event.action,
+    method: event.method,
+    durationMs: Math.round(event.durationMs),
+    ...(event.movementMs === undefined ? {} : { movementMs: Math.round(event.movementMs) }),
+    ...(event.dwellMs === undefined ? {} : { dwellMs: event.dwellMs }),
+    ...(event.pointCount === undefined ? {} : { pointCount: event.pointCount }),
+  });
 }
 
 export function splitShippingName(value: string): { firstName: string; lastName: string } { const parts = value.trim().split(/\s+/).filter(Boolean); return { firstName: parts[0] ?? value.trim(), lastName: parts.slice(1).join(" ") || parts[0] || value.trim() }; }
@@ -529,7 +583,11 @@ async function emitHealth(): Promise<void> {
 
 async function stop(): Promise<void> {
   stopping = true; const id = profileId;
-  try { if (recording) await endRun(recording.runSessionId); await driverSession?.stop(); } finally { context = undefined; driverSession = undefined; driverMetadata = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
+  try {
+    await runnerClipboard.release();
+    for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear();
+    if (recording) await endRun(recording.runSessionId); await driverSession?.stop();
+  } finally { context = undefined; driverSession = undefined; driverMetadata = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
 }
 
 function sanitizeRequest(url: string, method: string, resourceType: string, error?: string): Record<string, unknown> {

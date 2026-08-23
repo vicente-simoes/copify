@@ -3,7 +3,7 @@ import { STORE_GENERAL, storeCurrencySchema } from "./stores";
 
 export * from "./stores";
 
-export const IPC_VERSION = 10 as const;
+export const IPC_VERSION = 11 as const;
 export const SCHEMA_VERSION = 10 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
@@ -200,6 +200,9 @@ export type CreateRunSetupInput = z.input<typeof createRunSetupSchema>;
 export const runnerRecordingSchema = z.object({ runId: idSchema, runSessionId: idSchema, diagnosticLevel: diagnosticLevelSchema, assisted: z.boolean().default(false), artifactDir: z.string().min(1), startedAt: timestampSchema });
 export type RunnerRecording = z.infer<typeof runnerRecordingSchema>;
 
+export const clipboardLeaseDenialReasonSchema = z.enum(["CLIPBOARD_NOT_EMPTY", "CLIPBOARD_UNAVAILABLE", "QUEUE_TIMEOUT", "SESSION_ENDED"]);
+export type ClipboardLeaseDenialReason = z.infer<typeof clipboardLeaseDenialReasonSchema>;
+
 export const runnerCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("START"), version: z.literal(IPC_VERSION), profileId: idSchema, userDataDir: z.string().min(1), driver: runnerBrowserDriverSchema, proxy: runnerProxySchema.nullable(), probeUrl: z.string().url(), recording: runnerRecordingSchema.nullable() }),
   z.object({ type: z.literal("END_RUN"), version: z.literal(IPC_VERSION), runSessionId: idSchema }),
@@ -209,6 +212,8 @@ export const runnerCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("EMPTY_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("PAUSE_AUTOMATION"), version: z.literal(IPC_VERSION), until: timestampSchema }),
   z.object({ type: z.literal("RESUME_AUTOMATION"), version: z.literal(IPC_VERSION) }),
+  z.object({ type: z.literal("CLIPBOARD_LEASE_GRANTED"), version: z.literal(IPC_VERSION), requestId: idSchema }),
+  z.object({ type: z.literal("CLIPBOARD_LEASE_DENIED"), version: z.literal(IPC_VERSION), requestId: idSchema, reason: clipboardLeaseDenialReasonSchema }),
   z.object({ type: z.literal("STOP"), version: z.literal(IPC_VERSION) })
 ]);
 export type RunnerCommand = z.infer<typeof runnerCommandSchema>;
@@ -220,6 +225,8 @@ export const runnerEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("RUN_EVENT"), version: z.literal(IPC_VERSION), profileId: idSchema, event: runEventSchema }),
   z.object({ type: z.literal("RUN_ARTIFACT"), version: z.literal(IPC_VERSION), profileId: idSchema, artifact: runArtifactSchema }),
   z.object({ type: z.literal("RUN_ENDED"), version: z.literal(IPC_VERSION), profileId: idSchema, runSessionId: idSchema }),
+  z.object({ type: z.literal("CLIPBOARD_LEASE_REQUEST"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema, value: z.string().min(1).max(512) }),
+  z.object({ type: z.literal("CLIPBOARD_LEASE_RELEASE"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema }),
   z.object({ type: z.literal("HEALTH"), version: z.literal(IPC_VERSION), profileId: idSchema, health: browserHealthSnapshotSchema.omit({ id: true, subjectKind: true, subjectId: true, runId: true }) })
 ]);
 export type RunnerEvent = z.infer<typeof runnerEventSchema>;

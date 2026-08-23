@@ -10,11 +10,18 @@ const FREEFORM: StoreManifest["variants"]["sizes"] = { kind: "freeform" };
 function DetectionSummary({ check }: { check: NonNullable<Target["latestCheck"]> }) {
   const candidate = check.decision.candidate;
   const when = new Date(check.checkedAt).toLocaleString();
+  // `errorMessage` is produced by the monitor after removing secrets.  The
+  // decision message stays intentionally broad for programmatic callers, but
+  // hiding the stored detail in the UI made a storefront challenge impossible
+  // to distinguish from a product-matching failure.
+  const message = check.status === "ERROR" && check.errorMessage
+    ? check.errorMessage
+    : check.decision.message;
 
   if (!candidate) {
     return (
       <p className={check.status === "ERROR" ? "error-detail" : "muted"}>
-        {when} · {check.decision.message === "NO_ADAPTER" ? "No adapter for this store yet." : check.decision.message}
+        {when} · {message === "NO_ADAPTER" ? "No adapter for this store yet." : message}
       </p>
     );
   }
@@ -31,7 +38,7 @@ function DetectionSummary({ check }: { check: NonNullable<Target["latestCheck"]>
           <h4>{candidate.name}</h4>
           <span className={`state ${check.status === "ERROR" ? "error" : "ready"}`}>{check.decision.kind}</span>
         </div>
-        <p className={check.status === "ERROR" ? "error-detail" : "muted"}>{when} · {check.decision.message}</p>
+        <p className={check.status === "ERROR" ? "error-detail" : "muted"}>{when} · {message}</p>
         <div className="detected-product-meta">
           <span>
             {candidate.priceMinor !== null && candidate.currency
