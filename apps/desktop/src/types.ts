@@ -3,7 +3,6 @@ import { STORE_GENERAL, type ProxyProfile, type Target } from "@copify/shared";
 export type Notice = { kind: "error" | "info"; message: string } | null;
 export type ProxyDraft = {
   name: string;
-  provider: ProxyProfile["provider"];
   type: ProxyProfile["type"];
   protocol: ProxyProfile["protocol"];
   host: string;
@@ -11,7 +10,6 @@ export type ProxyDraft = {
   username: string;
   password: string;
   expectedCountry?: string;
-  expectedCity?: string;
   enabled: boolean;
 };
 export type TargetDraft = {
@@ -40,7 +38,6 @@ export type ShippingDraft = {
 };
 export const blankProxy = (): ProxyDraft => ({
   name: "",
-  provider: "custom",
   type: "residential-sticky",
   protocol: "http",
   host: "",

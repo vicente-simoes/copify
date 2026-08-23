@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { BrowserProfile, ProxyBenchmark, ProxyProfile, SessionSnapshot, Store } from "@copify/shared";
 import type { ProxyDraft } from "../types";
-import { Field, Benchmark, BenchmarkHistory } from "../ui/primitives";
+import { Field, Benchmark } from "../ui/primitives";
 import { Proxies } from "./Proxies";
 import { LaunchModes } from "./LaunchModes";
 
@@ -20,6 +20,8 @@ export function Settings(props: {
   latest: (id: string) => ProxyBenchmark | undefined;
   draft: ProxyDraft;
   editingProxyId: string | null;
+  proxyDrawerOpen: boolean;
+  onNewProxy: () => void;
   busy: boolean;
   testing: string | null;
   probeUrl: string;
@@ -73,7 +75,6 @@ export function Settings(props: {
               </button>
             </div>
             <Benchmark benchmark={props.latest("direct")} />
-            <BenchmarkHistory benchmarks={props.benchmarks.direct ?? []} />
             <form className="inline-form" onSubmit={props.onSaveProbe}>
               <Field label="Probe endpoint">
                 <input value={props.probeUrl} onChange={(event) => props.setProbeUrl(event.target.value)} />
@@ -84,12 +85,13 @@ export function Settings(props: {
 
           <Proxies
             proxies={props.proxies}
-            benchmarks={props.benchmarks}
             latest={props.latest}
             draft={props.draft}
             editingId={props.editingProxyId}
+            drawerOpen={props.proxyDrawerOpen}
             busy={props.busy}
             testing={props.testing}
+            onNew={props.onNewProxy}
             onTest={props.onTestRoute}
             onEdit={props.onEditProxy}
             onClear={props.onClearCredential}

@@ -14,6 +14,7 @@ import type {
 } from "@copify/shared";
 import { Sidebar, type Workspace } from "./ui/Sidebar";
 import { TitleBar } from "./ui/TitleBar";
+import { Toast, type Notice } from "./ui/Toast";
 import "./styles/index.css";
 
 import { blankProxy, blankShipping, blankTarget, fromMinor, list, toMinor, type ProxyDraft, type ShippingDraft, type TargetDraft } from "./types";
@@ -24,7 +25,6 @@ import { Browsers } from "./pages/Browsers";
 import { Shipping } from "./pages/Shipping";
 import { Settings } from "./pages/Settings";
 
-type Notice = { kind: "error" | "info"; message: string } | null;
 
 function App() {
   const [workspace, setWorkspace] = useState<Workspace>("run");
@@ -43,6 +43,7 @@ function App() {
   const [profileName, setProfileName] = useState("");
   const [proxyDraft, setProxyDraft] = useState<ProxyDraft>(blankProxy());
   const [editingProxyId, setEditingProxyId] = useState<string | null>(null);
+  const [proxyDrawerOpen, setProxyDrawerOpen] = useState(false);
   const [probeUrl, setProbeUrl] = useState("");
   const [notice, setNotice] = useState<Notice>(null);
   const [busy, setBusy] = useState(false);
@@ -50,9 +51,7 @@ function App() {
   const [runs, setRuns] = useState<RunDetail["run"][]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
-  const [runName, setRunName] = useState(
-    () => `Run ${new Date().toLocaleString()}`,
-  );
+  const [runName, setRunName] = useState("");
   const [runLevel, setRunLevel] = useState<DiagnosticLevel>("NORMAL");
   const [runMode, setRunMode] = useState<"OBSERVATION" | "ASSISTED_CHECKOUT">(
     "OBSERVATION",
@@ -203,7 +202,6 @@ function App() {
     const input = {
       ...proxyDraft,
       expectedCountry: proxyDraft.expectedCountry?.trim() || null,
-      expectedCity: proxyDraft.expectedCity?.trim() || null,
       username: proxyDraft.username || undefined,
       password: proxyDraft.password || undefined,
     };
@@ -212,17 +210,17 @@ function App() {
         editingProxyId
           ? window.copify.proxies.update(editingProxyId, input)
           : window.copify.proxies.create(input),
-      editingProxyId ? "Proxy profile updated." : "Proxy profile created.",
     );
-    if (!editingProxyId) setProxyDraft(blankProxy());
+    setProxyDraft(blankProxy());
     setEditingProxyId(null);
+    setProxyDrawerOpen(false);
   };
   const editProxy = (proxy: ProxyProfile) => {
     setWorkspace("settings");
     setEditingProxyId(proxy.id);
+    setProxyDrawerOpen(true);
     setProxyDraft({
       name: proxy.name,
-      provider: proxy.provider,
       type: proxy.type,
       protocol: proxy.protocol,
       host: proxy.host,
@@ -230,7 +228,6 @@ function App() {
       username: "",
       password: "",
       expectedCountry: proxy.expectedCountry ?? undefined,
-      expectedCity: proxy.expectedCity ?? undefined,
       enabled: proxy.enabled,
     });
   };
@@ -276,10 +273,10 @@ function App() {
       });
       if (response.ok) {
         setSelectedRun(response.value);
-        setRunName(`Run ${new Date().toLocaleString()}`);
+        setRunName("");
       }
       return response;
-    }, "Run recording started.");
+    });
   };
   const saveShipping = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -299,9 +296,6 @@ function App() {
         editingShippingId
           ? window.copify.shipping.update(editingShippingId, input)
           : window.copify.shipping.create(input),
-      editingShippingId
-        ? "Shipping profile updated."
-        : "Shipping profile encrypted and saved.",
     );
     setShippingDraft(blankShipping());
     setEditingShippingId(null);
@@ -334,7 +328,6 @@ function App() {
         editingTargetId
           ? window.copify.targets.update(editingTargetId, input)
           : window.copify.targets.create(input),
-      editingTargetId ? "Target updated." : "Target created.",
     );
     setTargetDraft(blankTarget());
     setEditingTargetId(null);
@@ -390,7 +383,6 @@ function App() {
       <Sidebar workspace={workspace} collapsed={sidebarCollapsed} onNavigate={setWorkspace} />
       <main className="workspace">
         <div className="workspace-inner page-stack">
-        {notice && <p className={`notice ${notice.kind}`}>{notice.message}</p>}
         {workspace === "run" && (
           selectedRun && !activeRunId ? (
             <RunInspector
@@ -401,7 +393,7 @@ function App() {
                     const response = await window.copify.runs.remove(selectedRun.run.id);
                     if (response.ok) setSelectedRun(null);
                     return response;
-                  }, "Run deleted.");
+                  });
               }}
             />
           ) : (
@@ -440,10 +432,10 @@ function App() {
                   const response = await window.copify.runs.end();
                   if (response.ok) setSelectedRun(response.value);
                   return response;
-                }, "Run ended. Browsers stay open.")
+                })
               }
               onResume={(profileId) =>
-                void execute(() => window.copify.runs.resume(profileId), "Checkpoint resumed.")
+                void execute(() => window.copify.runs.resume(profileId))
               }
               onShow={(id) => void showRun(id)}
             />
@@ -465,7 +457,7 @@ function App() {
                 const response = await window.copify.profiles.create({ name: profileName });
                 if (response.ok) setProfileName("");
                 return response;
-              }, "Browser added.")
+              })
             }
             onProfile={(id, action) => void execute(() => action(id))}
             onUpdate={(id, input, success) =>
@@ -491,6 +483,12 @@ function App() {
             latest={latest}
             draft={proxyDraft}
             editingProxyId={editingProxyId}
+            proxyDrawerOpen={proxyDrawerOpen}
+            onNewProxy={() => {
+              setEditingProxyId(null);
+              setProxyDraft(blankProxy());
+              setProxyDrawerOpen(true);
+            }}
             busy={busy}
             testing={testing}
             probeUrl={probeUrl}
@@ -518,12 +516,12 @@ function App() {
             }}
             setDraft={setProxyDraft}
             onSaveProxy={(event) => void saveProxy(event)}
-            onCancelProxy={() => { setEditingProxyId(null); setProxyDraft(blankProxy()); }}
+            onCancelProxy={() => { setEditingProxyId(null); setProxyDraft(blankProxy()); setProxyDrawerOpen(false); }}
             onToggleStore={(id, enabled) =>
               void execute(() => window.copify.stores.update(id, enabled))
             }
             onLaunchMode={(id, launchMode) =>
-              void execute(() => window.copify.profiles.update(id, { launchMode }), "Launch method updated.")
+              void execute(() => window.copify.profiles.update(id, { launchMode }))
             }
           />
         )}
@@ -627,7 +625,6 @@ function App() {
                   window.copify.profiles.update(profileId, {
                     shippingProfileId: shippingProfileId || null,
                   }),
-                "Shipping assignment updated.",
               )
             }
           />
@@ -635,6 +632,7 @@ function App() {
         </div>
       </main>
       </div>
+      <Toast notice={notice} onDismiss={() => setNotice(null)} />
     </div>
   );
 }

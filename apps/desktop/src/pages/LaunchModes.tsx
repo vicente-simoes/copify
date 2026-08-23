@@ -18,10 +18,7 @@ export function LaunchModes({
       <div className="section-title">
         <div>
           <h2>Native Chrome or Playwright</h2>
-          <p className="muted">
-            Native Chrome starts Google Chrome first and then attaches locally
-            through CDP. It keeps the existing isolated profile directory.
-          </p>
+          <p className="muted">Native Chrome cannot use proxies that need a password.</p>
         </div>
       </div>
       <div className="profiles">

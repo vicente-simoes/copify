@@ -72,17 +72,3 @@ export function Benchmark({ benchmark }: { benchmark?: ProxyBenchmark }) {
     </div>
   );
 }
-export function BenchmarkHistory({ benchmarks }: { benchmarks: ProxyBenchmark[] }) {
-  if (benchmarks.length < 2) return null;
-  return (
-    <div className="history">
-      <span>Recent tests</span>
-      {benchmarks.slice(1).map((benchmark) => (
-        <span key={benchmark.id}>
-          {new Date(benchmark.completedAt).toLocaleString()} ·{" "}
-          {benchmark.status} · {benchmark.qualityScore}/100
-        </span>
-      ))}
-    </div>
-  );
-}

@@ -482,3 +482,30 @@
 .event-log-panel[open] > summary::before { content: "v "; }
 .event-log-panel .event-log { margin-top: 12px; }
 .event-log p { white-space: pre; }
+
+/* ---- toasts ---- */
+
+.toast-layer { position: fixed; left: 16px; bottom: 16px; z-index: 60; }
+
+.toast {
+  display: flex; align-items: center; gap: 12px;
+  max-width: 460px; padding: 10px 10px 10px 14px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  background: var(--surface-raised); color: var(--fg);
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.5);
+}
+.toast.error { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); color: var(--danger); }
+
+/* ---- proxy rows ---- */
+
+.proxy-rows .row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 190px) minmax(64px, 80px) minmax(64px, 80px) minmax(48px, 60px) auto;
+  align-items: center; gap: 14px;
+}
+.proxy-row .row-name { display: flex; align-items: center; gap: 8px; }
+.score.pass { color: var(--accent); }
+.score.warn { color: var(--warn); }
+.score.fail { color: var(--danger); }
+
+.field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
