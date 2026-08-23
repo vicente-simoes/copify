@@ -12,7 +12,7 @@ import type {
   Store,
   Target,
 } from "@copify/shared";
-import { Sidebar, allNavigation, type Workspace } from "./ui/Sidebar";
+import { Sidebar, type Workspace } from "./ui/Sidebar";
 import { TitleBar } from "./ui/TitleBar";
 import "./styles/index.css";
 
@@ -28,6 +28,9 @@ type Notice = { kind: "error" | "info"; message: string } | null;
 
 function App() {
   const [workspace, setWorkspace] = useState<Workspace>("run");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => window.localStorage.getItem("copify.sidebarCollapsed") === "1",
+  );
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [stores, setStores] = useState<Store[]>([]);
   const [appVersion, setAppVersion] = useState("");
@@ -128,6 +131,9 @@ function App() {
       if (result.ok) next[key] = result.value;
     setBenchmarks(next);
   };
+  useEffect(() => {
+    window.localStorage.setItem("copify.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
   useEffect(() => {
     void reload();
     void window.copify.settings.appInfo().then((result) => { if (result.ok) setAppVersion(result.value.version); });
@@ -373,12 +379,13 @@ function App() {
       setWorkspace("run");
     } else setNotice({ kind: "error", message: response.error });
   };
-  const page = allNavigation.find((item) => item.id === workspace) ?? allNavigation[0];
   const recordingSince = activeRunId ? runs.find((run) => run.id === activeRunId)?.startedAt ?? null : null;
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <TitleBar
-        section={page.label}
+        onHome={() => setWorkspace("run")}
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
         recordingSince={recordingSince}
         readyCount={readyCount}
         actions={
@@ -399,7 +406,7 @@ function App() {
           </>
         }
       />
-      <Sidebar workspace={workspace} onNavigate={setWorkspace} />
+      <Sidebar workspace={workspace} collapsed={sidebarCollapsed} onNavigate={setWorkspace} />
       <main className="workspace">
         <div className="workspace-inner page-stack">
         {notice && <p className={`notice ${notice.kind}`}>{notice.message}</p>}

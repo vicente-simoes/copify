@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import appIcon from "../../resources/icons/copify-icon-128.png";
-import { BackIcon } from "./icons";
+import { BackIcon, PanelIcon } from "./icons";
 
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -19,16 +19,20 @@ function RecordingClock({ startedAt }: { startedAt: number }) {
 }
 
 export function TitleBar({
-  section,
   crumb,
   onBack,
+  onHome,
+  sidebarCollapsed,
+  onToggleSidebar,
   recordingSince,
   readyCount,
   actions,
 }: {
-  section: string;
   crumb?: string;
   onBack?: () => void;
+  onHome: () => void;
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
   recordingSince: number | null;
   readyCount: number;
   actions?: React.ReactNode;
@@ -36,14 +40,27 @@ export function TitleBar({
   return (
     <header className="titlebar">
       <div className="titlebar-inner">
-        {onBack ? (
-          <button className="titlebar-back" onClick={onBack} aria-label="Back">
+        <button
+          className="titlebar-icon-button"
+          onClick={onToggleSidebar}
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-pressed={!sidebarCollapsed}
+          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          <PanelIcon className="nav-icon" />
+        </button>
+
+        {onBack && (
+          <button className="titlebar-icon-button" onClick={onBack} aria-label="Back" title="Back">
             <BackIcon className="nav-icon" />
           </button>
-        ) : (
-          <img className="titlebar-mark" src={appIcon} alt="" />
         )}
-        <span className="titlebar-section">{section}</span>
+
+        <button className="titlebar-brand" onClick={onHome} aria-label="Copify home">
+          <img className="titlebar-mark" src={appIcon} alt="" />
+          <span className="titlebar-wordmark">Copify</span>
+        </button>
+
         {crumb && (
           <>
             <span className="titlebar-crumb">/</span>

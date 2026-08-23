@@ -19,9 +19,11 @@ export const allNavigation: NavEntry[] = [...navigation, ...footerNavigation];
 
 export function Sidebar({
   workspace,
+  collapsed,
   onNavigate,
 }: {
   workspace: Workspace;
+  collapsed: boolean;
   onNavigate: (page: Workspace) => void;
 }) {
   const item = ({ id, label, Icon }: NavEntry) => (
@@ -30,14 +32,16 @@ export function Sidebar({
       className={`nav-item ${workspace === id ? "active" : ""}`}
       aria-current={workspace === id ? "page" : undefined}
       onClick={() => onNavigate(id)}
+      // Collapsed to icons only, so the label has to survive as a tooltip.
+      title={collapsed ? label : undefined}
     >
       <Icon className="nav-icon" />
-      <span>{label}</span>
+      <span className="nav-label">{label}</span>
     </button>
   );
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <nav className="sidebar-nav" aria-label="Copify sections">
         {navigation.map(item)}
       </nav>

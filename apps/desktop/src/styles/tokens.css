@@ -1,21 +1,22 @@
 /* Copify design tokens.
    Chrome (titlebar + sidebar) and the content well are deliberately different
-   surfaces; everything else is a hairline on top of one of them. */
+   surfaces; everything else is a hairline on top of one of them. The steps
+   between them are wide enough to read as separate frames at a glance. */
 :root {
-  --bg: #0b0b0c;
-  --surface: #111113;
-  --surface-raised: #171719;
-  --surface-hover: #1c1c1f;
-  --border: #232326;
-  --border-strong: #2e2e33;
+  --bg: #0a0a0b;
+  --surface: #141417;
+  --surface-raised: #1c1c20;
+  --surface-hover: #24242a;
+  --border: #2e2e35;
+  --border-strong: #3d3d46;
 
   --fg: #e8e8ea;
-  --fg-muted: #93939c;
-  --fg-dim: #5e5e66;
+  --fg-muted: #9a9aa4;
+  --fg-dim: #66666f;
 
   /* One primary. Near-white, so colour is never spent on "this is a button". */
   --primary-bg: #f2f2f3;
-  --primary-fg: #0b0b0c;
+  --primary-fg: #0a0a0b;
   --primary-bg-hover: #ffffff;
 
   /* Semantic only. Never decoration. */
@@ -37,6 +38,7 @@
 
   --titlebar-height: 40px;
   --sidebar-width: 220px;
+  --sidebar-width-collapsed: 52px;
   --row-height: 44px;
 
   --speed: 120ms;

@@ -66,6 +66,13 @@ export const SettingsIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const PanelIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+    <path d="M6.2 2.5v11" />
+  </Icon>
+);
+
 export const BackIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M10 3.5 5.5 8l4.5 4.5" />
