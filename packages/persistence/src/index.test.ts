@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { defaultMonitorSettings } from "@copify/shared";
 import { openProfileRepository, profileDirectory, type ProfileRepository } from "./index";
 
 const roots: string[] = [];
@@ -124,12 +125,19 @@ describe("ProfileRepository", () => {
     expect(await repo.getBrowserHealth("CHECKOUT", profile.id)).toMatchObject({ latest: snapshot, recent: [snapshot] });
   });
 
-  it("persists monitor route selection and storefront cooldown without a schema migration", async () => {
+  it("persists monitor settings and migrates legacy route selection", async () => {
     const repo = repository(); const proxy = await repo.createProxy({ name: "Monitor", host: "127.0.0.1", port: 8080 });
-    expect(await repo.setMonitorNetworkSettings({ proxyProfileIds: [proxy.id] })).toEqual({ proxyProfileIds: [proxy.id] });
-    expect(await repo.getMonitorNetworkSettings()).toEqual({ proxyProfileIds: [proxy.id] });
-    const circuit = { storeId: "supreme-eu", consecutiveProtectionSignals: 2, reopenAt: Date.now() + 1_000 };
-    await repo.setMonitorCircuit(circuit); expect(await repo.getMonitorCircuit("supreme-eu")).toEqual(circuit);
+    const settings = defaultMonitorSettings([proxy.id]); expect(await repo.setMonitorSettings(settings)).toEqual(settings);
+    expect(await repo.getMonitorSettings()).toEqual(settings);
+  });
+
+  it("migrates v10 monitor routes and persists cumulative run usage", async () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-v10-monitor-")); roots.push(root); const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(join(root, "copify.sqlite")); const proxyId = randomUUID();
+    database.exec("CREATE TABLE proxy_profiles (id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL UNIQUE,provider TEXT NOT NULL,type TEXT NOT NULL,protocol TEXT NOT NULL,host TEXT NOT NULL,port INTEGER NOT NULL,username_secret_id TEXT,password_secret_id TEXT,expected_country TEXT,expected_city TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE app_settings (key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,updated_at INTEGER NOT NULL); PRAGMA user_version=10;");
+    database.prepare("INSERT INTO proxy_profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(proxyId, "Legacy monitor", "custom", "residential-sticky", "http", "127.0.0.1", 8080, null, null, null, null, 1, 1, 1); database.prepare("INSERT INTO app_settings VALUES ('monitor_network',?,1)").run(JSON.stringify({ proxyProfileIds: [proxyId] })); database.close();
+    const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo); expect((await repo.getMonitorSettings()).proxyProfileIds).toEqual([proxyId]);
+    const runId = randomUUID(); const usage = { id: randomUUID(), runId, usageKey: `monitor:${proxyId}`, source: "MONITOR" as const, runSessionId: null, storeId: "supreme-eu", proxyProfileId: proxyId, proxyName: "Legacy monitor", receivedBytes: 10, sentBytes: 2, requestCount: 1, completeness: "PARTIAL" as const, costPerGbMicrosUsd: 1_000_000, estimatedCostMicrosUsd: 0, updatedAt: Date.now() };
+    await repo.upsertRunNetworkUsage(usage); expect(await repo.listRunNetworkUsage(runId)).toMatchObject([usage]);
   });
 
   it("saves reusable run setups separately from run history", async () => {

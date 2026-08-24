@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  healthIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc,
-  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorNetworkSettings, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc,
+  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 
 const api = {
@@ -42,8 +42,8 @@ const api = {
   settings: {
     getNetworkProbe: (): Promise<ApiResult<NetworkProbeSettings>> => ipcRenderer.invoke(settingsIpc.getNetworkProbe),
     updateNetworkProbe: (input: NetworkProbeSettings): Promise<ApiResult<NetworkProbeSettings>> => ipcRenderer.invoke(settingsIpc.updateNetworkProbe, input),
-    getMonitorNetwork: (): Promise<ApiResult<MonitorNetworkSettings>> => ipcRenderer.invoke(settingsIpc.getMonitorNetwork),
-    updateMonitorNetwork: (input: MonitorNetworkSettings): Promise<ApiResult<MonitorNetworkSettings>> => ipcRenderer.invoke(settingsIpc.updateMonitorNetwork, input),
+    getMonitor: (): Promise<ApiResult<MonitorSettings>> => ipcRenderer.invoke(settingsIpc.getMonitor),
+    updateMonitor: (input: MonitorSettings): Promise<ApiResult<MonitorSettings>> => ipcRenderer.invoke(settingsIpc.updateMonitor, input),
     appInfo: (): Promise<ApiResult<AppInfo>> => ipcRenderer.invoke(settingsIpc.appInfo)
   },
   sessions: {
@@ -61,6 +61,15 @@ const api = {
   health: {
     get: (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string): Promise<ApiResult<BrowserHealthDetail>> => ipcRenderer.invoke(healthIpc.get, subjectKind, subjectId),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(healthIpc.changed, callback); return () => ipcRenderer.removeListener(healthIpc.changed, callback); },
+  },
+  monitor: {
+    status: (): Promise<ApiResult<MonitorRuntimeStatus>> => ipcRenderer.invoke(monitorIpc.status),
+    setTurbo: (enabled: boolean): Promise<ApiResult<MonitorRuntimeStatus>> => ipcRenderer.invoke(monitorIpc.setTurbo, enabled),
+    onChanged: (listener: (status: MonitorRuntimeStatus) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, status: MonitorRuntimeStatus) => listener(status); ipcRenderer.on(monitorIpc.changed, callback); return () => ipcRenderer.removeListener(monitorIpc.changed, callback); },
+  },
+  usage: {
+    run: (runId: string): Promise<ApiResult<RunNetworkUsage[]>> => ipcRenderer.invoke(usageIpc.run, runId),
+    totals: (): Promise<ApiResult<RunNetworkUsage[]>> => ipcRenderer.invoke(usageIpc.totals),
   },
   runSetups: {
     list: (): Promise<ApiResult<RunSetup[]>> => ipcRenderer.invoke(runSetupIpc.list),

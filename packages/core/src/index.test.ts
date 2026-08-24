@@ -68,6 +68,14 @@ describe("SessionOrchestrator", () => {
     ]);
   });
 
+  it("forwards cumulative browser network usage for persistence", async () => {
+    const runners: FakeRunner[] = []; const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
+    const selected = profile(); await orchestrator.open(selected); const runId = randomUUID(); const runSessionId = randomUUID(); const received: unknown[] = [];
+    orchestrator.on("runner-event", (event) => received.push(event));
+    runners[0].emit("message", { type: "NETWORK_USAGE", version: IPC_VERSION, profileId: selected.id, runId, runSessionId, usage: { receivedBytes: 12_345, sentBytes: 678, requestCount: 9, completeness: "PARTIAL" } });
+    expect(received).toEqual([{ type: "NETWORK_USAGE", version: IPC_VERSION, profileId: selected.id, runId, runSessionId, usage: { receivedBytes: 12_345, sentBytes: 678, requestCount: 9, completeness: "PARTIAL" } }]);
+  });
+
   it("does not launch disabled or already starting profiles twice", async () => {
     const runners: FakeRunner[] = [];
     const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });

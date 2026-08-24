@@ -98,6 +98,7 @@ export function Proxies({
                       {!proxy.enabled && <span className="badge">off</span>}
                       {credentials && <span className="badge">auth</span>}
                     </span>
+                    <span className="row-meta">{proxy.provider} · {proxy.type}{proxy.costPerGbMicrosUsd === null ? "" : ` · $${(proxy.costPerGbMicrosUsd / 1_000_000).toFixed(2)}/GB`}</span>
                     {benchmark?.errorMessage && <span className="error-detail">{benchmark.errorMessage}</span>}
                   </div>
                   <span className="row-cell mono">{proxy.host}:{proxy.port}</span>
@@ -149,6 +150,21 @@ export function Proxies({
           </div>
 
           <div className="field-pair">
+            <Field label="Provider">
+              <select value={draft.provider} onChange={(event) => { const provider = event.target.value as ProxyDraft["provider"]; setDraft({ ...draft, provider, costPerGbUsd: provider === "dataimpulse" && !draft.costPerGbUsd ? "1.00" : draft.costPerGbUsd }); }}>
+                <option value="custom">Custom</option>
+                <option value="dataimpulse">DataImpulse</option>
+                <option value="brightdata">Bright Data</option>
+                <option value="decodo">Decodo</option>
+                <option value="oxylabs">Oxylabs</option>
+              </select>
+            </Field>
+            <Field label="Cost / GB (USD)">
+              <input type="number" min="0" step="0.01" value={draft.costPerGbUsd} onChange={(event) => setDraft({ ...draft, costPerGbUsd: event.target.value })} placeholder="Optional" />
+            </Field>
+          </div>
+
+          <div className="field-pair">
             <Field label="Protocol">
               <select value={draft.protocol} onChange={(event) => setDraft({ ...draft, protocol: event.target.value as ProxyDraft["protocol"] })}>
                 <option value="http">HTTP</option>
@@ -159,6 +175,7 @@ export function Proxies({
             <Field label="Type">
               <select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value as ProxyDraft["type"] })}>
                 <option value="residential-sticky">Sticky residential</option>
+                <option value="residential-rotating">Rotating residential</option>
                 <option value="isp-static">Static ISP</option>
                 <option value="datacenter">Datacenter</option>
                 <option value="home">Home</option>

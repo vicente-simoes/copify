@@ -16,6 +16,10 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ["@copify/core", "@copify/persistence", "@copify/shared", "@copify/runner"] })],
     build: {
       rollupOptions: {
+        // Crawlee's CommonJS dependency graph contains circular namespace wrappers
+        // that cannot safely be flattened into the standalone monitor worker. Keep
+        // these runtime packages external and ship them as desktop dependencies.
+        external: [/^@crawlee\//, /^undici(?:\/|$)/],
         input: {
           index: path.resolve(__dirname, "src/main.ts"),
           runner: path.resolve(workspaceRoot, "packages/runner/src/runner.ts"),

@@ -14,9 +14,12 @@
     "@copify/persistence": "workspace:*",
     "@copify/runner": "workspace:*",
     "@copify/shared": "workspace:*",
+    "@crawlee/core": "3.18.1",
+    "@crawlee/http": "3.18.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "rebrowser-playwright": "1.52.0",
+    "undici": "7.29.0",
     "zod": "^3.24.3"
   }
 }

@@ -109,6 +109,16 @@ describe("preflight", () => {
     expect(check(noPriceLimit, "price")?.status).toBe("fail");
   });
 
+  it("blocks rotating checkout routes and warns when checkout browsers share a sticky route", () => {
+    const rotating = { id: id(3), name: "PT rotating", type: "residential-rotating", enabled: true } as unknown as ProxyProfile;
+    const blocked = preflight(base({ mode: "ASSISTED_CHECKOUT", profiles: [profile({ proxyProfileId: id(3), shippingProfileId: id(7) })], proxies: [rotating], shipping: [shippingProfile()] }));
+    expect(blocked.canStart).toBe(false); expect(check(blocked, "routes")?.detail).toContain("cannot preserve checkout affinity");
+
+    const sticky = { id: id(3), name: "PT sticky", type: "residential-sticky", enabled: true } as unknown as ProxyProfile;
+    const shared = preflight(base({ profiles: [profile({ proxyProfileId: id(3) }), profile({ id: id(2), name: "Second", proxyProfileId: id(3) })], selectedProfileIds: [id(1), id(2)], proxies: [sticky] }));
+    expect(shared.canStart).toBe(true); expect(check(shared, "routes")?.detail).toContain("Shared route affinity");
+  });
+
   it("blocks incomplete or proxy-conflicted external CDP profiles", () => {
     const missing = preflight(base({ profiles: [profile({ driver: { kind: "EXTERNAL_CDP", endpointConfigured: false } })] }));
     expect(check(missing, "drivers")?.status).toBe("fail");

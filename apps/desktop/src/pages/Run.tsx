@@ -1,4 +1,5 @@
-import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { useEffect, useState } from "react";
+import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type MonitorRuntimeStatus, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 import { preflight, type PreflightCheck } from "../preflight";
 import { Field, Route } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
@@ -27,6 +28,16 @@ function LiveBoard({
   onResume: (profileId: string) => void;
   onEnd: () => void;
 }) {
+  const [monitor, setMonitor] = useState<MonitorRuntimeStatus | null>(null);
+  const [usage, setUsage] = useState<RunNetworkUsage[]>([]);
+  const [, setClock] = useState(0);
+  useEffect(() => {
+    let mounted = true; const refreshUsage = () => { if (detail?.run.id) void window.copify.usage.run(detail.run.id).then((result) => { if (mounted && result.ok) setUsage(result.value); }); };
+    void window.copify.monitor.status().then((result) => { if (mounted && result.ok) setMonitor(result.value); }); refreshUsage();
+    const remove = window.copify.monitor.onChanged((status) => { if (mounted) setMonitor(status); refreshUsage(); }); const interval = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => { mounted = false; remove(); window.clearInterval(interval); };
+  }, [detail?.run.id]);
+  const monitorUsage = usage.filter((row) => row.source === "MONITOR"); const totalBytes = monitorUsage.reduce((sum, row) => sum + row.receivedBytes + row.sentBytes, 0); const requests = monitorUsage.reduce((sum, row) => sum + row.requestCount, 0); const costs = monitorUsage.filter((row) => row.estimatedCostMicrosUsd !== null); const cost = costs.length ? costs.reduce((sum, row) => sum + (row.estimatedCostMicrosUsd ?? 0), 0) : null; const remaining = monitor?.fastEndsAt ? Math.max(0, monitor.fastEndsAt - Date.now()) : 0; const countdown = `${String(Math.floor(remaining / 60_000)).padStart(2, "0")}:${String(Math.floor((remaining % 60_000) / 1_000)).padStart(2, "0")}`;
   const sessions = [...(detail?.sessions ?? [])].sort((left, right) => {
     const rank = (state: string) => state === "READY_TO_CONFIRM" ? 0 : state === "CHECKPOINT" ? 1 : state === "FAILED" ? 3 : 2;
     return rank(left.executionState) - rank(right.executionState) || left.startedAt - right.startedAt;
@@ -49,6 +60,8 @@ function LiveBoard({
         </div>
         <button className="danger" disabled={busy} onClick={onEnd}>End run</button>
       </div>
+
+      {monitor && monitor.state !== "STOPPED" ? <div className="rows"><div className="row"><span className={`state ${monitor.state === "TURBO" ? "recording" : monitor.state === "POOL_EXHAUSTED" ? "failed" : monitor.lastErrorCode ? "warn" : "ready"}`}>{monitor.state}</span><span className="row-main"><span className="row-name">HTTP monitor {monitor.state === "TURBO" ? `· ${countdown} remaining` : ""}</span><span className="row-meta">{monitor.activeIntervalMs ?? "—"} ms · {monitor.healthyRouteCount}/{monitor.configuredRouteCount} routes · {(totalBytes / 1_000_000).toFixed(2)} MB · {requests.toLocaleString()} requests · {cost === null ? "cost unavailable" : `$${(cost / 1_000_000).toFixed(4)}`}{monitor.lastErrorCode ? ` · latest: ${monitor.lastErrorCode.replaceAll("_", " ").toLowerCase()}` : " · latest: success"}</span></span><button disabled={busy || monitor.state === "SERVICE_COOLDOWN" || monitor.state === "POOL_EXHAUSTED"} onClick={() => void window.copify.monitor.setTurbo(monitor.state !== "TURBO")}>{monitor.state === "TURBO" ? "End Turbo" : "Activate Turbo"}</button></div></div> : null}
 
       <div className="rows live-board">
         {sessions.map((session, index) => {

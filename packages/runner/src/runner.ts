@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserContext, Locator, Page } from "rebrowser-playwright";
+import type { BrowserContext, CDPSession, Locator, Page } from "rebrowser-playwright";
 import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type ProductVariant, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
 import { verifyRoute } from "./network";
 import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
@@ -27,6 +27,7 @@ let humanInputs = new WeakMap<Page, HumanInput>();
 const pendingClipboardLeases = new Map<string, (granted: boolean) => void>();
 let heldClipboardLeaseId: string | undefined;
 let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
+let trafficReceivedBytes = 0; let trafficSentBytes = 0; let trafficCdpAttached = 0; let trafficFallbackSeen = false; let observedPages = new WeakSet<Page>(); let trafficSessions: CDPSession[] = [];
 
 process.on("message", async (message: unknown) => {
   const command = runnerCommandSchema.safeParse(message); if (!command.success) return;
@@ -44,7 +45,7 @@ process.on("message", async (message: unknown) => {
 });
 
 async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null): Promise<void> {
-  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = [];
+  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
   try {
     await disableChromeTranslation(userDataDir);
     const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
@@ -88,10 +89,11 @@ async function beginRecording(activeContext: BrowserContext, value: RunnerRecord
   await mkdir(value.artifactDir, { recursive: true });
   emitRun("RECORDING_STARTED", { diagnosticLevel: value.diagnosticLevel });
   activeContext.on("page", (page) => observePage(page));
-  activeContext.on("request", () => { requestCount += 1; });
+  activeContext.on("request", (request) => { requestCount += 1; const body = request.postDataBuffer(); if (body) trafficSentBytes += body.length; });
   activeContext.on("requestfailed", (request) => emitRun("NETWORK_FAILED", sanitizeRequest(request.url(), request.method(), request.resourceType(), request.failure()?.errorText ?? "NETWORK_FAILED")));
   activeContext.on("response", (response) => {
     const status = response.status(); if (status === 403) forbiddenCount += 1; if (status === 429) rateLimitedCount += 1; if (status >= 400) emitRun("HTTP_STATUS", { ...sanitizeRequest(response.url(), response.request().method(), response.request().resourceType()), status });
+    if (trafficCdpAttached === 0) { const length = Number(response.headers()["content-length"]); if (Number.isFinite(length) && length >= 0) { trafficReceivedBytes += length; trafficFallbackSeen = true; } }
   });
   for (const page of activeContext.pages()) observePage(page);
   if (value.diagnosticLevel !== "NORMAL") {
@@ -105,6 +107,7 @@ async function beginRecording(activeContext: BrowserContext, value: RunnerRecord
 }
 
 function observePage(page: Page): void {
+  if (observedPages.has(page)) return; observedPages.add(page); void attachTrafficSession(page);
   page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) { navigationCount += 1; emitRun("NAVIGATION", sanitizeRequest(frame.url(), "GET", "document")); void page.evaluate(() => performance.getEntriesByType("navigation").at(-1)?.duration ?? null).then((value) => { if (typeof value === "number" && value >= 0) pageLoads.push(value); }).catch(() => undefined); } });
   page.on("pageerror", (error) => { emitRun("PAGE_ERROR", { message: sanitizeText(error.message) }); void screenshot(`error-${Date.now()}.png`, false); });
   page.on("console", (message) => { if (recording?.diagnosticLevel !== "NORMAL") emitRun("CONSOLE", { level: message.type(), text: sanitizeText(message.text()) }); });
@@ -117,7 +120,7 @@ async function endRun(runSessionId: string): Promise<void> {
     if (recording.diagnosticLevel !== "NORMAL" && context && !tracingStoppedForPrivacy) {
       await context.tracing.stop({ path: join(recording.artifactDir, "trace.zip") }); emitArtifact("TRACE", "trace.zip", true);
     }
-    emitRun("RECORDING_ENDED", {}); await emitHealth();
+    emitRun("RECORDING_ENDED", {}); await emitHealth(); emitNetworkUsage();
   } catch (error) {
     emitRun("RECORDING_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
   } finally {
@@ -160,18 +163,18 @@ async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
   cartResumeMode = undefined;
   const directCartStartedAt = Date.now();
   transition("VARIANT_SELECTED", "VARIANT_SELECTED", { color: command.variant.color, size: command.variant.size }); transition("CARTING", "DIRECT_CART_STARTED", { method: "cart/add.js" }); atcAttempts += 1;
-  const direct = await directCart(assistPage, command);
-  if (direct === "PROTECTION") { transition("CHECKPOINT", "CHECKPOINT_DETECTED", { reason: "STOREFRONT_PROTECTION", message: "The storefront rejected the cart request. Copify did not try another route or fallback." }); return; }
-  if (direct === "UNAVAILABLE") throw new AssistError("VARIANT_NOT_AVAILABLE", "The selected variant is no longer available.");
-  let verified = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id);
-  if (verified.state === "EMPTY" && direct === "UNSUPPORTED") {
+  const direct = await directCart(assistPage, command); emitRun("DIRECT_CART_RESPONSE", { outcome: direct.outcome, responseVariantConfirmed: direct.responseVariantConfirmed });
+  if (direct.outcome === "PROTECTION") { transition("CHECKPOINT", "CHECKPOINT_DETECTED", { reason: "STOREFRONT_PROTECTION", message: "The storefront rejected the cart request. Copify did not try another route or fallback." }); return; }
+  if (direct.outcome === "UNAVAILABLE") throw new AssistError("VARIANT_NOT_AVAILABLE", "The selected variant is no longer available.");
+  let verified = await waitForExactVisibleCart(assistPage, command.candidate.name, command.variant.id);
+  if (verified.state === "EMPTY" && direct.outcome === "UNSUPPORTED") {
     emitRun("DIRECT_CART_FALLBACK", { method: "cart-permalink" }); await assistPage.goto(new URL(`/cart/${command.variant.id}:1`, command.candidate.url).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 }); verified = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id);
   }
-  if (verified.state === "EMPTY" && direct === "UNSUPPORTED") { emitRun("DIRECT_CART_FALLBACK", { method: "product-ui" }); await assistPage.goto(command.candidate.url, { waitUntil: "domcontentloaded", timeout: 30_000 }); if (await checkpoint(assistPage)) return; await selectVariant(assistPage, command.variant); if (!await addToCart(assistPage)) throw new AssistError("ATC_FAILED", "The storefront did not confirm that the item was added to cart."); verified = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id); }
+  if (verified.state === "EMPTY" && direct.outcome === "UNSUPPORTED") { emitRun("DIRECT_CART_FALLBACK", { method: "product-ui" }); await assistPage.goto(command.candidate.url, { waitUntil: "domcontentloaded", timeout: 30_000 }); if (await checkpoint(assistPage)) return; await selectVariant(assistPage, command.variant); if (!await addToCart(assistPage)) throw new AssistError("ATC_FAILED", "The storefront did not confirm that the item was added to cart."); verified = await waitForExactVisibleCart(assistPage, command.candidate.name, command.variant.id); }
   if (verified.state !== "ITEMS" || verified.itemCount !== 1 || !verified.hasVariant) throw new AssistError("ATC_FAILED", "Copify could not verify the exact selected variant in the cart.");
   if (verified.currency && verified.currency !== command.priceConstraint.currency) throw new AssistError("ATC_FAILED", "The cart currency changed after detection.");
   if (verified.priceMinor !== null && verified.priceMinor > command.priceConstraint.maxRetailMinor) { transition("CHECKPOINT", "PRICE_LIMIT_EXCEEDED", { reason: "PRICE_LIMIT_EXCEEDED", detectedPriceMinor: verified.priceMinor, maximumPriceMinor: command.priceConstraint.maxRetailMinor }); return; }
-  emitRun("DIRECT_CART_VERIFIED", { method: direct === "ADDED" ? "cart/add.js" : "fallback", elapsedMs: Date.now() - directCartStartedAt });
+  emitRun("DIRECT_CART_VERIFIED", { method: direct.outcome === "ADDED" ? "cart/add.js" : "fallback", responseVariantConfirmed: direct.responseVariantConfirmed, elapsedMs: Date.now() - directCartStartedAt });
   transition("CARTED", "CART_CONFIRMED", { requestedQuantity: command.quantity, actualQuantity: 1 });
   if (command.quantity > 1) emitRun("QUANTITY_FALLBACK", { requestedQuantity: command.quantity, actualQuantity: 1 });
   await continueFromTargetOnlyCart(command);
@@ -180,12 +183,12 @@ async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
 async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void> {
   if (!assistPage) return;
   if (automationBlocked()) { checkpointForCircuit(); return; }
-  const cart = await inspectCart(assistPage, command.candidate.name, command.candidate.url);
+  const cart = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id);
   if (cart.state === "BLOCKED") { cartResumeMode = "TARGET_ONLY"; return; }
   if (cart.state !== "ITEMS" || cart.itemCount !== 1 || !cart.hasTarget) { cartResumeMode = "TARGET_ONLY"; await showCartForReview(assistPage, command.candidate.url); transition("CHECKPOINT", "CART_CONTENT_CHANGED", { reason: "CART_CONTENT_CHANGED", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify will not continue until the cart contains exactly the detected target. Review the cart manually, then resume." }); await assistPage.bringToFront(); return; }
   cartResumeMode = undefined;
   transition("CHECKOUT", "CHECKOUT_NAVIGATION_STARTED", {});
-  await goToCheckout(assistPage);
+  await goToCheckout(assistPage, command.candidate.url);
   if (await checkpoint(assistPage)) return;
   await stopSensitiveCapture(); await fillShipping(assistPage, command.shipping); await acceptTerms(assistPage);
   if (await checkpoint(assistPage)) return;
@@ -204,6 +207,14 @@ async function inspectCart(page: Page, targetName: string, productUrl: string, v
   } catch {
     return { state: "UNKNOWN" };
   }
+}
+
+async function attachTrafficSession(page: Page): Promise<void> {
+  if (!context) return;
+  try {
+    const session = await context.newCDPSession(page); await session.send("Network.enable"); trafficSessions.push(session); trafficCdpAttached += 1;
+    session.on("Network.dataReceived", (event: { encodedDataLength?: number; dataLength?: number }) => { const bytes = event.encodedDataLength ?? event.dataLength ?? 0; if (Number.isFinite(bytes) && bytes > 0) trafficReceivedBytes += bytes; });
+  } catch { trafficFallbackSeen = true; }
 }
 
 async function warmStorefront(activeContext: BrowserContext): Promise<void> {
@@ -225,6 +236,16 @@ async function inspectVisibleCart(page: Page, targetName: string, variantId?: st
   } catch {
     return { state: "UNKNOWN" };
   }
+}
+
+export async function waitForExactVisibleCart(page: Page, targetName: string, variantId: string, timeoutMs = 3_000): Promise<CartInspection> {
+  const deadline = Date.now() + timeoutMs; let latest: CartInspection = { state: "UNKNOWN" };
+  do {
+    latest = await inspectVisibleCart(page, targetName, variantId);
+    if (latest.state === "ITEMS") return latest;
+    if (Date.now() >= deadline) return latest;
+    await page.waitForTimeout(250);
+  } while (true);
 }
 
 async function showCartForReview(page: Page, productUrl: string): Promise<void> {
@@ -253,21 +274,33 @@ export function parseShopifyCart(value: unknown, targetName: string, expectedVar
   return { state: "ITEMS", itemCount, hasTarget, hasVariant: expected ? Boolean(selected) : hasTarget, currency, priceMinor: typeof price === "number" && Number.isSafeInteger(price) && price >= 0 ? price : null };
 }
 
-async function directCart(page: Page, command: AssistCommand): Promise<"ADDED" | "UNSUPPORTED" | "UNAVAILABLE" | "PROTECTION" | "UNCERTAIN"> {
-  return submitDirectCart(page, command.variant.id);
+type DirectCartOutcome = "ADDED" | "UNSUPPORTED" | "UNAVAILABLE" | "PROTECTION" | "UNCERTAIN";
+type DirectCartAttempt = { outcome: DirectCartOutcome; responseVariantConfirmed: boolean };
+async function directCart(page: Page, command: AssistCommand): Promise<DirectCartAttempt> {
+  return submitDirectCartAttempt(page, command.variant.id);
 }
-export async function submitDirectCart(page: Page, variantId: string): Promise<"ADDED" | "UNSUPPORTED" | "UNAVAILABLE" | "PROTECTION" | "UNCERTAIN"> {
+export function parseShopifyAddResponse(value: unknown, variantId: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>; const items = Array.isArray(record.items) ? record.items : [record];
+  return items.some((item) => item && typeof item === "object" && !Array.isArray(item) && String((item as Record<string, unknown>).variant_id ?? (item as Record<string, unknown>).id ?? "") === variantId);
+}
+async function submitDirectCartAttempt(page: Page, variantId: string): Promise<DirectCartAttempt> {
   try {
-    const result = await page.evaluate(async ({ id }) => { try { const response = await fetch("/cart/add.js", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ items: [{ id, quantity: 1 }] }) }); return { status: response.status }; } catch { return { status: 0 }; } }, { id: variantId });
-    if (result.status === 403 || result.status === 429) return "PROTECTION"; if (result.status === 404 || result.status === 405) return "UNSUPPORTED"; if (result.status === 422) return "UNAVAILABLE"; if (result.status >= 200 && result.status < 300) return "ADDED"; return "UNCERTAIN";
-  } catch { return "UNCERTAIN"; }
+    const result = await page.evaluate(async ({ id }) => { try { const response = await fetch("/cart/add.js", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ items: [{ id, quantity: 1 }] }) }); return { status: response.status, body: await response.text() }; } catch { return { status: 0, body: "" }; } }, { id: variantId });
+    let parsed: unknown = null; try { parsed = JSON.parse(result.body); } catch { /* A status can still be classified without retaining an unexpected response body. */ }
+    const responseVariantConfirmed = parseShopifyAddResponse(parsed, variantId);
+    if (result.status === 403 || result.status === 429) return { outcome: "PROTECTION", responseVariantConfirmed }; if (result.status === 404 || result.status === 405) return { outcome: "UNSUPPORTED", responseVariantConfirmed }; if (result.status === 422) return { outcome: "UNAVAILABLE", responseVariantConfirmed }; if (result.status >= 200 && result.status < 300) return { outcome: "ADDED", responseVariantConfirmed }; return { outcome: "UNCERTAIN", responseVariantConfirmed };
+  } catch { return { outcome: "UNCERTAIN", responseVariantConfirmed: false }; }
+}
+export async function submitDirectCart(page: Page, variantId: string): Promise<DirectCartOutcome> {
+  return (await submitDirectCartAttempt(page, variantId)).outcome;
 }
 
 async function checkCart(id: string): Promise<void> {
   if (!context) return;
   const page = await context.newPage();
   try {
-    const cart = await inspectCart(page, "", "https://eu.supreme.com/");
+    const cart = await inspectBrowserCartDocument(page, "", "https://eu.supreme.com/");
     const status = cart.state === "EMPTY" ? { status: "EMPTY" as const, itemCount: 0, checkedAt: Date.now(), message: null } : cart.state === "ITEMS" ? { status: "ITEMS" as const, itemCount: cart.itemCount, checkedAt: Date.now(), message: null } : { status: "UNKNOWN" as const, itemCount: null, checkedAt: Date.now(), message: cart.state === "BLOCKED" ? "A storefront checkpoint prevented cart verification." : "The cart could not be safely verified." };
     send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status });
   } catch (error) { send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "ERROR", itemCount: null, checkedAt: Date.now(), message: sanitizeText(error instanceof Error ? error.message : "Cart check failed.") } }); }
@@ -278,14 +311,13 @@ async function emptyCart(id: string): Promise<void> {
   if (!context) return;
   const page = await context.newPage();
   try {
-    const initial = await inspectCart(page, "", "https://eu.supreme.com/");
+    const initial = await inspectBrowserCartDocument(page, "", "https://eu.supreme.com/");
     if (initial.state === "BLOCKED") throw new AssistError("CHECKPOINT_DETECTED", "A storefront checkpoint prevented cart removal.");
     if (initial.state === "UNKNOWN") throw new AssistError("STORE_UNAVAILABLE", "The cart could not be safely verified before removal.");
     if (initial.state === "EMPTY") { send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "EMPTY", itemCount: 0, checkedAt: Date.now(), message: "Cart is already empty." } }); return; }
-    // This action is explicitly confirmed by the user. Load the storefront
-    // first, then clear and verify through the page's live browser session.
-    await showCartForReview(page, "https://eu.supreme.com/");
-    if (await checkpoint(page, false)) throw new AssistError("CHECKPOINT_DETECTED", "A storefront checkpoint prevented cart removal.");
+    // This action is explicitly confirmed by the user. The temporary tab is
+    // already on /cart.js, so clearing from it uses the exact same browser
+    // cookies without racing Supreme's empty-/cart redirect to /pages/shop.
     const cleared = await page.evaluate(async () => {
       const response = await fetch("/cart/clear.js", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } });
       return { ok: response.ok, status: response.status };
@@ -293,7 +325,7 @@ async function emptyCart(id: string): Promise<void> {
     if (!cleared.ok) throw new AssistError("STORE_UNAVAILABLE", `The storefront refused to clear the cart (${cleared.status}).`);
     let cart: CartInspection = { state: "UNKNOWN" };
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      cart = await inspectVisibleCart(page, "");
+      cart = await inspectBrowserCartDocument(page, "", "https://eu.supreme.com/");
       if (cart.state === "EMPTY") break;
       await page.waitForTimeout(300);
     }
@@ -306,6 +338,22 @@ async function emptyCart(id: string): Promise<void> {
     send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "EMPTY", itemCount: 0, checkedAt: Date.now(), message: "Cart emptied." } });
   } catch (error) { send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "ERROR", itemCount: null, checkedAt: Date.now(), message: sanitizeText(error instanceof Error ? error.message : "Cart removal failed.") } }); }
   finally { await page.close().catch(() => undefined); }
+}
+
+export async function inspectBrowserCartDocument(page: Page, targetName: string, productUrl: string, variantId?: string): Promise<CartInspection> {
+  try {
+    // A real tab navigation shares the browser profile's precise cookie and
+    // network partition. APIRequestContext can disagree with the visible cart
+    // on partitioned storefront sessions, which previously produced stale
+    // item counts in the Browsers page.
+    const response = await page.goto(new URL("/cart.js", productUrl).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
+    if (!response) return { state: "UNKNOWN" };
+    if (response.status() === 403 || response.status() === 429) return { state: "BLOCKED" };
+    if (!response.ok()) return { state: "UNKNOWN" };
+    return parseShopifyCart(JSON.parse(await response.text()), targetName, variantId) ?? { state: "UNKNOWN" };
+  } catch {
+    return { state: "UNKNOWN" };
+  }
 }
 
 function recordAssistFailure(error: unknown, fallback: string): void { checkoutFailures += 1; const failure = error instanceof AssistError ? error : new AssistError("UNKNOWN", sanitizeText(error instanceof Error ? error.message : fallback)); transition("FAILED", "ASSIST_FAILED", { code: failure.code, message: failure.message }); }
@@ -379,7 +427,28 @@ async function addToCart(page: Page): Promise<boolean> {
   return Boolean(await firstVisible([miniCartCheckout, inCart], 8_000));
 }
 
-async function goToCheckout(page: Page): Promise<void> {
+function isCheckoutUrl(url: URL): boolean { return /\/(?:checkouts?|queue)(?:\/|$)|\/cart\/c\//i.test(url.pathname); }
+
+async function submitCartCheckout(page: Page): Promise<boolean> {
+  const navigation = page.waitForURL((url) => isCheckoutUrl(url), { timeout: 30_000 }).then(() => true).catch(() => false);
+  const submitted = await page.evaluate(() => {
+    try {
+      const form = document.createElement("form"); form.method = "post"; form.action = "/cart";
+      const checkout = document.createElement("input"); checkout.type = "hidden"; checkout.name = "checkout"; checkout.value = "Checkout";
+      form.append(checkout); document.body.append(form); form.submit(); return true;
+    } catch { return false; }
+  }).catch(() => false);
+  return submitted && await navigation;
+}
+
+export async function goToCheckout(page: Page, productUrl: string): Promise<void> {
+  // Shopify's supported theme checkout mechanism is a POST to the cart route
+  // with a named checkout submit value. Supreme's shop landing page does not
+  // render a visible cart control after a direct Ajax add, so use that mechanism
+  // before looking for theme-specific controls.
+  emitRun("CHECKOUT_FORM_SUBMITTED", { method: "cart-form" });
+  if (await submitCartCheckout(page)) { emitRun("CHECKOUT_CONTROL_CLICKED", { method: "cart-form" }); await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => undefined); return; }
+  await page.goto(new URL("/cart", productUrl).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
   const miniCartCheckout = page.locator('[data-testid="mini-cart-checkout-link"]').first();
   const checkoutText = page.getByText(/^checkout(?:\s+now)?$/i).first();
   const checkoutLink = page.getByRole("link", { name: /checkout/i }).first();
@@ -395,7 +464,7 @@ async function goToCheckout(page: Page): Promise<void> {
   emitRun("CHECKOUT_CONTROL_READY", {});
   await humanInputFor(page).click(control);
   emitRun("CHECKOUT_CONTROL_CLICKED", {});
-  try { await page.waitForURL((url) => /\/(?:checkouts?|queue)(?:\/|$)/i.test(url.pathname), { timeout: 30_000 }); }
+  try { await page.waitForURL((url) => isCheckoutUrl(url), { timeout: 30_000 }); }
   catch { throw new AssistError("CHECKOUT_NAV_FAILED", "The storefront did not navigate to checkout after the checkout control was selected."); }
   await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => undefined);
 }
@@ -423,20 +492,35 @@ async function stopSensitiveCapture(): Promise<void> {
   emitRun("SENSITIVE_CAPTURE_STOPPED", { message: "Tracing and automatic screenshots stopped before shipping autofill." });
 }
 
-async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void> {
+export async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void> {
   await selectShippingCountry(page, shipping.country);
   await selectShippingRegion(page, shipping.region);
   const fill = async (label: string, value: string, labels: RegExp, names: string[], autocomplete: string[], required = true): Promise<boolean> => {
-    const candidates: Locator[] = [page.getByLabel(labels).first()];
+    // Shopify may prefix standard autocomplete tokens with a section name, such
+    // as `shipping address-line1`. Prefer those machine-readable tokens over
+    // visible labels: checkout layouts can place wording such as "delivery
+    // address" next to the City field and make a broad label lookup ambiguous.
+    const candidates: Locator[] = [];
+    for (const hint of autocomplete) candidates.push(page.locator(`input[autocomplete~="${hint}" i], textarea[autocomplete~="${hint}" i]`).first());
     for (const name of names) candidates.push(page.locator(`input[name*="${name}" i], textarea[name*="${name}" i]`).first());
-    for (const hint of autocomplete) candidates.push(page.locator(`input[autocomplete="${hint}" i], textarea[autocomplete="${hint}" i]`).first());
+    candidates.push(page.getByLabel(labels).first());
     for (const field of candidates) {
       try {
         if (!await field.count() || !await field.isVisible()) continue;
         const tag = await field.evaluate((element) => element.tagName.toLocaleLowerCase());
         if (tag !== "input" && tag !== "textarea") continue;
-        if (/address/i.test(label) || /[^\x20-\x7e]/.test(value)) await humanInputFor(page).paste(field, value);
-        else await humanInputFor(page).type(field, value);
+        const current = await field.inputValue().catch(() => "");
+        if (checkoutValuesEquivalent(label, current, value)) { emitRun("SHIPPING_FIELD_REUSED", { field: label }); return true; }
+        try {
+          if (/address/i.test(label) || /[^\x20-\x7e]/.test(value)) await humanInputFor(page).paste(field, value);
+          else await humanInputFor(page).type(field, value);
+        } catch (error) {
+          // Shopify formats some inputs (notably telephone numbers) while they
+          // are typed. HumanInput's exact-string verification can reject that
+          // formatting even though the checkout retained the correct value.
+          const retained = await field.inputValue().catch(() => "");
+          if (!checkoutValuesEquivalent(label, retained, value)) throw error;
+        }
         return true;
       } catch { /* A country/region update can replace a field; try the next semantic match. */ }
     }
@@ -457,8 +541,17 @@ async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void>
   emitRun("SHIPPING_FILLED", { country: shipping.country });
 }
 
+export function checkoutValuesEquivalent(label: string, current: string, expected: string): boolean {
+  const compact = (value: string) => value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  if (/phone|mobile/i.test(label)) {
+    const present = current.replace(/\D/g, ""); const wanted = expected.replace(/\D/g, "");
+    return present.length >= 7 && wanted.length >= 7 && (present === wanted || present.endsWith(wanted) || wanted.endsWith(present));
+  }
+  return Boolean(current.trim()) && compact(current) === compact(expected);
+}
+
 async function selectShippingCountry(page: Page, country: string): Promise<void> {
-  const candidates = [page.locator('select[name*="country" i], select[autocomplete="country" i]').first(), page.getByLabel(/country(?:\/region)?/i).first(), page.locator("select").first()]; const names = shippingCountryNames(country);
+  const candidates = [page.locator('select[autocomplete~="country" i], select[name*="country" i]').first(), page.getByLabel(/country(?:\/region)?/i).first(), page.locator("select").first()]; const names = shippingCountryNames(country);
   for (const field of candidates) {
     if (!await field.count()) continue;
     const option = await field.locator("option").evaluateAll((options, values) => options.map((item) => ({ value: (item as HTMLOptionElement).value, text: item.textContent?.trim() ?? "" })).find((item) => values.some((value) => item.value.trim().toUpperCase() === value.toUpperCase() || item.text.trim().toLocaleLowerCase() === value.toLocaleLowerCase())), names).catch(() => undefined);
@@ -597,6 +690,12 @@ async function emitHealth(): Promise<void> {
   const cookieCount = await context.cookies().then((value) => value.length).catch(() => null);
   const minutes = Math.max(Number(process.hrtime.bigint() - startedMono) / 60_000_000_000, 1 / 60);
   send({ type: "HEALTH", version: IPC_VERSION, profileId, health: { capturedAt: Date.now(), navigatorWebdriver: await (context.pages()[0]?.evaluate(() => navigator.webdriver).catch(() => null) ?? null), browserVersion: driverMetadata?.browserVersion ?? context.browser()?.version() ?? null, driverKind: driverMetadata?.kind ?? null, stealthStatus: driverMetadata?.stealthStatus ?? null, profileAgeMs, cookieCount, requestCount, requestsPerMinute: requestCount / minutes, navigationCount, navigationsPerMinute: navigationCount / minutes, atcAttempts, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures, averagePageLoadMs: pageLoads.length ? pageLoads.reduce((sum, value) => sum + value, 0) / pageLoads.length : null, circuit: null } });
+  emitNetworkUsage();
+}
+
+function emitNetworkUsage(): void {
+  if (!profileId || !recording) return;
+  send({ type: "NETWORK_USAGE", version: IPC_VERSION, profileId, runId: recording.runId, runSessionId: recording.runSessionId, usage: { receivedBytes: trafficReceivedBytes, sentBytes: trafficSentBytes, requestCount, completeness: trafficCdpAttached > 0 || trafficFallbackSeen ? "PARTIAL" : "UNSUPPORTED" } });
 }
 
 async function stop(): Promise<void> {
@@ -604,7 +703,7 @@ async function stop(): Promise<void> {
   try {
     await runnerClipboard.release();
     for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear();
-    if (recording) await endRun(recording.runSessionId); await driverSession?.stop();
+    if (recording) await endRun(recording.runSessionId); for (const session of trafficSessions) await session.detach().catch(() => undefined); trafficSessions = []; await driverSession?.stop();
   } finally { context = undefined; driverSession = undefined; driverMetadata = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
 }
 

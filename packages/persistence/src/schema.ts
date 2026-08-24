@@ -10,7 +10,7 @@ export const browserProfiles = sqliteTable("browser_profiles", {
 export const proxyProfiles = sqliteTable("proxy_profiles", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), provider: text("provider").notNull(), type: text("type").notNull(), protocol: text("protocol").notNull(),
   host: text("host").notNull(), port: integer("port").notNull(), usernameSecretId: text("username_secret_id"), passwordSecretId: text("password_secret_id"),
-  expectedCountry: text("expected_country"), expectedCity: text("expected_city"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  expectedCountry: text("expected_country"), expectedCity: text("expected_city"), costPerGbMicrosUsd: integer("cost_per_gb_micros_usd"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
@@ -51,6 +51,13 @@ export const runEvents = sqliteTable("run_events", {
 export const runArtifacts = sqliteTable("run_artifacts", {
   id: text("id").primaryKey(), runId: text("run_id").notNull(), runSessionId: text("run_session_id").notNull(), kind: text("kind").notNull(),
   relativePath: text("relative_path").notNull(), sensitive: integer("sensitive", { mode: "boolean" }).notNull(), createdAt: integer("created_at").notNull()
+});
+
+export const runNetworkUsage = sqliteTable("run_network_usage", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), usageKey: text("usage_key").notNull(), source: text("source").notNull(),
+  runSessionId: text("run_session_id"), storeId: text("store_id"), proxyProfileId: text("proxy_profile_id"), proxyName: text("proxy_name"),
+  receivedBytes: integer("received_bytes").notNull(), sentBytes: integer("sent_bytes").notNull(), requestCount: integer("request_count").notNull(), completeness: text("completeness").notNull(),
+  costPerGbMicrosUsd: integer("cost_per_gb_micros_usd"), estimatedCostMicrosUsd: integer("estimated_cost_micros_usd"), updatedAt: integer("updated_at").notNull()
 });
 
 export const runSetups = sqliteTable("run_setups", {

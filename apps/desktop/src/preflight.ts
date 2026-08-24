@@ -84,6 +84,7 @@ export function preflight(input: PreflightInput): Preflight {
   // --- routes ---
   const routeIssues: string[] = [];
   const unverified: string[] = [];
+  const assignedRouteNames = new Map<string, string[]>();
   for (const profile of selected) {
     if (profile.driver.kind === "EXTERNAL_CDP") continue;
     if (!profile.proxyProfileId) {
@@ -93,14 +94,19 @@ export function preflight(input: PreflightInput): Preflight {
     const proxy = proxies.find((item) => item.id === profile.proxyProfileId);
     if (!proxy) routeIssues.push(`${profile.name}: assigned proxy no longer exists`);
     else if (!proxy.enabled) routeIssues.push(`${profile.name}: ${proxy.name} is disabled`);
-    else if (!latestBenchmark(proxy.id)) unverified.push(`${profile.name} (${proxy.name})`);
+    else {
+      const names = assignedRouteNames.get(proxy.id) ?? []; names.push(profile.name); assignedRouteNames.set(proxy.id, names);
+      if (assisted && proxy.type === "residential-rotating") routeIssues.push(`${profile.name}: ${proxy.name} rotates exit IPs and cannot preserve checkout affinity`);
+      if (!latestBenchmark(proxy.id)) unverified.push(`${profile.name} (${proxy.name})`);
+    }
   }
+  const sharedRoutes = [...assignedRouteNames.entries()].filter(([, names]) => names.length > 1).map(([id, names]) => `${proxies.find((proxy) => proxy.id === id)?.name ?? "Proxy"}: ${names.join(", ")}`);
   if (selected.length > 0) {
     checks.push(
       routeIssues.length > 0
         ? { id: "routes", label: "Routes usable", status: "fail", detail: routeIssues.join(" · ") }
-        : unverified.length > 0
-          ? { id: "routes", label: "Routes verified", status: "warn", detail: `Never benchmarked: ${unverified.join(", ")}.` }
+        : unverified.length > 0 || sharedRoutes.length > 0
+          ? { id: "routes", label: "Routes verified", status: "warn", detail: [unverified.length ? `Never benchmarked: ${unverified.join(", ")}.` : "", sharedRoutes.length ? `Shared route affinity: ${sharedRoutes.join(" · ")}.` : ""].filter(Boolean).join(" ") }
           : { id: "routes", label: "Routes verified", status: "pass", detail: "Every selected route has a benchmark." },
     );
   }

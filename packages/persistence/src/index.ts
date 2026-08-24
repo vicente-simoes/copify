@@ -3,9 +3,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, monitorNetworkSettingsSchema, networkProbeSettingsSchema, persistedMonitorCircuitSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type MonitorNetworkSettings, type PersistedMonitorCircuit, type ProxyBenchmark, type ProxyProfile,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type MonitorSettings, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
   type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
@@ -132,7 +132,20 @@ export class ProfileRepository {
         ALTER TABLE browser_profiles ADD COLUMN external_cdp_endpoint_secret_id TEXT;
         UPDATE browser_profiles SET driver_kind='NATIVE_STEALTH' WHERE launch_mode IN ('PLAYWRIGHT','NATIVE_CDP') OR driver_kind IS NULL;`);
     }
-    this.sql.exec("PRAGMA user_version = 10;");
+    if (version < 11) {
+      if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='proxy_profiles'").get()) this.sql.exec("ALTER TABLE proxy_profiles ADD COLUMN cost_per_gb_micros_usd INTEGER;");
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS run_network_usage (
+        id TEXT PRIMARY KEY NOT NULL, run_id TEXT NOT NULL, usage_key TEXT NOT NULL, source TEXT NOT NULL,
+        run_session_id TEXT, store_id TEXT, proxy_profile_id TEXT, proxy_name TEXT,
+        received_bytes INTEGER NOT NULL, sent_bytes INTEGER NOT NULL, request_count INTEGER NOT NULL, completeness TEXT NOT NULL,
+        cost_per_gb_micros_usd INTEGER, estimated_cost_micros_usd INTEGER, updated_at INTEGER NOT NULL,
+        UNIQUE(run_id, usage_key)
+      );
+      CREATE INDEX IF NOT EXISTS run_network_usage_run_idx ON run_network_usage(run_id, source);
+      CREATE INDEX IF NOT EXISTS run_network_usage_proxy_idx ON run_network_usage(proxy_profile_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS run_network_usage_store_idx ON run_network_usage(store_id, updated_at DESC);`);
+    }
+    this.sql.exec("PRAGMA user_version = 11;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -236,8 +249,8 @@ export class ProfileRepository {
       if (usernameSecretId && credentials.username) this.insertSecret(usernameSecretId, credentials.username, now);
       if (passwordSecretId && credentials.password) this.insertSecret(passwordSecretId, credentials.password, now);
       try {
-        this.sql.prepare(`INSERT INTO proxy_profiles (id,name,provider,type,protocol,host,port,username_secret_id,password_secret_id,expected_country,expected_city,enabled,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, parsed.name, parsed.provider, parsed.type, parsed.protocol, parsed.host, parsed.port, usernameSecretId, passwordSecretId, parsed.expectedCountry ?? null, parsed.expectedCity ?? null, parsed.enabled ? 1 : 0, now, now);
+        this.sql.prepare(`INSERT INTO proxy_profiles (id,name,provider,type,protocol,host,port,username_secret_id,password_secret_id,expected_country,expected_city,cost_per_gb_micros_usd,enabled,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, parsed.name, parsed.provider, parsed.type, parsed.protocol, parsed.host, parsed.port, usernameSecretId, passwordSecretId, parsed.expectedCountry ?? null, parsed.expectedCity ?? null, parsed.costPerGbMicrosUsd, parsed.enabled ? 1 : 0, now, now);
       } catch (error) { throw new Error(isUniqueError(error) ? "A proxy profile with that name already exists." : "Could not create the proxy profile."); }
     });
     return (await this.getProxy(id))!;
@@ -254,8 +267,8 @@ export class ProfileRepository {
       this.updateSecret(existing.username_secret_id, usernameSecretId, credentials.username, now);
       this.updateSecret(existing.password_secret_id, passwordSecretId, credentials.password, now);
       try {
-        this.sql.prepare(`UPDATE proxy_profiles SET name=?,provider=?,type=?,protocol=?,host=?,port=?,username_secret_id=?,password_secret_id=?,expected_country=?,expected_city=?,enabled=?,updated_at=? WHERE id=?`)
-          .run(updated.name, updated.provider, updated.type, updated.protocol, updated.host, updated.port, usernameSecretId, passwordSecretId, updated.expectedCountry, updated.expectedCity, updated.enabled ? 1 : 0, now, id);
+        this.sql.prepare(`UPDATE proxy_profiles SET name=?,provider=?,type=?,protocol=?,host=?,port=?,username_secret_id=?,password_secret_id=?,expected_country=?,expected_city=?,cost_per_gb_micros_usd=?,enabled=?,updated_at=? WHERE id=?`)
+          .run(updated.name, updated.provider, updated.type, updated.protocol, updated.host, updated.port, usernameSecretId, passwordSecretId, updated.expectedCountry, updated.expectedCity, updated.costPerGbMicrosUsd, updated.enabled ? 1 : 0, now, id);
       } catch (error) { throw new Error(isUniqueError(error) ? "A proxy profile with that name already exists." : "Could not update the proxy profile."); }
     });
     return proxyProfileSchema.parse(updated);
@@ -342,31 +355,25 @@ export class ProfileRepository {
     return (await this.getRun(id))!;
   }
 
-  async getMonitorNetworkSettings(): Promise<MonitorNetworkSettings> {
-    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'monitor_network'");
-    if (!row) return { proxyProfileIds: [] };
-    try { const parsed = monitorNetworkSettingsSchema.parse(JSON.parse(String(row.value))); const enabled = new Set((await this.listProxies()).filter((proxy) => proxy.enabled).map((proxy) => proxy.id)); return { proxyProfileIds: parsed.proxyProfileIds.filter((id) => enabled.has(id)) }; } catch { return { proxyProfileIds: [] }; }
+  async getMonitorSettings(): Promise<MonitorSettings> {
+    const enabled = new Set((await this.listProxies()).filter((proxy) => proxy.enabled).map((proxy) => proxy.id));
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'monitor_settings'");
+    if (row) {
+      try { const parsed = monitorSettingsSchema.parse(JSON.parse(String(row.value))); return { ...parsed, proxyProfileIds: parsed.proxyProfileIds.filter((id) => enabled.has(id)) }; }
+      catch { return defaultMonitorSettings(); }
+    }
+    const legacy = this.getRow("SELECT value FROM app_settings WHERE key = 'monitor_network'");
+    let proxyProfileIds: string[] = [];
+    try { const value = legacy ? JSON.parse(String(legacy.value)) as { proxyProfileIds?: unknown } : {}; if (Array.isArray(value.proxyProfileIds)) proxyProfileIds = value.proxyProfileIds.filter((id): id is string => typeof id === "string" && enabled.has(id)); } catch { /* use defaults */ }
+    const migrated = defaultMonitorSettings(proxyProfileIds); this.setJsonSetting("monitor_settings", migrated); return migrated;
   }
 
-  async setMonitorNetworkSettings(input: MonitorNetworkSettings): Promise<MonitorNetworkSettings> {
-    const value = monitorNetworkSettingsSchema.parse(input);
+  async setMonitorSettings(input: MonitorSettings): Promise<MonitorSettings> {
+    const value = monitorSettingsSchema.parse(input);
     const existing = new Set((await this.listProxies()).filter((proxy) => proxy.enabled).map((proxy) => proxy.id));
-    const filtered = { proxyProfileIds: value.proxyProfileIds.filter((id) => existing.has(id)) };
-    this.setJsonSetting("monitor_network", filtered);
+    const filtered = { ...value, proxyProfileIds: value.proxyProfileIds.filter((id) => existing.has(id)) };
+    this.setJsonSetting("monitor_settings", filtered);
     return filtered;
-  }
-
-  async getMonitorCircuit(storeId: string): Promise<PersistedMonitorCircuit> {
-    const row = this.getRow("SELECT value FROM app_settings WHERE key = ?", [`monitor_circuit:${storeId}`]);
-    if (!row) return { storeId, consecutiveProtectionSignals: 0, reopenAt: null };
-    try { return persistedMonitorCircuitSchema.parse(JSON.parse(String(row.value))); }
-    catch { return { storeId, consecutiveProtectionSignals: 0, reopenAt: null }; }
-  }
-
-  async setMonitorCircuit(value: PersistedMonitorCircuit): Promise<PersistedMonitorCircuit> {
-    const parsed = persistedMonitorCircuitSchema.parse(value);
-    this.setJsonSetting(`monitor_circuit:${parsed.storeId}`, parsed);
-    return parsed;
   }
 
   async listRunSetups(): Promise<RunSetup[]> {
@@ -435,12 +442,29 @@ export class ProfileRepository {
     return { latest: recent[0] ?? null, recent };
   }
 
+  async upsertRunNetworkUsage(input: RunNetworkUsage): Promise<RunNetworkUsage> {
+    const value = runNetworkUsageSchema.parse(input);
+    this.sql.prepare(`INSERT INTO run_network_usage (id,run_id,usage_key,source,run_session_id,store_id,proxy_profile_id,proxy_name,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,usage_key) DO UPDATE SET received_bytes=excluded.received_bytes,sent_bytes=excluded.sent_bytes,request_count=excluded.request_count,completeness=excluded.completeness,cost_per_gb_micros_usd=excluded.cost_per_gb_micros_usd,estimated_cost_micros_usd=excluded.estimated_cost_micros_usd,updated_at=excluded.updated_at`)
+      .run(value.id, value.runId, value.usageKey, value.source, value.runSessionId, value.storeId, value.proxyProfileId, value.proxyName, value.receivedBytes, value.sentBytes, value.requestCount, value.completeness, value.costPerGbMicrosUsd, value.estimatedCostMicrosUsd, value.updatedAt);
+    return value;
+  }
+
+  async listRunNetworkUsage(runId: string): Promise<RunNetworkUsage[]> {
+    return this.all("SELECT * FROM run_network_usage WHERE run_id=? ORDER BY source, usage_key", [runId]).map((row) => runNetworkUsageSchema.parse(mapRunNetworkUsage(row)));
+  }
+
+  async listNetworkUsage(): Promise<RunNetworkUsage[]> {
+    return this.all("SELECT * FROM run_network_usage ORDER BY updated_at DESC").map((row) => runNetworkUsageSchema.parse(mapRunNetworkUsage(row)));
+  }
+
   async removeRun(id: string): Promise<boolean> {
     const existing = this.getRow("SELECT id FROM runs WHERE id = ?", [id]); if (!existing) return false;
     this.transaction(() => {
       this.sql.prepare("DELETE FROM run_artifacts WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM run_events WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM browser_health_snapshots WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM run_network_usage WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM run_sessions WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM runs WHERE id = ?").run(id);
     });
@@ -487,7 +511,7 @@ function mapProfile(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapProxy(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, provider: row.provider, type: row.type, protocol: row.protocol, host: row.host, port: Number(row.port), expectedCountry: row.expected_country ?? null, expectedCity: row.expected_city ?? null, usernameConfigured: Boolean(row.username_secret_id), passwordConfigured: Boolean(row.password_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, provider: row.provider, type: row.type, protocol: row.protocol, host: row.host, port: Number(row.port), expectedCountry: row.expected_country ?? null, expectedCity: row.expected_city ?? null, costPerGbMicrosUsd: nullableNumber(row.cost_per_gb_micros_usd), usernameConfigured: Boolean(row.username_secret_id), passwordConfigured: Boolean(row.password_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapShipping(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, country: row.country ?? null, detailsConfigured: Boolean(row.details_secret_id), complete: Boolean(row.details_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
@@ -509,6 +533,9 @@ function mapRunSession(row: Row): Record<string, unknown> {
 }
 function mapRunEvent(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, wallTimeMs: Number(row.wall_time_ms), elapsedNs: String(row.elapsed_ns), type: row.type, stateBefore: row.state_before ?? null, stateAfter: row.state_after ?? null, payload: JSON.parse(String(row.payload_json)) };
+}
+function mapRunNetworkUsage(row: Row): Record<string, unknown> {
+  return { id: row.id, runId: row.run_id, usageKey: row.usage_key, source: row.source, runSessionId: row.run_session_id ?? null, storeId: row.store_id ?? null, proxyProfileId: row.proxy_profile_id ?? null, proxyName: row.proxy_name ?? null, receivedBytes: Number(row.received_bytes), sentBytes: Number(row.sent_bytes), requestCount: Number(row.request_count), completeness: row.completeness, costPerGbMicrosUsd: nullableNumber(row.cost_per_gb_micros_usd), estimatedCostMicrosUsd: nullableNumber(row.estimated_cost_micros_usd), updatedAt: Number(row.updated_at) };
 }
 function mapRunArtifact(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id, kind: row.kind, relativePath: row.relative_path, sensitive: Boolean(row.sensitive), createdAt: Number(row.created_at) };

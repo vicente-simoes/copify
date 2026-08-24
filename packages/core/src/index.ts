@@ -62,7 +62,7 @@ export class SessionOrchestrator extends EventEmitter {
     if (event.type === "READY") { this.setState(profileId, "READY", null, event.route, event.driver); this.dispatchCartAction(profileId); }
     if (event.type === "STOPPED") this.setState(profileId, "STOPPED");
     if (event.type === "ERROR") this.setState(profileId, "ERROR", { code: event.code, message: event.message });
-    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE") this.emit("runner-event", event);
+    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "NETWORK_USAGE" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE") this.emit("runner-event", event);
   }
 
   private onRunnerExit(profileId: string, active: ActiveRunner): void {

@@ -3,8 +3,8 @@ import { STORE_GENERAL, storeCurrencySchema } from "./stores";
 
 export * from "./stores";
 
-export const IPC_VERSION = 12 as const;
-export const SCHEMA_VERSION = 10 as const;
+export const IPC_VERSION = 13 as const;
+export const SCHEMA_VERSION = 11 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -31,19 +31,30 @@ export const productCandidateSchema = z.object({ name: z.string().min(1).max(300
 export type ProductCandidate = z.infer<typeof productCandidateSchema>;
 export const targetDecisionSchema = z.object({ kind: z.enum(["NO_MATCH", "MATCHED", "VARIANT_SELECTED", "PRICE_LIMIT_EXCEEDED", "CURRENCY_MISMATCH", "NO_ACCEPTABLE_VARIANT", "ERROR"]), message: z.string().max(500), candidate: productCandidateSchema.nullable(), selectedVariant: productVariantSchema.nullable() });
 export type TargetDecision = z.infer<typeof targetDecisionSchema>;
-export const targetCheckSchema = z.object({ id: idSchema, targetId: idSchema, checkedAt: timestampSchema, status: z.enum(["SUCCESS", "ERROR"]), decision: targetDecisionSchema, candidateCount: z.number().int().min(0), errorMessage: z.string().nullable(), retryAfterMs: z.number().int().nonnegative().nullable().optional() });
+export const monitorFailureCodeSchema = z.enum(["PROXY_TRANSPORT_FAILED", "PROXY_AUTH_FAILED", "STOREFRONT_PROTECTION", "STOREFRONT_SERVICE_UNAVAILABLE", "NO_HEALTHY_ROUTES", "MONITOR_ENDPOINT_UNSUPPORTED", "INVALID_MONITOR_POLICY", "MONITOR_RESPONSE_TOO_LARGE", "MONITOR_CONNECTION_FAILED", "UNKNOWN"]);
+export type MonitorFailureCode = z.infer<typeof monitorFailureCodeSchema>;
+export const monitorRouteActionSchema = z.enum(["NONE", "ROTATING_GATEWAY_RETAINED", "ROUTE_COOLED", "ROTATED", "MONITOR_COOLDOWN", "POOL_EXHAUSTED"]);
+export type MonitorRouteAction = z.infer<typeof monitorRouteActionSchema>;
+export const targetCheckSchema = z.object({
+  id: idSchema, targetId: idSchema, checkedAt: timestampSchema, status: z.enum(["SUCCESS", "ERROR"]), decision: targetDecisionSchema,
+  candidateCount: z.number().int().min(0), errorMessage: z.string().nullable(), retryAfterMs: z.number().int().nonnegative().nullable().optional(),
+  errorCode: monitorFailureCodeSchema.nullable().optional(), routeId: z.string().min(1).max(120).nullable().optional(), routeAction: monitorRouteActionSchema.optional()
+});
 export type TargetCheck = z.infer<typeof targetCheckSchema>;
 export const targetSnapshotSchema = targetSchema.omit({ id: true, latestCheck: true, createdAt: true, updatedAt: true }).extend({ targetId: idSchema, capturedAt: timestampSchema });
 export type TargetSnapshot = z.infer<typeof targetSnapshotSchema>;
 
-export const proxyProviderSchema = z.enum(["brightdata", "decodo", "oxylabs", "custom"]);
-export const proxyTypeSchema = z.enum(["home", "datacenter", "residential-sticky", "isp-static"]);
+export const proxyProviderSchema = z.enum(["brightdata", "dataimpulse", "decodo", "oxylabs", "custom"]);
+export type ProxyProvider = z.infer<typeof proxyProviderSchema>;
+export const proxyTypeSchema = z.enum(["home", "datacenter", "residential-sticky", "residential-rotating", "isp-static"]);
+export type ProxyType = z.infer<typeof proxyTypeSchema>;
 export const proxyProtocolSchema = z.enum(["http", "https", "socks5"]);
 export type ProxyProtocol = z.infer<typeof proxyProtocolSchema>;
+const costPerGbMicrosUsdSchema = z.number().int().min(0).max(1_000_000_000).nullable();
 
 export const proxyProfileSchema = z.object({
   id: idSchema, name: z.string().trim().min(1).max(80), provider: proxyProviderSchema, type: proxyTypeSchema, protocol: proxyProtocolSchema,
-  host: z.string().trim().min(1).max(253), port: z.number().int().min(1).max(65_535), expectedCountry: z.string().trim().toUpperCase().regex(/^[A-Z]{2}$/).nullable(), expectedCity: z.string().trim().min(1).max(80).nullable(),
+  host: z.string().trim().min(1).max(253), port: z.number().int().min(1).max(65_535), expectedCountry: z.string().trim().toUpperCase().regex(/^[A-Z]{2}$/).nullable(), expectedCity: z.string().trim().min(1).max(80).nullable(), costPerGbMicrosUsd: costPerGbMicrosUsdSchema,
   usernameConfigured: z.boolean(), passwordConfigured: z.boolean(), enabled: z.boolean(), createdAt: timestampSchema, updatedAt: timestampSchema
 });
 export type ProxyProfile = z.infer<typeof proxyProfileSchema>;
@@ -53,9 +64,9 @@ const credentialUpdateSchema = z.union([z.string().min(1).max(512), z.null()]).o
 const nullableCountrySchema = z.string().trim().toUpperCase().regex(/^[A-Z]{2}$/, "Use a two-letter country code.").nullable().optional();
 const nullableCitySchema = z.string().trim().min(1).max(80).nullable().optional();
 
-export const createProxyProfileSchema = z.object({ name: z.string().trim().min(1, "A proxy name is required.").max(80), provider: proxyProviderSchema.default("custom"), type: proxyTypeSchema.default("residential-sticky"), protocol: proxyProtocolSchema.default("http"), host: z.string().trim().min(1, "A proxy host is required.").max(253), port: z.coerce.number().int().min(1).max(65_535), username: optionalCredentialSchema, password: optionalCredentialSchema, expectedCountry: nullableCountrySchema, expectedCity: nullableCitySchema, enabled: z.boolean().default(true) });
+export const createProxyProfileSchema = z.object({ name: z.string().trim().min(1, "A proxy name is required.").max(80), provider: proxyProviderSchema.default("custom"), type: proxyTypeSchema.default("residential-sticky"), protocol: proxyProtocolSchema.default("http"), host: z.string().trim().min(1, "A proxy host is required.").max(253), port: z.coerce.number().int().min(1).max(65_535), username: optionalCredentialSchema, password: optionalCredentialSchema, expectedCountry: nullableCountrySchema, expectedCity: nullableCitySchema, costPerGbMicrosUsd: costPerGbMicrosUsdSchema.optional().default(null), enabled: z.boolean().default(true) });
 export type CreateProxyProfileInput = z.input<typeof createProxyProfileSchema>;
-export const updateProxyProfileSchema = z.object({ name: z.string().trim().min(1, "A proxy name is required.").max(80).optional(), provider: proxyProviderSchema.optional(), type: proxyTypeSchema.optional(), protocol: proxyProtocolSchema.optional(), host: z.string().trim().min(1, "A proxy host is required.").max(253).optional(), port: z.coerce.number().int().min(1).max(65_535).optional(), username: credentialUpdateSchema, password: credentialUpdateSchema, expectedCountry: nullableCountrySchema, expectedCity: nullableCitySchema, enabled: z.boolean().optional() }).refine((value) => Object.keys(value).length > 0, { message: "Provide at least one field to update." });
+export const updateProxyProfileSchema = z.object({ name: z.string().trim().min(1, "A proxy name is required.").max(80).optional(), provider: proxyProviderSchema.optional(), type: proxyTypeSchema.optional(), protocol: proxyProtocolSchema.optional(), host: z.string().trim().min(1, "A proxy host is required.").max(253).optional(), port: z.coerce.number().int().min(1).max(65_535).optional(), username: credentialUpdateSchema, password: credentialUpdateSchema, expectedCountry: nullableCountrySchema, expectedCity: nullableCitySchema, costPerGbMicrosUsd: costPerGbMicrosUsdSchema.optional(), enabled: z.boolean().optional() }).refine((value) => Object.keys(value).length > 0, { message: "Provide at least one field to update." });
 export type UpdateProxyProfileInput = z.input<typeof updateProxyProfileSchema>;
 
 const shippingDetailsSchema = z.object({
@@ -154,7 +165,7 @@ export const browserHealthSnapshotSchema = z.object({
   monitorEndpoint: z.string().url().nullable().optional(),
   configuredRouteCount: z.number().int().nonnegative().nullable().optional(),
   healthyRouteCount: z.number().int().nonnegative().nullable().optional(),
-  pollIntervalMs: z.number().int().min(500).nullable().optional(),
+  pollIntervalMs: z.number().int().min(200).nullable().optional(),
   lastHttpStatus: z.number().int().min(100).max(599).nullable().optional(),
   lastResponseLatencyMs: z.number().nonnegative().nullable().optional(),
   bytesReceived: z.number().int().nonnegative().nullable().optional(),
@@ -169,15 +180,71 @@ export const runnerProxySchema = z.object({ proxyProfileId: idSchema, proxyName:
 export type RunnerProxy = z.infer<typeof runnerProxySchema>;
 export const monitorRouteSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("DIRECT"), id: z.literal("direct") }),
-  z.object({ kind: z.literal("PROXY"), id: idSchema, protocol: proxyProtocolSchema, host: z.string().min(1), port: z.number().int().min(1).max(65_535), username: z.string().min(1).optional(), password: z.string().min(1).optional() }),
+  z.object({ kind: z.literal("PROXY"), id: idSchema, proxyType: proxyTypeSchema, protocol: proxyProtocolSchema, host: z.string().min(1), port: z.number().int().min(1).max(65_535), username: z.string().min(1).optional(), password: z.string().min(1).optional() }),
 ]);
 export type MonitorRoute = z.infer<typeof monitorRouteSchema>;
-export const monitorPolicySchema = z.object({ access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), pollIntervalMs: z.number().int().min(500), endpoint: z.string().url() });
+export const DEFAULT_MONITOR_BEHAVIOR = {
+  pollIntervalMs: 2_000, fastPollIntervalMs: 500, fastPollDurationMinutes: 5, requestTimeoutMs: 10_000,
+  immediateFirstPoll: true, routeUnhealthyMs: 5 * 60_000, rotateOnProtection: true, serviceCooldownMs: 10_000, honorRetryAfter: true
+} as const;
+export const monitorBehaviorSchema = z.object({
+  pollIntervalMs: z.number().int().min(200).max(60_000),
+  fastPollIntervalMs: z.number().int().min(200).max(5_000),
+  fastPollDurationMinutes: z.number().int().min(1).max(60),
+  requestTimeoutMs: z.number().int().min(1_000).max(30_000),
+  immediateFirstPoll: z.boolean(),
+  routeUnhealthyMs: z.number().int().min(5_000).max(30 * 60_000),
+  rotateOnProtection: z.boolean(),
+  serviceCooldownMs: z.number().int().min(1_000).max(60_000),
+  honorRetryAfter: z.boolean(),
+});
+export type MonitorBehavior = z.infer<typeof monitorBehaviorSchema>;
+export const monitorBehaviorOverrideSchema = monitorBehaviorSchema.partial();
+export type MonitorBehaviorOverride = z.infer<typeof monitorBehaviorOverrideSchema>;
+export const monitorSettingsSchema = z.object({
+  proxyProfileIds: z.array(idSchema).max(50).refine((ids) => new Set(ids).size === ids.length, "Monitor routes must be unique."),
+  defaults: monitorBehaviorSchema,
+  stores: z.record(storeIdSchema, monitorBehaviorOverrideSchema),
+});
+export type MonitorSettings = z.infer<typeof monitorSettingsSchema>;
+export const monitorPolicySchema = monitorBehaviorSchema.extend({
+  access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), endpoint: z.string().url(), recommendedPollIntervalMs: z.number().int().min(200)
+});
 export type MonitorPolicy = z.infer<typeof monitorPolicySchema>;
-export const monitorNetworkSettingsSchema = z.object({ proxyProfileIds: z.array(idSchema).max(20).refine((ids) => new Set(ids).size === ids.length, "Monitor routes must be unique.") });
-export type MonitorNetworkSettings = z.infer<typeof monitorNetworkSettingsSchema>;
-export const persistedMonitorCircuitSchema = z.object({ storeId: storeIdSchema, consecutiveProtectionSignals: z.number().int().nonnegative(), reopenAt: timestampSchema.nullable() });
-export type PersistedMonitorCircuit = z.infer<typeof persistedMonitorCircuitSchema>;
+export const monitorRuntimeStateSchema = z.enum(["STANDBY", "TURBO", "SERVICE_COOLDOWN", "POOL_EXHAUSTED", "STOPPED"]);
+export type MonitorRuntimeState = z.infer<typeof monitorRuntimeStateSchema>;
+export const monitorRuntimeStatusSchema = z.object({
+  runId: idSchema.nullable(), storeId: storeIdSchema.nullable(), state: monitorRuntimeStateSchema,
+  activeIntervalMs: z.number().int().min(200).nullable(), fastEndsAt: timestampSchema.nullable(), nextPollAt: timestampSchema.nullable(),
+  configuredRouteCount: z.number().int().nonnegative(), healthyRouteCount: z.number().int().nonnegative(),
+  lastErrorCode: monitorFailureCodeSchema.nullable(), updatedAt: timestampSchema,
+});
+export type MonitorRuntimeStatus = z.infer<typeof monitorRuntimeStatusSchema>;
+export function defaultMonitorSettings(proxyProfileIds: string[] = []): MonitorSettings {
+  return { proxyProfileIds, defaults: { ...DEFAULT_MONITOR_BEHAVIOR }, stores: {} };
+}
+export function resolveMonitorBehavior(settings: MonitorSettings, storeId: string): MonitorBehavior {
+  return monitorBehaviorSchema.parse({ ...settings.defaults, ...(settings.stores[storeId] ?? {}) });
+}
+
+export const networkUsageCompletenessSchema = z.enum(["EXACT", "PARTIAL", "UNSUPPORTED"]);
+export type NetworkUsageCompleteness = z.infer<typeof networkUsageCompletenessSchema>;
+export const networkUsageSourceSchema = z.enum(["MONITOR", "BROWSER"]);
+export type NetworkUsageSource = z.infer<typeof networkUsageSourceSchema>;
+export const networkUsageCounterSchema = z.object({ receivedBytes: z.number().int().nonnegative(), sentBytes: z.number().int().nonnegative(), requestCount: z.number().int().nonnegative(), completeness: networkUsageCompletenessSchema });
+export type NetworkUsageCounter = z.infer<typeof networkUsageCounterSchema>;
+export const runNetworkUsageSchema = networkUsageCounterSchema.extend({
+  id: idSchema, runId: idSchema, usageKey: z.string().min(1).max(160), source: networkUsageSourceSchema,
+  runSessionId: idSchema.nullable(), storeId: storeIdSchema.nullable(), proxyProfileId: idSchema.nullable(), proxyName: z.string().max(80).nullable(),
+  costPerGbMicrosUsd: costPerGbMicrosUsdSchema, estimatedCostMicrosUsd: z.number().int().nonnegative().nullable(), updatedAt: timestampSchema,
+});
+export type RunNetworkUsage = z.infer<typeof runNetworkUsageSchema>;
+export const networkUsageTotalsSchema = networkUsageCounterSchema.extend({ estimatedCostMicrosUsd: z.number().int().nonnegative().nullable() });
+export type NetworkUsageTotals = z.infer<typeof networkUsageTotalsSchema>;
+export function estimateProxyCostMicrosUsd(receivedBytes: number, sentBytes: number, costPerGbMicrosUsd: number | null): number | null {
+  if (costPerGbMicrosUsd === null) return null;
+  return Math.round(((receivedBytes + sentBytes) * costPerGbMicrosUsd) / 1_000_000_000);
+}
 export const runnerShippingSchema = shippingDetailsSchema;
 export type RunnerShipping = z.infer<typeof runnerShippingSchema>;
 
@@ -247,6 +314,7 @@ export const runnerEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("RUN_ENDED"), version: z.literal(IPC_VERSION), profileId: idSchema, runSessionId: idSchema }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_REQUEST"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema, value: z.string().min(1).max(512) }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_RELEASE"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema }),
+  z.object({ type: z.literal("NETWORK_USAGE"), version: z.literal(IPC_VERSION), profileId: idSchema, runId: idSchema, runSessionId: idSchema, usage: networkUsageCounterSchema }),
   z.object({ type: z.literal("HEALTH"), version: z.literal(IPC_VERSION), profileId: idSchema, health: browserHealthSnapshotSchema.omit({ id: true, subjectKind: true, subjectId: true, runId: true }) })
 ]);
 export type RunnerEvent = z.infer<typeof runnerEventSchema>;
@@ -254,6 +322,7 @@ export type RunnerEvent = z.infer<typeof runnerEventSchema>;
 export const monitorCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("START_MONITOR"), version: z.literal(IPC_VERSION), runId: idSchema, target: targetSnapshotSchema, policy: monitorPolicySchema, routes: z.array(monitorRouteSchema).max(20) }),
   z.object({ type: z.literal("TEST_TARGET"), version: z.literal(IPC_VERSION), target: targetSnapshotSchema, policy: monitorPolicySchema, routes: z.array(monitorRouteSchema).max(20) }),
+  z.object({ type: z.literal("SET_MONITOR_TURBO"), version: z.literal(IPC_VERSION), enabled: z.boolean() }),
   z.object({ type: z.literal("PAUSE_MONITOR"), version: z.literal(IPC_VERSION), until: timestampSchema }),
   z.object({ type: z.literal("RESUME_MONITOR"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("STOP_MONITOR"), version: z.literal(IPC_VERSION) })
@@ -263,6 +332,8 @@ export const monitorEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("MONITOR_EVENT"), version: z.literal(IPC_VERSION), runId: idSchema.nullable(), eventType: z.string().min(1).max(80), check: targetCheckSchema.nullable() }),
   z.object({ type: z.literal("MONITOR_TEST_RESULT"), version: z.literal(IPC_VERSION), check: targetCheckSchema }),
   z.object({ type: z.literal("MONITOR_HEALTH"), version: z.literal(IPC_VERSION), runId: idSchema.nullable(), health: browserHealthSnapshotSchema.omit({ id: true, subjectKind: true, subjectId: true, runId: true }) }),
+  z.object({ type: z.literal("MONITOR_RUNTIME"), version: z.literal(IPC_VERSION), status: monitorRuntimeStatusSchema }),
+  z.object({ type: z.literal("MONITOR_USAGE"), version: z.literal(IPC_VERSION), runId: idSchema, routeId: z.string().min(1).max(120), usage: networkUsageCounterSchema }),
   z.object({ type: z.literal("MONITOR_STOPPED"), version: z.literal(IPC_VERSION), runId: idSchema.nullable() })
 ]);
 export type MonitorEvent = z.infer<typeof monitorEventSchema>;
@@ -280,7 +351,9 @@ export const healthIpc = { get: "health:get", changed: "health:changed" } as con
 export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks" } as const;
 export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", changed: "shipping:changed" } as const;
 export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;
-export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", getMonitorNetwork: "settings:get-monitor-network", updateMonitorNetwork: "settings:update-monitor-network", appInfo: "settings:app-info" } as const;
+export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", getMonitor: "settings:get-monitor", updateMonitor: "settings:update-monitor", appInfo: "settings:app-info" } as const;
+export const monitorIpc = { status: "monitor:status", setTurbo: "monitor:set-turbo", changed: "monitor:changed" } as const;
+export const usageIpc = { run: "usage:run", totals: "usage:totals" } as const;
 export type AppInfo = { version: string; electronVersion: string; chromeVersion: string | null; osVersion: string };
 export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", emptyCarts: "sessions:empty-carts", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
 export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", changed: "runs:changed" } as const;

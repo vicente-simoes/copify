@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IPC_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, networkProbeSettingsSchema, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -71,6 +71,14 @@ describe("shared contracts", () => {
     expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId }).executionMode).toBe("ASSISTED_CHECKOUT");
     expect(createShippingProfileSchema.parse({ name: "Home", details: { fullName: "Ada Lovelace", email: "ada@example.com", phone: "+351 1", address1: "1 Main St", postalCode: "1000", city: "Lisbon", country: "pt" } }).details.country).toBe("PT");
     expect(updateShippingProfileSchema.parse({ details: null })).toEqual({ details: null });
+  });
+  it("supports DataImpulse metadata, monitor overrides, and integer cost estimates", () => {
+    const proxy = createProxyProfileSchema.parse({ name: "PT rotating", provider: "dataimpulse", type: "residential-rotating", host: "gw.dataimpulse.com", port: 823, costPerGbMicrosUsd: 1_000_000 });
+    expect(proxy).toMatchObject({ provider: "dataimpulse", type: "residential-rotating", costPerGbMicrosUsd: 1_000_000 });
+    const settings = defaultMonitorSettings(); settings.stores["supreme-eu"] = { pollIntervalMs: 300 };
+    expect(monitorSettingsSchema.parse(settings)).toEqual(settings);
+    expect(resolveMonitorBehavior(settings, "supreme-eu").pollIntervalMs).toBe(300);
+    expect(estimateProxyCostMicrosUsd(1_000_000_000, 0, 1_000_000)).toBe(1_000_000);
   });
   it("records the terminal assisted-checkout handoff as ready to confirm", () => {
     expect(runExecutionStateSchema.parse("READY_TO_CONFIRM")).toBe("READY_TO_CONFIRM");

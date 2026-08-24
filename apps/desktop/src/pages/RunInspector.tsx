@@ -1,4 +1,5 @@
-import { type RunDetail, type RunEvent, type RunSession } from "@copify/shared";
+import { useEffect, useState } from "react";
+import { type RunDetail, type RunEvent, type RunNetworkUsage, type RunSession } from "@copify/shared";
 import { fromMinor } from "../types";
 import { Route } from "../ui/primitives";
 import { BackIcon } from "../ui/icons";
@@ -74,6 +75,8 @@ function Gantt({ detail }: { detail: RunDetail }) {
 }
 
 export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; onBack: () => void; onDelete: () => void }) {
+  const [usage, setUsage] = useState<RunNetworkUsage[]>([]);
+  useEffect(() => { void window.copify.usage.run(detail.run.id).then((result) => { if (result.ok) setUsage(result.value); }); }, [detail.run.id]);
   const target = detail.run.targetSnapshot;
   const duration = detail.run.endedAt ? detail.run.endedAt - detail.run.startedAt : null;
   const recording = detail.run.status === "STARTING" || detail.run.status === "RECORDING";
@@ -111,6 +114,14 @@ export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; 
 
         <Gantt detail={detail} />
       </section>
+
+      {usage.length > 0 && <section className="panel">
+        <div className="section-title"><div><h2>Network usage</h2><p className="muted">Application-observed bytes; tunnel overhead is excluded.</p></div></div>
+        <div className="rows">
+          {usage.map((row) => <div className="row" key={row.id}><span className="row-main"><span className="row-name">{row.source.toLowerCase()} · {row.proxyName ?? "Direct"}</span><span className="row-meta">{row.requestCount.toLocaleString()} requests · {row.completeness.toLowerCase()}</span></span><span className="row-cell mono">{((row.receivedBytes + row.sentBytes) / 1_000_000).toFixed(2)} MB</span><span className="row-cell mono">{row.estimatedCostMicrosUsd === null ? "—" : `$${(row.estimatedCostMicrosUsd / 1_000_000).toFixed(4)}`}</span></div>)}
+          <div className="row"><span className="row-main"><span className="row-name">Total</span></span><span className="row-cell mono">{(usage.reduce((sum, row) => sum + row.receivedBytes + row.sentBytes, 0) / 1_000_000).toFixed(2)} MB</span><span className="row-cell mono">${(usage.reduce((sum, row) => sum + (row.estimatedCostMicrosUsd ?? 0), 0) / 1_000_000).toFixed(4)}</span></div>
+        </div>
+      </section>}
 
       <section className="panel">
         <div className="section-title"><h2>Sessions</h2></div>

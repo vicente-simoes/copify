@@ -215,9 +215,11 @@ function App() {
   };
   const saveProxy = async (event: React.FormEvent) => {
     event.preventDefault();
+    const { costPerGbUsd, ...draft } = proxyDraft;
     const input = {
-      ...proxyDraft,
+      ...draft,
       expectedCountry: proxyDraft.expectedCountry?.trim() || null,
+      costPerGbMicrosUsd: costPerGbUsd.trim() ? Math.round(Number(costPerGbUsd) * 1_000_000) : null,
       username: proxyDraft.username || undefined,
       password: proxyDraft.password || undefined,
     };
@@ -237,6 +239,7 @@ function App() {
     setProxyDrawerOpen(true);
     setProxyDraft({
       name: proxy.name,
+      provider: proxy.provider,
       type: proxy.type,
       protocol: proxy.protocol,
       host: proxy.host,
@@ -244,6 +247,7 @@ function App() {
       username: "",
       password: "",
       expectedCountry: proxy.expectedCountry ?? undefined,
+      costPerGbUsd: proxy.costPerGbMicrosUsd === null ? "" : (proxy.costPerGbMicrosUsd / 1_000_000).toFixed(2),
       enabled: proxy.enabled,
     });
   };

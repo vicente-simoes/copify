@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorNetworkSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type MonitorNetworkSettings, type MonitorPolicy, type MonitorRoute, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, resolveMonitorBehavior, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc,
+  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -19,9 +19,9 @@ let orchestrator: SessionOrchestrator;
 let clipboardCoordinator: ClipboardCoordinator;
 let benchmarkRunning = false;
 let runsRoot = "";
-type ProtectionCircuit = { state: "CLOSED" | "OPEN"; consecutiveProtectionSignals: number; reopenAt: number | null; timer?: NodeJS.Timeout };
-type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; circuit: ProtectionCircuit };
+type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; monitorRouteProfiles: Map<string, ProxyProfile> };
 let activeRun: ActiveRun | undefined;
+let monitorStatus: MonitorRuntimeStatus = { runId: null, storeId: null, state: "STOPPED", activeIntervalMs: null, fastEndsAt: null, nextPollAt: null, configuredRouteCount: 0, healthyRouteCount: 0, lastErrorCode: null, updatedAt: Date.now() };
 const cartStatuses = new Map<string, CartStatus>();
 const closeAfterCartCheck = new Set<string>();
 const intentionallyStoppedMonitors = new WeakSet<ChildProcess>();
@@ -34,6 +34,7 @@ function emitRunSetupsChanged(): void { void profiles.listRunSetups().then((setu
 function emitTargetsChanged(): void { void profiles.listTargets().then((targets) => mainWindow?.webContents.send(targetIpc.changed, targets)); }
 function emitShippingChanged(): void { void profiles.listShippingProfiles().then((shipping) => mainWindow?.webContents.send(shippingIpc.changed, shipping)); }
 function emitHealthChanged(): void { mainWindow?.webContents.send(healthIpc.changed); }
+function emitMonitorChanged(): void { mainWindow?.webContents.send(monitorIpc.changed, monitorStatus); }
 
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
@@ -73,7 +74,7 @@ function registerIpc(): void {
   ipcMain.handle(targetIpc.create, (_event, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { const parsed = createTargetSchema.parse(input); assertKnownStore(parsed.storeId); const created = await profiles.createTarget(parsed); emitTargetsChanged(); return created; }));
   ipcMain.handle(targetIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { assertTargetInactive(id); const parsed = updateTargetSchema.parse(input); assertKnownStore(parsed.storeId); const updated = await profiles.updateTarget(id, parsed); emitTargetsChanged(); return updated; }));
   ipcMain.handle(targetIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertTargetInactive(id); const removed = await profiles.removeTarget(id); emitTargetsChanged(); return removed; }));
-  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (!isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet."); const minimum = getStoreManifest(target.storeId)?.monitorPolicy?.minimumPollIntervalMs ?? 0; const elapsed = target.latestCheck ? Date.now() - target.latestCheck.checkedAt : Number.POSITIVE_INFINITY; if (elapsed < minimum) throw new Error(`This public target can be checked again in ${Math.ceil((minimum - elapsed) / 1_000)} seconds.`); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
+  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (!isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet."); const policy = await monitorPolicy(snapshotTarget(target)); const elapsed = target.latestCheck ? Date.now() - target.latestCheck.checkedAt : Number.POSITIVE_INFINITY; if (elapsed < policy.pollIntervalMs) throw new Error(`This target can be checked again in ${Math.ceil((policy.pollIntervalMs - elapsed) / 1_000)} seconds.`); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
 
   ipcMain.handle(shippingIpc.list, (): Promise<ApiResult<ShippingProfile[]>> => resultAsync(() => profiles.listShippingProfiles()));
   ipcMain.handle(shippingIpc.create, (_event, input: unknown): Promise<ApiResult<ShippingProfile>> => resultAsync(async () => { const parsed = createShippingProfileSchema.parse(input); const created = await profiles.createShippingProfile(parsed, await encryptSecret(JSON.stringify(parsed.details))); emitShippingChanged(); return created; }));
@@ -94,8 +95,12 @@ function registerIpc(): void {
 
   ipcMain.handle(settingsIpc.getNetworkProbe, (): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => ({ probeUrl: await profiles.getNetworkProbeUrl() })));
   ipcMain.handle(settingsIpc.updateNetworkProbe, (_event, input: unknown): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => { const { probeUrl } = networkProbeSettingsSchema.parse(input); return { probeUrl: await profiles.setNetworkProbeUrl(probeUrl) }; }));
-  ipcMain.handle(settingsIpc.getMonitorNetwork, (): Promise<ApiResult<MonitorNetworkSettings>> => resultAsync(() => profiles.getMonitorNetworkSettings()));
-  ipcMain.handle(settingsIpc.updateMonitorNetwork, (_event, input: unknown): Promise<ApiResult<MonitorNetworkSettings>> => resultAsync(() => profiles.setMonitorNetworkSettings(monitorNetworkSettingsSchema.parse(input))));
+  ipcMain.handle(settingsIpc.getMonitor, (): Promise<ApiResult<MonitorSettings>> => resultAsync(() => profiles.getMonitorSettings()));
+  ipcMain.handle(settingsIpc.updateMonitor, (_event, input: unknown): Promise<ApiResult<MonitorSettings>> => resultAsync(() => profiles.setMonitorSettings(monitorSettingsSchema.parse(input))));
+  ipcMain.handle(monitorIpc.status, (): ApiResult<MonitorRuntimeStatus> => result(() => monitorStatus));
+  ipcMain.handle(monitorIpc.setTurbo, (_event, enabled: boolean): ApiResult<MonitorRuntimeStatus> => result(() => { if (!activeRun?.monitor || !trySendMonitorCommand(activeRun.monitor, { type: "SET_MONITOR_TURBO", version: IPC_VERSION, enabled: Boolean(enabled) })) throw new Error("There is no active target monitor."); return monitorStatus; }));
+  ipcMain.handle(usageIpc.run, (_event, runId: string): Promise<ApiResult<RunNetworkUsage[]>> => resultAsync(() => profiles.listRunNetworkUsage(runId)));
+  ipcMain.handle(usageIpc.totals, (): Promise<ApiResult<RunNetworkUsage[]>> => resultAsync(() => profiles.listNetworkUsage()));
 
   ipcMain.handle(sessionIpc.list, (): ApiResult<SessionSnapshot[]> => result(() => orchestrator.list()));
   ipcMain.handle(sessionIpc.open, (_event, id: string): Promise<ApiResult<SessionSnapshot>> => resultAsync(() => openSession(id)));
@@ -133,12 +138,16 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   const target = input.targetId ? await requireTarget(input.targetId) : null;
   if (target && !target.enabled) throw new Error("Select an enabled target for monitoring."); if (target && !isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet.");
   if (input.executionMode === "ASSISTED_CHECKOUT" && target && !supportsAssistedCheckout(target.storeId)) throw new Error("This store does not support assisted checkout.");
+  if (input.executionMode === "ASSISTED_CHECKOUT") {
+    const proxyById = new Map((await profiles.listProxies()).map((proxy) => [proxy.id, proxy]));
+    const rotating = selected.find((profile) => profile.proxyProfileId && proxyById.get(profile.proxyProfileId)?.type === "residential-rotating");
+    if (rotating) throw new Error(`${rotating.name} uses a rotating residential route. Assisted checkout requires a direct, sticky, or static route.`);
+  }
   const targetSnapshot = target ? snapshotTarget(target) : null;
   const specifications = await Promise.all(selected.map(async (profile) => ({ ...(await launchSpec(profile)), shipping: profile.shippingProfileId ? await profiles.getShippingProfile(profile.shippingProfileId) : undefined })));
   const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, assistedEligible: input.executionMode === "ASSISTED_CHECKOUT" && Boolean(shipping?.enabled && shipping?.complete), executionState: input.executionMode === "ASSISTED_CHECKOUT" && shipping?.enabled && shipping.complete ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, status: "STARTING", startedAt, endedAt: null, finalError: null }));
   const environment = runEnvironment(); const detail = await profiles.createRun(input, environment, sessions, targetSnapshot);
-  const storedCircuit = targetSnapshot ? await profiles.getMonitorCircuit(targetSnapshot.storeId) : null; const reopenAt = storedCircuit?.reopenAt && storedCircuit.reopenAt > Date.now() ? storedCircuit.reopenAt : null;
-  const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), circuit: { state: reopenAt ? "OPEN" : "CLOSED", consecutiveProtectionSignals: storedCircuit?.consecutiveProtectionSignals ?? 0, reopenAt } };
+  const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), monitorRouteProfiles: new Map() };
   const root = runDirectory(detail.run.id); await mkdir(root, { recursive: true }); await writeFile(join(root, "run.json"), JSON.stringify(detail.run, null, 2));
   await Promise.all(specifications.map(async ({ profile, driver, proxy }) => {
     const session = profileSessions.get(profile.id)!; const artifactDir = join(root, session.id); await mkdir(artifactDir, { recursive: true }); await writeFile(join(artifactDir, "manifest.json"), JSON.stringify({ runId: detail.run.id, runSessionId: session.id, profileId: profile.id, diagnosticLevel: input.diagnosticLevel }, null, 2));
@@ -213,32 +222,45 @@ function runEnvironment(): RunEnvironment { return { appVersion: app.getVersion(
 function runDirectory(id: string): string { const root = resolve(runsRoot); const candidate = resolve(root, id); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid run artifact path."); return candidate; }
 function elapsedSince(active: ActiveRun): string { return (BigInt(Date.now() - active.detail.run.startedAt) * 1_000_000n).toString(); }
 
-function monitorPolicy(target: TargetSnapshot): MonitorPolicy { const policy = getStoreManifest(target.storeId)?.monitorPolicy; if (!policy) throw new Error("MONITOR_ENDPOINT_UNSUPPORTED"); return { access: policy.access, pollIntervalMs: policy.minimumPollIntervalMs, endpoint: policy.endpoint }; }
-async function monitorRoutes(): Promise<MonitorRoute[]> {
-  const settings = await profiles.getMonitorNetworkSettings(); const routes: MonitorRoute[] = [];
-  for (const id of settings.proxyProfileIds) { const stored = await profiles.getStoredProxy(id); if (!stored?.enabled) continue; routes.push({ kind: "PROXY", id: stored.id, protocol: stored.protocol, host: stored.host, port: stored.port, ...(stored.usernameCiphertext ? { username: await decryptSecret(stored.usernameCiphertext) } : {}), ...(stored.passwordCiphertext ? { password: await decryptSecret(stored.passwordCiphertext) } : {}) }); }
+async function monitorPolicy(target: TargetSnapshot): Promise<MonitorPolicy> { const manifest = getStoreManifest(target.storeId)?.monitorPolicy; if (!manifest) throw new Error("MONITOR_ENDPOINT_UNSUPPORTED"); const behavior = resolveMonitorBehavior(await profiles.getMonitorSettings(), target.storeId); return { ...behavior, access: manifest.access, endpoint: manifest.endpoint, recommendedPollIntervalMs: manifest.recommendedPollIntervalMs }; }
+async function monitorRoutes(active?: ActiveRun): Promise<MonitorRoute[]> {
+  const settings = await profiles.getMonitorSettings(); const routes: MonitorRoute[] = []; active?.monitorRouteProfiles.clear();
+  for (const id of settings.proxyProfileIds) { const stored = await profiles.getStoredProxy(id); if (!stored?.enabled) continue; active?.monitorRouteProfiles.set(id, stored); routes.push({ kind: "PROXY", id: stored.id, proxyType: stored.type, protocol: stored.protocol, host: stored.host, port: stored.port, ...(stored.usernameCiphertext ? { username: await decryptSecret(stored.usernameCiphertext) } : {}), ...(stored.passwordCiphertext ? { password: await decryptSecret(stored.passwordCiphertext) } : {}) }); }
   return routes;
 }
 async function startMonitor(runId: string, target: TargetSnapshot): Promise<ChildProcess> {
+  const active = activeRun; const policy = await monitorPolicy(target); const routes = await monitorRoutes(active);
+  if (active?.detail.run.id === runId) await appendMonitorEvent(runId, "MONITOR_POLICY_APPLIED", null, JSON.stringify({ storeId: target.storeId, pollIntervalMs: policy.pollIntervalMs, fastPollIntervalMs: policy.fastPollIntervalMs, fastPollDurationMinutes: policy.fastPollDurationMinutes, requestTimeoutMs: policy.requestTimeoutMs, immediateFirstPoll: policy.immediateFirstPoll, routeUnhealthyMs: policy.routeUnhealthyMs, rotateOnProtection: policy.rotateOnProtection, serviceCooldownMs: policy.serviceCooldownMs, honorRetryAfter: policy.honorRetryAfter, configuredRouteCount: routes.length || 1 }));
   const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
   worker.on("message", (value) => { void onMonitorEvent(value); }); worker.once("exit", () => {
+    if (activeRun?.monitor === worker) activeRun.monitor = undefined;
     if (intentionallyStoppedMonitors.delete(worker)) return;
     if (activeRun?.detail.run.id === runId && !activeRun.ending) void appendMonitorEvent(runId, "TARGET_MONITOR_FAILED", null, "The shared monitor exited unexpectedly.");
   });
-  worker.send({ type: "START_MONITOR", version: IPC_VERSION, runId, target, policy: monitorPolicy(target), routes: await monitorRoutes() }); return worker;
+  if (!trySendMonitorCommand(worker, { type: "START_MONITOR", version: IPC_VERSION, runId, target, policy, routes })) throw new Error("The target monitor could not be started."); return worker;
 }
 function stopMonitor(active: ActiveRun): void {
-  if (active.circuit.timer) { clearTimeout(active.circuit.timer); active.circuit.timer = undefined; }
   const worker = active.monitor;
   if (!worker) return;
   intentionallyStoppedMonitors.add(worker);
-  worker.send({ type: "STOP_MONITOR", version: IPC_VERSION });
-  setTimeout(() => { if (worker.exitCode === null) worker.kill(); }, 3_000).unref();
+  trySendMonitorCommand(worker, { type: "STOP_MONITOR", version: IPC_VERSION });
+  setTimeout(() => { if (worker.exitCode === null && !worker.killed) worker.kill(); }, 3_000).unref();
   active.monitor = undefined;
 }
+
+function trySendMonitorCommand(worker: ChildProcess, command: MonitorCommand): boolean {
+  if (!worker.connected || worker.killed || worker.exitCode !== null) return false;
+  try {
+    worker.send(command, (error) => {
+      if (error && (error as NodeJS.ErrnoException).code !== "ERR_IPC_CHANNEL_CLOSED") console.error("Monitor IPC send failed:", message(error));
+    });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ERR_IPC_CHANNEL_CLOSED") console.error("Monitor IPC send failed:", message(error));
+    return false;
+  }
+}
 async function testTarget(target: Target): Promise<TargetCheck> {
-  const circuit = await profiles.getMonitorCircuit(target.storeId);
-  if (circuit.reopenAt && circuit.reopenAt > Date.now()) throw new Error(`Storefront monitor cooldown is active until ${new Date(circuit.reopenAt).toLocaleTimeString()}.`);
   const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "inherit", "inherit", "ipc"] }); const snapshot = snapshotTarget(target);
   let settled = false;
   const check = await new Promise<TargetCheck>((resolve, reject) => {
@@ -246,26 +268,28 @@ async function testTarget(target: Target): Promise<TargetCheck> {
     worker.on("message", (value) => { const event = monitorEventSchema.safeParse(value); if (event.success && event.data.type === "MONITOR_TEST_RESULT") { if (!settled) { settled = true; clearTimeout(timeout); resolve(event.data.check); worker.kill(); } } });
     worker.once("exit", (code) => { if (!settled && code && code !== 0) { settled = true; clearTimeout(timeout); reject(new Error(`Target test monitor exited unexpectedly (code ${code}).`)); } });
     worker.on("error", (err) => { if (!settled) { settled = true; clearTimeout(timeout); reject(new Error(`Target test monitor error: ${err.message}`)); } });
-    void monitorRoutes().then((routes) => worker.send({ type: "TEST_TARGET", version: IPC_VERSION, target: snapshot, policy: monitorPolicy(snapshot), routes })).catch((err) => { if (!settled) { settled = true; clearTimeout(timeout); worker.kill(); reject(err); } });
+    void Promise.all([monitorRoutes(), monitorPolicy(snapshot)]).then(([routes, policy]) => {
+      if (!trySendMonitorCommand(worker, { type: "TEST_TARGET", version: IPC_VERSION, target: snapshot, policy, routes })) throw new Error("The target test monitor could not be started.");
+    }).catch((err) => { if (!settled) { settled = true; clearTimeout(timeout); worker.kill(); reject(err); } });
   });
-  if (isProtectionCheck(check)) { const count = circuit.consecutiveProtectionSignals + 1; await profiles.setMonitorCircuit({ storeId: target.storeId, consecutiveProtectionSignals: count, reopenAt: Date.now() + circuitDelay(count, check.retryAfterMs) }); }
-  else if (check.status === "SUCCESS") await profiles.setMonitorCircuit({ storeId: target.storeId, consecutiveProtectionSignals: 0, reopenAt: null });
   return check;
 }
 async function onMonitorEvent(value: unknown): Promise<void> {
   const parsed = monitorEventSchema.safeParse(value); if (!parsed.success) return; const event: MonitorEvent = parsed.data;
   const active = activeRun;
+  if (event.type === "MONITOR_RUNTIME") { monitorStatus = event.status; emitMonitorChanged(); return; }
+  if (event.type === "MONITOR_USAGE") {
+    if (!active || event.runId !== active.detail.run.id) return; const proxy = active.monitorRouteProfiles.get(event.routeId); const costRate = proxy?.costPerGbMicrosUsd ?? null;
+    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `monitor:${event.routeId}`, source: "MONITOR", runSessionId: null, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (event.routeId === "direct" ? "Direct" : null), ...event.usage, costPerGbMicrosUsd: costRate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, costRate), updatedAt: Date.now() }); emitMonitorChanged(); return;
+  }
   if (event.type === "MONITOR_HEALTH") {
     if (!active || event.runId !== active.detail.run.id) return;
-    await saveHealth({ ...event.health, id: randomUUID(), subjectKind: "WATCHER", subjectId: active.detail.run.targetSnapshot?.storeId ?? "watcher", runId: active.detail.run.id, circuit: circuitSnapshot(active) });
+    await saveHealth({ ...event.health, id: randomUUID(), subjectKind: "WATCHER", subjectId: active.detail.run.targetSnapshot?.storeId ?? "watcher", runId: active.detail.run.id, circuit: null });
     return;
   }
   if (event.type !== "MONITOR_EVENT" || !active || event.runId !== active.detail.run.id) return;
   await appendMonitorEvent(active.detail.run.id, event.eventType, event.check, null);
-  if (isProtectionCheck(event.check)) await tripCircuit(active, event.check?.errorMessage ?? "Storefront protection detected.", event.check?.retryAfterMs);
-  else if (/\b503\b/.test(event.check?.errorMessage ?? "")) await tripServiceCooldown(active, event.check?.retryAfterMs);
-  else if (event.check?.status === "SUCCESS") resetCircuitAfterSuccess(active);
-  if (active.circuit.state === "CLOSED" && active.detail.run.executionMode === "ASSISTED_CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) {
+  if (active.detail.run.executionMode === "ASSISTED_CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) {
     active.assistedDispatched = true;
     active.pendingAssist = event.check;
     await dispatchAssistedTarget(active, event.check);
@@ -289,45 +313,17 @@ async function promoteReadySession(active: ActiveRun, session: RunSession): Prom
   active.priorityProfileId = session.browserProfileId;
   await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "LIVE_SESSION_PRIORITIZED", stateBefore: null, stateAfter: "READY_TO_CONFIRM", payload: { browserProfileId: session.browserProfileId, browserProfileName: session.browserProfileName, message: "This is the first session ready for manual payment review and confirmation." } });
 }
-function isProtectionCheck(check: TargetCheck | null): boolean {
-  return Boolean(check?.errorMessage && /\b(?:403|429)\b|too many requests|rate limit|captcha|access (?:denied|challenge)|security[ -]check|verify you are human|just a moment/i.test(check.errorMessage));
-}
-function circuitSnapshot(active: ActiveRun): BrowserHealthSnapshot["circuit"] { return { state: active.circuit.state, consecutiveProtectionSignals: active.circuit.consecutiveProtectionSignals, reopenAt: active.circuit.reopenAt }; }
-function circuitDelay(count: number, retryAfterMs: number | null | undefined = null): number { return Math.max(retryAfterMs ?? 0, Math.min(15 * 60_000 * (2 ** Math.max(0, count - 1)), 6 * 60 * 60_000)); }
-async function tripCircuit(active: ActiveRun, reason: string, retryAfterMs: number | null | undefined = null): Promise<void> {
-  const circuit = active.circuit; circuit.consecutiveProtectionSignals += 1; circuit.state = "OPEN"; circuit.reopenAt = Date.now() + circuitDelay(circuit.consecutiveProtectionSignals, retryAfterMs);
-  const storeId = active.detail.run.targetSnapshot?.storeId; if (storeId) await profiles.setMonitorCircuit({ storeId, consecutiveProtectionSignals: circuit.consecutiveProtectionSignals, reopenAt: circuit.reopenAt });
-  if (circuit.timer) clearTimeout(circuit.timer);
-  active.monitor?.send({ type: "PAUSE_MONITOR", version: IPC_VERSION, until: circuit.reopenAt });
-  for (const profileId of active.profileSessions.keys()) orchestrator.pauseAutomation(profileId, circuit.reopenAt);
-  await appendMonitorEvent(active.detail.run.id, "STOREFRONT_PROTECTION_CIRCUIT_OPEN", null, `Automation paused until ${new Date(circuit.reopenAt).toLocaleTimeString()}: ${reason}`);
-  circuit.timer = setTimeout(() => {
-    if (activeRun !== active || active.ending) return;
-    circuit.state = "CLOSED"; circuit.reopenAt = null; if (storeId) void profiles.setMonitorCircuit({ storeId, consecutiveProtectionSignals: circuit.consecutiveProtectionSignals, reopenAt: null }); active.monitor?.send({ type: "RESUME_MONITOR", version: IPC_VERSION });
-    for (const profileId of active.profileSessions.keys()) orchestrator.resumeAutomation(profileId);
-    void appendMonitorEvent(active.detail.run.id, "STOREFRONT_PROTECTION_CIRCUIT_CLOSED", null, "The protection cooldown elapsed; monitoring resumed."); emitRunsChanged(); emitHealthChanged();
-  }, Math.max(0, circuit.reopenAt - Date.now()));
-  emitRunsChanged(); emitHealthChanged();
-}
-async function tripServiceCooldown(active: ActiveRun, retryAfterMs: number | null | undefined = null): Promise<void> {
-  const cooldownMs = Math.max(60_000, retryAfterMs ?? 0); const circuit = active.circuit; circuit.state = "OPEN"; circuit.reopenAt = Date.now() + cooldownMs; if (circuit.timer) clearTimeout(circuit.timer); active.monitor?.send({ type: "PAUSE_MONITOR", version: IPC_VERSION, until: circuit.reopenAt });
-  await appendMonitorEvent(active.detail.run.id, "STOREFRONT_SERVICE_COOLDOWN_STARTED", null, `HTTP 503 paused every monitor route for ${Math.ceil(cooldownMs / 1_000)} seconds.`);
-  circuit.timer = setTimeout(() => { if (activeRun !== active || active.ending) return; circuit.state = "CLOSED"; circuit.reopenAt = null; circuit.timer = undefined; active.monitor?.send({ type: "RESUME_MONITOR", version: IPC_VERSION }); void appendMonitorEvent(active.detail.run.id, "STOREFRONT_SERVICE_COOLDOWN_ENDED", null, "The service cooldown elapsed; monitoring resumed."); emitRunsChanged(); emitHealthChanged(); }, cooldownMs);
-}
-function resetCircuitAfterSuccess(active: ActiveRun): void { if (active.circuit.state === "CLOSED") { active.circuit.consecutiveProtectionSignals = 0; const storeId = active.detail.run.targetSnapshot?.storeId; if (storeId) void profiles.setMonitorCircuit({ storeId, consecutiveProtectionSignals: 0, reopenAt: null }); } }
 async function saveHealth(snapshot: BrowserHealthSnapshot): Promise<void> { await profiles.addBrowserHealthSnapshot(snapshot); emitHealthChanged(); }
 async function appendMonitorEvent(runId: string, type: string, check: TargetCheck | null, fallback: string | null): Promise<void> {
   const active = activeRun; if (!active || active.detail.run.id !== runId) return; const decision = check?.decision;
-  await profiles.addRunEvent({ id: randomUUID(), runId, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type, stateBefore: null, stateAfter: null, payload: check ? { checkedAt: check.checkedAt, status: check.status, candidateCount: check.candidateCount, decision: decision?.kind, message: decision?.message, candidate: decision?.candidate ? { name: decision.candidate.name, url: decision.candidate.url, imageUrl: decision.candidate.imageUrl, priceMinor: decision.candidate.priceMinor, currency: decision.candidate.currency, variants: decision.candidate.variants } : null, selectedVariant: decision?.selectedVariant ?? null, retryAfterMs: check.retryAfterMs ?? null, errorMessage: check.errorMessage } : { message: fallback } });
+  await profiles.addRunEvent({ id: randomUUID(), runId, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type, stateBefore: null, stateAfter: null, payload: check ? { checkedAt: check.checkedAt, status: check.status, candidateCount: check.candidateCount, decision: decision?.kind, message: decision?.message, candidate: decision?.candidate ? { name: decision.candidate.name, url: decision.candidate.url, imageUrl: decision.candidate.imageUrl, priceMinor: decision.candidate.priceMinor, currency: decision.candidate.currency, variants: decision.candidate.variants } : null, selectedVariant: decision?.selectedVariant ?? null, retryAfterMs: check.retryAfterMs ?? null, errorMessage: check.errorMessage, errorCode: check.errorCode ?? null, routeId: check.routeId ?? null, routeAction: check.routeAction ?? "NONE" } : { message: fallback } });
 }
 
 async function onSessionChanged(snapshot: SessionSnapshot): Promise<void> {
   if (snapshot.state === "STOPPED" || snapshot.state === "ERROR" || snapshot.state === "CRASHED") clipboardCoordinator.cancelProfile(snapshot.profileId);
   mainWindow?.webContents.send(sessionIpc.changed, snapshot); const active = activeRun; const runSession = active?.profileSessions.get(snapshot.profileId); if (!active || !runSession) return;
   if (canStartTargetMonitor(Boolean(active.detail.run.targetSnapshot), Boolean(active.monitor), active.ending, snapshot.state)) {
-    if (active.circuit.state === "OPEN" && active.circuit.reopenAt && active.circuit.reopenAt > Date.now()) {
-      if (!active.circuit.timer) active.circuit.timer = setTimeout(() => { if (activeRun !== active || active.ending) return; active.circuit.state = "CLOSED"; active.circuit.reopenAt = null; active.circuit.timer = undefined; void startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!).then((worker) => { if (activeRun === active) active.monitor = worker; else worker.kill(); }); }, active.circuit.reopenAt - Date.now());
-    } else active.monitor = await startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!);
+    active.monitor = await startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!);
   }
   if (snapshot.state === "READY") { runSession.status = "RECORDING"; runSession.route = snapshot.route; await profiles.setRunSession(runSession.id, "RECORDING", snapshot.route); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: runSession.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "SESSION_READY", stateBefore: "STARTING", stateAfter: "RECORDING", payload: { route: snapshot.route.kind, verification: snapshot.route.verification.status } }); await profiles.setRunStatus(active.detail.run.id, "RECORDING"); if (active.pendingAssist) await dispatchAssistedTarget(active, active.pendingAssist); emitRunsChanged(); }
   if (snapshot.state === "ERROR" || snapshot.state === "CRASHED") await recordSessionFailure(snapshot.profileId, runSession, snapshot.error ?? { code: "RUNNER_CRASHED", message: "The browser runner exited unexpectedly." });
@@ -355,19 +351,23 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
   if (event.type === "CART_STATUS") { const status: CartStatus = { profileId: event.profileId, ...event.status }; cartStatuses.set(event.profileId, status); mainWindow?.webContents.send(sessionIpc.cartChanged, status); if (closeAfterCartCheck.delete(event.profileId)) void orchestrator.close(event.profileId); return; }
   if (event.type === "HEALTH") {
     const active = activeRun; if (!active) return;
-    await saveHealth({ ...event.health, id: randomUUID(), subjectKind: "CHECKOUT", subjectId: event.profileId, runId: active.detail.run.id, circuit: circuitSnapshot(active) });
+    await saveHealth({ ...event.health, id: randomUUID(), subjectKind: "CHECKOUT", subjectId: event.profileId, runId: active.detail.run.id, circuit: null });
     return;
+  }
+  if (event.type === "NETWORK_USAGE") {
+    const active = activeRun; if (!active || event.runId !== active.detail.run.id) return; const session = active.profileSessions.get(event.profileId); if (!session) return; const profile = await profiles.get(event.profileId); const proxy = profile?.proxyProfileId ? await profiles.getProxy(profile.proxyProfileId) : undefined; const rate = proxy?.costPerGbMicrosUsd ?? null;
+    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); emitMonitorChanged(); return;
   }
   const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
   const session = active.profileSessions.get(event.profileId); if (!session) return;
-  if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if ((event.event.type === "HTTP_STATUS" && (event.event.payload.status === 403 || event.event.payload.status === 429)) || (event.event.type === "CHECKPOINT_DETECTED" && /CAPTCHA|SECURITY/.test(String(event.event.payload.reason ?? "")))) await tripCircuit(active, "Checkout browser detected storefront protection."); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
+  if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
   if (event.type === "RUN_ARTIFACT" && event.artifact.runId === active.detail.run.id) await profiles.addRunArtifact(event.artifact);
   if (event.type === "RUN_ENDED" && event.runSessionId === session.id) { if (session.status !== "FAILED") session.status = "ENDED"; await profiles.setRunSession(session.id, session.status); active.pendingEnd.delete(session.id); if (active.pendingEnd.size === 0) active.resolveEnd?.(); }
   emitRunsChanged();
 }
 
 async function resumeRunSession(profileId: string): Promise<boolean> {
-  const active = activeRun; if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("There is no active assisted run."); if (active.circuit.state === "OPEN") throw new Error("Storefront protection cooldown is active; automation cannot resume yet."); const session = active.profileSessions.get(profileId); if (!session || session.executionState !== "CHECKPOINT") throw new Error("This session is not waiting at a resumable checkpoint."); const cartCheckpoint = /^(CART_NOT_EMPTY|CART_STATE_UNKNOWN|CART_CONTENT_CHANGED)$/.test(session.checkpointReason ?? ""); const nextState = cartCheckpoint ? (session.checkpointReason === "CART_CONTENT_CHANGED" ? "CARTED" : "PRODUCT_OPEN") : "CHECKOUT"; orchestrator.resumeAssist(profileId, active.detail.run.id, session.id); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKPOINT_RESUMED", stateBefore: "CHECKPOINT", stateAfter: nextState, payload: { reason: session.checkpointReason } }); await profiles.setRunSessionExecution(session.id, nextState); session.executionState = nextState; emitRunsChanged(); return true;
+  const active = activeRun; if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("There is no active assisted run."); const session = active.profileSessions.get(profileId); if (!session || session.executionState !== "CHECKPOINT") throw new Error("This session is not waiting at a resumable checkpoint."); const cartCheckpoint = /^(CART_NOT_EMPTY|CART_STATE_UNKNOWN|CART_CONTENT_CHANGED)$/.test(session.checkpointReason ?? ""); const nextState = cartCheckpoint ? (session.checkpointReason === "CART_CONTENT_CHANGED" ? "CARTED" : "PRODUCT_OPEN") : "CHECKOUT"; orchestrator.resumeAssist(profileId, active.detail.run.id, session.id); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKPOINT_RESUMED", stateBefore: "CHECKPOINT", stateAfter: nextState, payload: { reason: session.checkpointReason } }); await profiles.setRunSessionExecution(session.id, nextState); session.executionState = nextState; emitRunsChanged(); return true;
 }
 
 app.whenReady().then(async () => {
