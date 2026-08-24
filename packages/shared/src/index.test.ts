@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, shippingSecretRevealSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -74,6 +74,14 @@ describe("shared contracts", () => {
     expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId }).executionMode).toBe("ASSISTED_CHECKOUT");
     expect(createShippingProfileSchema.parse({ name: "Home", details: { fullName: "Ada Lovelace", email: "ada@example.com", phone: "+351 1", address1: "1 Main St", postalCode: "1000", city: "Lisbon", country: "pt" } }).details.country).toBe("PT");
     expect(updateShippingProfileSchema.parse({ details: null })).toEqual({ details: null });
+  });
+
+  it("validates short-lived sensitive reveal contracts and copy fields", () => {
+    const token = "00000000-0000-4000-8000-000000000009"; const profileId = "00000000-0000-4000-8000-000000000008";
+    expect(proxySecretRevealSchema.safeParse({ kind: "PROXY", token, expiresAt: 100, proxyProfileId: profileId, name: "PT", protocol: "http", host: "proxy.example", port: 8080, username: "user", password: "secret", url: "http://user:secret@proxy.example:8080" }).success).toBe(true);
+    expect(shippingSecretRevealSchema.safeParse({ kind: "SHIPPING", token, expiresAt: 100, shippingProfileId: profileId, name: "Home", details: { fullName: "Ada Lovelace", email: "ada@example.com", phone: "+351 1", address1: "1 Main St", postalCode: "1000", city: "Lisbon", country: "PT" } }).success).toBe(true);
+    expect(secretCopyFieldSchema.safeParse("proxy-password").success).toBe(true);
+    expect(secretCopyFieldSchema.safeParse("shipping-card-number").success).toBe(false);
   });
   it("supports DataImpulse metadata, monitor overrides, and integer cost estimates", () => {
     const proxy = createProxyProfileSchema.parse({ name: "PT rotating", provider: "dataimpulse", type: "residential-rotating", host: "gw.dataimpulse.com", port: 823, costPerGbMicrosUsd: 1_000_000 });

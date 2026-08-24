@@ -1270,6 +1270,10 @@ Do not store them in:
 - plaintext JSON
 - unencrypted SQLite columns
 
+Proxy URLs may be imported through the proxy form. The pasted URL is parsed locally into the existing encrypted credential fields, cleared immediately after parsing, and never persisted as a plaintext URL.
+
+Saved proxy credentials and shipping/contact details may be revealed only after an explicit native consent prompt. A reveal is held in memory for at most 30 seconds, closes when the app loses focus, and is never logged. User-requested clipboard copies expire after 60 seconds when the clipboard still contains the copied value. Reveals are unavailable during an active run.
+
 ### 30.2 Payment information
 
 Copify should not store raw:

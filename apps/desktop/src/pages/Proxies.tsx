@@ -1,8 +1,11 @@
-import { type ProxyBenchmark, type ProxyProfile } from "@copify/shared";
+import { useEffect, useState } from "react";
+import { type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type SecretCopyField } from "@copify/shared";
 import { type ProxyDraft } from "../types";
+import { parseProxyUrl } from "../proxy-url";
 import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
+import { SensitiveValue } from "../ui/SensitiveValue";
 
 function score(benchmark?: ProxyBenchmark): string {
   return benchmark ? `${benchmark.qualityScore}` : "—";
@@ -43,6 +46,34 @@ export function Proxies({
   onSave: (event: React.FormEvent) => void;
   onCancel: () => void;
 }) {
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [proxyUrlMessage, setProxyUrlMessage] = useState("");
+  const [reveal, setReveal] = useState<ProxySecretReveal | null>(null);
+  const [revealError, setRevealError] = useState("");
+
+  useEffect(() => { if (!drawerOpen) { setProxyUrl(""); setProxyUrlMessage(""); } }, [drawerOpen]);
+  useEffect(() => {
+    if (!reveal) return;
+    const close = () => setReveal(null); const timer = window.setTimeout(close, Math.max(0, reveal.expiresAt - Date.now()));
+    window.addEventListener("blur", close); document.addEventListener("visibilitychange", close);
+    return () => { window.clearTimeout(timer); window.removeEventListener("blur", close); document.removeEventListener("visibilitychange", close); };
+  }, [reveal]);
+
+  const importUrl = (value: string) => {
+    try {
+      const parsed = parseProxyUrl(value);
+      setDraft({ ...draft, ...parsed, name: draft.name || (parsed.provider === "dataimpulse" ? "DataImpulse proxy" : "Imported proxy"), costPerGbUsd: parsed.provider === "dataimpulse" && !draft.costPerGbUsd ? "1.00" : draft.costPerGbUsd });
+      setProxyUrl(""); setProxyUrlMessage("Parsed safely. Confirm the name, proxy type, and expected country, then save.");
+    } catch (error) { setProxyUrlMessage(error instanceof Error ? error.message : "The proxy URL could not be parsed."); }
+  };
+  const viewProxy = async (proxy: ProxyProfile) => {
+    setRevealError(""); const response = await window.copify.proxies.reveal(proxy.id);
+    if (!response.ok) setRevealError(response.error); else if (response.value) setReveal(response.value);
+  };
+  const copy = async (field: SecretCopyField) => {
+    if (!reveal) return; const response = await window.copify.proxies.copyRevealed(reveal.token, field);
+    if (!response.ok) setRevealError(response.error);
+  };
   return (
     <>
       <section className="panel">
@@ -73,6 +104,7 @@ export function Proxies({
               const benchmark = latest(proxy.id);
               const credentials = proxy.usernameConfigured || proxy.passwordConfigured;
               const entries: MenuEntry[] = [
+                { kind: "item", label: "View", disabled: busy, onSelect: () => { void viewProxy(proxy); } },
                 { kind: "item", label: "Edit", disabled: busy, onSelect: () => onEdit(proxy) },
                 { kind: "item", label: proxy.enabled ? "Disable" : "Enable", disabled: busy, onSelect: () => onToggleProxy(proxy) },
               ];
@@ -118,6 +150,7 @@ export function Proxies({
             })}
           </div>
         )}
+        {revealError && !reveal && <p className="error-detail" role="alert">{revealError}</p>}
       </section>
 
       <Drawer
@@ -132,6 +165,22 @@ export function Proxies({
         }
       >
         <form id="proxy-form" className="drawer-form" onSubmit={onSave}>
+          {!editingId && (
+            <div className="proxy-url-import">
+              <Field label="Paste proxy URL">
+                <div className="inline-secret-input">
+                  <input
+                    type="password" autoComplete="off" spellCheck={false} value={proxyUrl}
+                    onChange={(event) => { setProxyUrl(event.target.value); setProxyUrlMessage(""); }}
+                    onPaste={(event) => { const value = event.clipboardData.getData("text"); if (value) { event.preventDefault(); importUrl(value); } }}
+                    placeholder="http://username:password@host:port"
+                  />
+                  <button type="button" disabled={!proxyUrl} onClick={() => importUrl(proxyUrl)}>Parse</button>
+                </div>
+              </Field>
+              <p className={`field-note ${proxyUrlMessage.startsWith("Parsed") ? "" : "warning"}`}>{proxyUrlMessage || "The URL is cleared immediately after parsing and is never saved as plaintext."}</p>
+            </div>
+          )}
           <Field label="Name">
             <input required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="e.g. PT ISP 01" />
           </Field>
@@ -212,6 +261,19 @@ export function Proxies({
           </Field>
           <p className="field-note">Copify warns when a test lands somewhere else.</p>
         </form>
+      </Drawer>
+
+      <Drawer open={Boolean(reveal)} title={reveal ? `${reveal.name} — sensitive details` : "Sensitive details"} onClose={() => { setReveal(null); setRevealError(""); }}>
+        {reveal && (
+          <div className="sensitive-reveal">
+            <p className="preset-notice">Visible for 30 seconds and cleared when this window loses focus. Copied values clear from the clipboard after 60 seconds if unchanged.</p>
+            <SensitiveValue label="Proxy URL" value={reveal.url} onCopy={() => void copy("proxy-url")} />
+            <SensitiveValue label="Username" value={reveal.username} onCopy={() => void copy("proxy-username")} />
+            <SensitiveValue label="Password" value={reveal.password} onCopy={() => void copy("proxy-password")} />
+            <SensitiveValue label="Server" value={`${reveal.protocol}://${reveal.host}:${reveal.port}`} onCopy={() => void copy("proxy-server")} />
+            {revealError && <p className="error-detail">{revealError}</p>}
+          </div>
+        )}
       </Drawer>
     </>
   );

@@ -418,6 +418,12 @@
 
 .drawer-form { display: flex; flex-direction: column; gap: 14px; }
 .field-note { margin-top: -6px; color: var(--fg-dim); font-size: var(--text-sm); }
+.proxy-url-import { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.inline-secret-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.sensitive-reveal { display: flex; flex-direction: column; gap: 12px; }
+.sensitive-value { display: grid; grid-template-columns: minmax(90px, 0.35fr) minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.sensitive-label { color: var(--fg-muted); font-size: var(--text-sm); }
+.sensitive-value code { min-width: 0; overflow-wrap: anywhere; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--fg); user-select: text; }
 
 /* ---- target rows ---- */
 

@@ -17,7 +17,7 @@
 - Typecheck: **Passed**
 - Production build: **Passed**
 - Built-app launch smoke with an isolated temporary profile: **Passed**
-- Normal regression suite: **Passed — 109 tests**
+- Normal regression suite: **Passed — 113 tests**
 - Profile-coherence resolver and launch-policy tests: **Passed**
 - v11-to-v12 migration and warming persistence tests: **Passed**
 - Local monitor integration suite: **Passed — 4 tests, 1 live test skipped**
@@ -34,6 +34,8 @@
 - Warming persistence contains checklist state, public route identity, driver kind, and timestamps only.
 - Browser-owned passwords, cookies, Shop Pay tokens, challenge URLs, iframe contents, and payment details are not extracted or persisted.
 - Payment handoff events contain only category, phase, profile/run identifiers, and timing.
+- Proxy URL import is parsed without logging or persisting the original plaintext URL; credentials continue through the existing `safeStorage` path.
+- Proxy and shipping reveals require a native consent prompt, expire after 30 seconds or app focus loss, are blocked during runs, and use a field allowlist for clipboard copies. Clipboard copies auto-clear after 60 seconds if unchanged.
 
 ## Manual Release Gates
 

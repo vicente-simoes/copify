@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
-  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -25,13 +25,17 @@ const api = {
     update: (id: string, input: UpdateProxyProfileInput): Promise<ApiResult<ProxyProfile>> => ipcRenderer.invoke(proxyIpc.update, id, input),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(proxyIpc.remove, id),
     test: (id: string | null): Promise<ApiResult<ProxyBenchmark>> => ipcRenderer.invoke(proxyIpc.test, id),
-    benchmarks: (id: string | null): Promise<ApiResult<ProxyBenchmark[]>> => ipcRenderer.invoke(proxyIpc.benchmarks, id)
+    benchmarks: (id: string | null): Promise<ApiResult<ProxyBenchmark[]>> => ipcRenderer.invoke(proxyIpc.benchmarks, id),
+    reveal: (id: string): Promise<ApiResult<ProxySecretReveal | null>> => ipcRenderer.invoke(proxyIpc.reveal, id),
+    copyRevealed: (token: string, field: SecretCopyField): Promise<ApiResult<boolean>> => ipcRenderer.invoke(proxyIpc.copyRevealed, token, field)
   },
   shipping: {
     list: (): Promise<ApiResult<ShippingProfile[]>> => ipcRenderer.invoke(shippingIpc.list),
     create: (input: CreateShippingProfileInput): Promise<ApiResult<ShippingProfile>> => ipcRenderer.invoke(shippingIpc.create, input),
     update: (id: string, input: UpdateShippingProfileInput): Promise<ApiResult<ShippingProfile>> => ipcRenderer.invoke(shippingIpc.update, id, input),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(shippingIpc.remove, id),
+    reveal: (id: string): Promise<ApiResult<ShippingSecretReveal | null>> => ipcRenderer.invoke(shippingIpc.reveal, id),
+    copyRevealed: (token: string, field: SecretCopyField): Promise<ApiResult<boolean>> => ipcRenderer.invoke(shippingIpc.copyRevealed, token, field),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(shippingIpc.changed, callback); return () => ipcRenderer.removeListener(shippingIpc.changed, callback); }
   },
   stores: {

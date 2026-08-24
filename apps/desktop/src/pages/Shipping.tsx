@@ -1,8 +1,10 @@
-import { getStoreShippingDestinations, type BrowserProfile, type ShippingProfile, type Store } from "@copify/shared";
+import { useEffect, useState } from "react";
+import { getStoreShippingDestinations, type BrowserProfile, type SecretCopyField, type ShippingProfile, type ShippingSecretReveal, type Store } from "@copify/shared";
 import { type ShippingDraft } from "../types";
 import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
+import { SensitiveValue } from "../ui/SensitiveValue";
 
 type AssignmentColumn = { id: string; label: string };
 
@@ -41,6 +43,22 @@ export function Shipping({
   onRemove: (profile: ShippingProfile) => void;
   onAssign: (profileId: string, shippingId: string) => void;
 }) {
+  const [reveal, setReveal] = useState<ShippingSecretReveal | null>(null);
+  const [revealError, setRevealError] = useState("");
+  useEffect(() => {
+    if (!reveal) return;
+    const close = () => setReveal(null); const timer = window.setTimeout(close, Math.max(0, reveal.expiresAt - Date.now()));
+    window.addEventListener("blur", close); document.addEventListener("visibilitychange", close);
+    return () => { window.clearTimeout(timer); window.removeEventListener("blur", close); document.removeEventListener("visibilitychange", close); };
+  }, [reveal]);
+  const viewShipping = async (profile: ShippingProfile) => {
+    setRevealError(""); const response = await window.copify.shipping.reveal(profile.id);
+    if (!response.ok) setRevealError(response.error); else if (response.value) setReveal(response.value);
+  };
+  const copy = async (field: SecretCopyField) => {
+    if (!reveal) return; const response = await window.copify.shipping.copyRevealed(reveal.token, field);
+    if (!response.ok) setRevealError(response.error);
+  };
   // One column today, backed by browser_profiles.shipping_profile_id. Per-store
   // columns need their own persistence, so they are added when a second
   // checkout-capable adapter exists rather than rendered with nowhere to save.
@@ -58,7 +76,7 @@ export function Shipping({
         <div className="section-title">
           <div>
             <h2>Addresses</h2>
-            <p className="muted">Encrypted by Windows and never shown again once saved.</p>
+            <p className="muted">Encrypted by Windows. Viewing requires explicit consent and expires automatically.</p>
           </div>
           <button className="primary" disabled={busy || activeRun} onClick={onNew}>New address</button>
         </div>
@@ -79,6 +97,7 @@ export function Shipping({
             {shipping.map((item) => {
               const ready = item.enabled && item.complete;
               const entries: MenuEntry[] = [
+                { kind: "item", label: "View", disabled: busy || activeRun || !item.detailsConfigured, onSelect: () => { void viewShipping(item); } },
                 { kind: "item", label: "Replace details", disabled: busy || activeRun, onSelect: () => onEdit(item) },
                 { kind: "item", label: item.enabled ? "Disable" : "Enable", disabled: busy || activeRun, onSelect: () => onToggle(item) },
                 { kind: "separator" },
@@ -99,6 +118,7 @@ export function Shipping({
             })}
           </div>
         )}
+        {revealError && !reveal && <p className="error-detail" role="alert">{revealError}</p>}
       </section>
 
       <section className="panel">
@@ -158,7 +178,7 @@ export function Shipping({
       >
         <form id="shipping-form" className="drawer-form" onSubmit={onSave}>
           {editingId && (
-            <p className="preset-notice">Saved details cannot be read back, so enter them again in full.</p>
+            <p className="preset-notice">Replacing details overwrites the encrypted address. Enter every field in full.</p>
           )}
 
           <Field label="Name">
@@ -208,6 +228,24 @@ export function Shipping({
             </Field>
           )}
         </form>
+      </Drawer>
+
+      <Drawer open={Boolean(reveal)} title={reveal ? `${reveal.name} — sensitive details` : "Sensitive details"} onClose={() => { setReveal(null); setRevealError(""); }}>
+        {reveal && (
+          <div className="sensitive-reveal">
+            <p className="preset-notice">Visible for 30 seconds and cleared when this window loses focus. Copied values clear from the clipboard after 60 seconds if unchanged.</p>
+            <SensitiveValue label="Full name" value={reveal.details.fullName} onCopy={() => void copy("shipping-full-name")} />
+            <SensitiveValue label="Email" value={reveal.details.email} onCopy={() => void copy("shipping-email")} />
+            <SensitiveValue label="Phone" value={reveal.details.phone} onCopy={() => void copy("shipping-phone")} />
+            <SensitiveValue label="Address" value={reveal.details.address1} onCopy={() => void copy("shipping-address-1")} />
+            <SensitiveValue label="Address line 2" value={reveal.details.address2} onCopy={() => void copy("shipping-address-2")} />
+            <SensitiveValue label="Postal code" value={reveal.details.postalCode} onCopy={() => void copy("shipping-postal-code")} />
+            <SensitiveValue label="City" value={reveal.details.city} onCopy={() => void copy("shipping-city")} />
+            <SensitiveValue label="Region" value={reveal.details.region} onCopy={() => void copy("shipping-region")} />
+            <SensitiveValue label="Country" value={reveal.details.country} onCopy={() => void copy("shipping-country")} />
+            {revealError && <p className="error-detail">{revealError}</p>}
+          </div>
+        )}
       </Drawer>
     </div>
   );

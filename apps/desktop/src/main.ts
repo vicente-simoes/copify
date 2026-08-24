@@ -1,17 +1,18 @@
-import { app, BrowserWindow, Menu, Notification, clipboard, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, safeStorage } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, resolveMonitorBehavior, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
-  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
 import { benchmarkRoute } from "@copify/runner";
 import { ClipboardCoordinator } from "./clipboard-coordinator";
 import { canStartTargetMonitor } from "./run-monitor";
+import { formatProxyUrl } from "./proxy-url";
 
 let mainWindow: BrowserWindow | undefined;
 let profiles: ProfileRepository;
@@ -25,6 +26,10 @@ let monitorStatus: MonitorRuntimeStatus = { runId: null, storeId: null, state: "
 const cartStatuses = new Map<string, CartStatus>();
 const closeAfterCartCheck = new Set<string>();
 const intentionallyStoppedMonitors = new WeakSet<ChildProcess>();
+const SECRET_REVEAL_TTL_MS = 30_000;
+const SENSITIVE_CLIPBOARD_TTL_MS = 60_000;
+type SensitiveRevealLease = ProxySecretReveal | ShippingSecretReveal;
+const sensitiveRevealLeases = new Map<string, SensitiveRevealLease>();
 
 if (process.platform === "win32") app.setAppUserModelId("com.copify.app");
 
@@ -96,11 +101,15 @@ function registerIpc(): void {
   ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (!isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet."); const policy = await monitorPolicy(snapshotTarget(target)); const elapsed = target.latestCheck ? Date.now() - target.latestCheck.checkedAt : Number.POSITIVE_INFINITY; if (elapsed < policy.pollIntervalMs) throw new Error(`This target can be checked again in ${Math.ceil((policy.pollIntervalMs - elapsed) / 1_000)} seconds.`); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
 
   ipcMain.handle(shippingIpc.list, (): Promise<ApiResult<ShippingProfile[]>> => resultAsync(() => profiles.listShippingProfiles()));
+  ipcMain.handle(shippingIpc.reveal, (_event, id: string): Promise<ApiResult<ShippingSecretReveal | null>> => resultAsync(() => revealShippingProfile(id)));
+  ipcMain.handle(shippingIpc.copyRevealed, (_event, token: string, field: unknown): Promise<ApiResult<boolean>> => resultAsync(() => copyRevealedSecret(token, field, "SHIPPING")));
   ipcMain.handle(shippingIpc.create, (_event, input: unknown): Promise<ApiResult<ShippingProfile>> => resultAsync(async () => { const parsed = createShippingProfileSchema.parse(input); const created = await profiles.createShippingProfile(parsed, await encryptSecret(JSON.stringify(parsed.details))); emitShippingChanged(); return created; }));
   ipcMain.handle(shippingIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<ShippingProfile>> => resultAsync(async () => { assertShippingInactive(id); const parsed = updateShippingProfileSchema.parse(input); const updated = await profiles.updateShippingProfile(id, parsed, parsed.details === undefined ? undefined : parsed.details === null ? null : await encryptSecret(JSON.stringify(parsed.details))); emitShippingChanged(); return updated; }));
   ipcMain.handle(shippingIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertShippingInactive(id); const removed = await profiles.removeShippingProfile(id); emitShippingChanged(); return removed; }));
 
   ipcMain.handle(proxyIpc.list, (): Promise<ApiResult<ProxyProfile[]>> => resultAsync(() => profiles.listProxies()));
+  ipcMain.handle(proxyIpc.reveal, (_event, id: string): Promise<ApiResult<ProxySecretReveal | null>> => resultAsync(() => revealProxyProfile(id)));
+  ipcMain.handle(proxyIpc.copyRevealed, (_event, token: string, field: unknown): Promise<ApiResult<boolean>> => resultAsync(() => copyRevealedSecret(token, field, "PROXY")));
   ipcMain.handle(proxyIpc.create, (_event, input: unknown): Promise<ApiResult<ProxyProfile>> => resultAsync(async () => { const parsed = createProxyProfileSchema.parse(input); return profiles.createProxy(parsed, await encryptCreateCredentials(parsed)); }));
   ipcMain.handle(proxyIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<ProxyProfile>> => resultAsync(async () => { await assertProxyInactive(id); const parsed = updateProxyProfileSchema.parse(input); const updated = await profiles.updateProxy(id, parsed, await encryptUpdateCredentials(parsed)); emitWarmingChanged(); return updated; }));
   ipcMain.handle(proxyIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { await assertProxyInactive(id); const removed = await profiles.removeProxy(id); if (removed) emitWarmingChanged(); return removed; }));
@@ -229,6 +238,69 @@ function assertKnownStore(storeId: string | undefined): void { if (storeId !== u
 async function requireTarget(id: string): Promise<Target> { const target = await profiles.getTarget(id); if (!target) throw new Error("Target not found."); return target; }
 function assertTargetInactive(id: string): void { if (activeRun?.detail.run.targetSnapshot?.targetId === id) throw new Error("End the active run before changing its target."); }
 function assertShippingInactive(id: string): void { if ([...(activeRun?.profileSessions.values() ?? [])].some((session) => session.shippingProfile.shippingProfileId === id)) throw new Error("End the active run before changing its captured shipping profile."); }
+function assertSensitiveRevealAllowed(): void { if (activeRun) throw new Error("End the active run before revealing saved sensitive information."); }
+async function confirmSensitiveReveal(kind: "proxy credentials" | "shipping address", name: string): Promise<boolean> {
+  assertSensitiveRevealAllowed();
+  const options: Electron.MessageBoxOptions = {
+    type: "warning", title: "Reveal sensitive information?", message: `Reveal saved ${kind} for “${name}”?`,
+    detail: "The information will be visible for 30 seconds. Only reveal it in private. Copify will never log it, and copied values are cleared from the clipboard after 60 seconds if unchanged.",
+    buttons: ["Reveal for 30 seconds", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
+  };
+  const answer = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
+  return answer.response === 0;
+}
+function retainSensitiveReveal<T extends SensitiveRevealLease>(value: T): T {
+  sensitiveRevealLeases.set(value.token, value);
+  const timer = setTimeout(() => sensitiveRevealLeases.delete(value.token), SECRET_REVEAL_TTL_MS + 250);
+  timer.unref();
+  return value;
+}
+async function revealProxyProfile(id: string): Promise<ProxySecretReveal | null> {
+  const stored = await profiles.getStoredProxy(id); if (!stored) throw new Error("Proxy profile not found.");
+  if (!await confirmSensitiveReveal("proxy credentials", stored.name)) return null;
+  const username = stored.usernameCiphertext ? await decryptSecret(stored.usernameCiphertext) : null;
+  const password = stored.passwordCiphertext ? await decryptSecret(stored.passwordCiphertext) : null;
+  const now = Date.now();
+  return retainSensitiveReveal(proxySecretRevealSchema.parse({ kind: "PROXY", token: randomUUID(), expiresAt: now + SECRET_REVEAL_TTL_MS, proxyProfileId: stored.id, name: stored.name, protocol: stored.protocol, host: stored.host, port: stored.port, username, password, url: formatProxyUrl(stored.protocol, stored.host, stored.port, username, password) }));
+}
+async function revealShippingProfile(id: string): Promise<ShippingSecretReveal | null> {
+  const stored = await profiles.getStoredShippingProfile(id); if (!stored?.detailsCiphertext) throw new Error("The shipping profile has no saved details.");
+  if (!await confirmSensitiveReveal("shipping address", stored.name)) return null;
+  const details = runnerShippingSchema.parse(JSON.parse(await decryptSecret(stored.detailsCiphertext)));
+  const now = Date.now();
+  return retainSensitiveReveal(shippingSecretRevealSchema.parse({ kind: "SHIPPING", token: randomUUID(), expiresAt: now + SECRET_REVEAL_TTL_MS, shippingProfileId: stored.id, name: stored.name, details }));
+}
+async function copyRevealedSecret(token: string, rawField: unknown, expectedKind: SensitiveRevealLease["kind"]): Promise<boolean> {
+  assertSensitiveRevealAllowed();
+  const field = secretCopyFieldSchema.parse(rawField); const reveal = sensitiveRevealLeases.get(token);
+  if (!reveal || reveal.expiresAt <= Date.now()) { sensitiveRevealLeases.delete(token); throw new Error("That reveal expired. Consent again to copy a value."); }
+  if (reveal.kind !== expectedKind) throw new Error("That reveal does not match this item.");
+  const value = revealedFieldValue(reveal, field); if (!value) throw new Error("That field is empty.");
+  clipboard.writeText(value); scheduleSensitiveClipboardClear(value); return true;
+}
+function revealedFieldValue(reveal: SensitiveRevealLease, field: SecretCopyField): string | null {
+  if (reveal.kind === "PROXY") {
+    if (field === "proxy-url") return reveal.url;
+    if (field === "proxy-server") return `${reveal.protocol}://${reveal.host}:${reveal.port}`;
+    if (field === "proxy-username") return reveal.username;
+    if (field === "proxy-password") return reveal.password;
+    throw new Error("That field does not belong to a proxy reveal.");
+  }
+  const values: Record<Exclude<SecretCopyField, "proxy-url" | "proxy-server" | "proxy-username" | "proxy-password">, string | undefined> = {
+    "shipping-full-name": reveal.details.fullName, "shipping-email": reveal.details.email, "shipping-phone": reveal.details.phone,
+    "shipping-address-1": reveal.details.address1, "shipping-address-2": reveal.details.address2, "shipping-postal-code": reveal.details.postalCode,
+    "shipping-city": reveal.details.city, "shipping-region": reveal.details.region, "shipping-country": reveal.details.country,
+  };
+  if (field.startsWith("proxy-")) throw new Error("That field does not belong to a shipping reveal.");
+  return values[field as keyof typeof values] ?? null;
+}
+function scheduleSensitiveClipboardClear(value: string): void {
+  const expectedHash = createHash("sha256").update(value).digest("hex");
+  const timer = setTimeout(() => {
+    try { if (createHash("sha256").update(clipboard.readText()).digest("hex") === expectedHash) clipboard.clear(); } catch { /* Clipboard access can fail after application shutdown. */ }
+  }, SENSITIVE_CLIPBOARD_TTL_MS);
+  timer.unref();
+}
 function snapshotTarget(target: Target): TargetSnapshot { const { id, latestCheck: _latestCheck, createdAt: _createdAt, updatedAt: _updatedAt, ...value } = target; return { ...value, targetId: id, capturedAt: Date.now() }; }
 async function launchSpec(profile: BrowserProfile): Promise<SessionLaunchSpec> {
   if (profile.driver.kind === "EXTERNAL_CDP") {

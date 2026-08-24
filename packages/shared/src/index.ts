@@ -77,6 +77,17 @@ const shippingDetailsSchema = z.object({
 export type ShippingDetails = z.infer<typeof shippingDetailsSchema>;
 export const shippingProfileSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(80), country: z.string().regex(/^[A-Z]{2}$/).nullable(), detailsConfigured: z.boolean(), complete: z.boolean(), enabled: z.boolean(), createdAt: timestampSchema, updatedAt: timestampSchema });
 export type ShippingProfile = z.infer<typeof shippingProfileSchema>;
+export const proxySecretRevealSchema = z.object({
+  kind: z.literal("PROXY"), token: idSchema, expiresAt: timestampSchema, proxyProfileId: idSchema, name: z.string().min(1).max(80),
+  protocol: proxyProtocolSchema, host: z.string().min(1).max(253), port: z.number().int().min(1).max(65_535), username: z.string().max(512).nullable(), password: z.string().max(512).nullable(), url: z.string().max(2_048)
+});
+export type ProxySecretReveal = z.infer<typeof proxySecretRevealSchema>;
+export const shippingSecretRevealSchema = z.object({
+  kind: z.literal("SHIPPING"), token: idSchema, expiresAt: timestampSchema, shippingProfileId: idSchema, name: z.string().min(1).max(80), details: shippingDetailsSchema
+});
+export type ShippingSecretReveal = z.infer<typeof shippingSecretRevealSchema>;
+export const secretCopyFieldSchema = z.enum(["proxy-url", "proxy-server", "proxy-username", "proxy-password", "shipping-full-name", "shipping-email", "shipping-phone", "shipping-address-1", "shipping-address-2", "shipping-postal-code", "shipping-city", "shipping-region", "shipping-country"]);
+export type SecretCopyField = z.infer<typeof secretCopyFieldSchema>;
 export const createShippingProfileSchema = z.object({ name: z.string().trim().min(1).max(80), details: shippingDetailsSchema, enabled: z.boolean().default(true) });
 export type CreateShippingProfileInput = z.input<typeof createShippingProfileSchema>;
 export const updateShippingProfileSchema = z.object({ name: z.string().trim().min(1).max(80).optional(), details: shippingDetailsSchema.nullable().optional(), enabled: z.boolean().optional() }).refine((value) => Object.keys(value).length > 0, "Provide at least one field to update.");
@@ -379,8 +390,8 @@ export const profileIpc = { list: "profiles:list", create: "profiles:create", up
 export const targetIpc = { list: "targets:list", create: "targets:create", update: "targets:update", remove: "targets:remove", test: "targets:test", changed: "targets:changed" } as const;
 export const healthIpc = { get: "health:get", changed: "health:changed" } as const;
 export const warmingIpc = { list: "warming:list", start: "warming:start", update: "warming:update", openDestination: "warming:open-destination", complete: "warming:complete", changed: "warming:changed" } as const;
-export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks" } as const;
-export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", changed: "shipping:changed" } as const;
+export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks", reveal: "proxies:reveal", copyRevealed: "proxies:copy-revealed" } as const;
+export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", reveal: "shipping:reveal", copyRevealed: "shipping:copy-revealed", changed: "shipping:changed" } as const;
 export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;
 export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", getMonitor: "settings:get-monitor", updateMonitor: "settings:update-monitor", appInfo: "settings:app-info" } as const;
 export const monitorIpc = { status: "monitor:status", setTurbo: "monitor:set-turbo", changed: "monitor:changed" } as const;
