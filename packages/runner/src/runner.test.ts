@@ -23,7 +23,7 @@ describe("runner recording redaction", () => {
   });
   it("reads Shopify cart JSON without navigating the assisted browser tab", () => {
     expect(parseShopifyCart({ item_count: 0, items: [] }, "Capital Hooded Sweatshirt")).toEqual({ state: "EMPTY" });
-    expect(parseShopifyCart({ item_count: 1, items: [{ product_title: "Capital Hooded Sweatshirt", title: "Capital Hooded Sweatshirt - Black" }] }, "Capital Hooded Sweatshirt")).toEqual({ state: "ITEMS", itemCount: 1, hasTarget: true });
+    expect(parseShopifyCart({ item_count: 1, currency: "EUR", items: [{ variant_id: 123, product_title: "Capital Hooded Sweatshirt", title: "Capital Hooded Sweatshirt - Black", final_line_price: 17_800 }] }, "Capital Hooded Sweatshirt", "123")).toEqual({ state: "ITEMS", itemCount: 1, hasTarget: true, hasVariant: true, currency: "EUR", priceMinor: 17_800 });
     expect(parseShopifyCart({ item_count: "1", items: [] }, "Capital Hooded Sweatshirt")).toBeNull();
   });
 });

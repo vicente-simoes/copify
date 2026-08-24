@@ -124,6 +124,14 @@ describe("ProfileRepository", () => {
     expect(await repo.getBrowserHealth("CHECKOUT", profile.id)).toMatchObject({ latest: snapshot, recent: [snapshot] });
   });
 
+  it("persists monitor route selection and storefront cooldown without a schema migration", async () => {
+    const repo = repository(); const proxy = await repo.createProxy({ name: "Monitor", host: "127.0.0.1", port: 8080 });
+    expect(await repo.setMonitorNetworkSettings({ proxyProfileIds: [proxy.id] })).toEqual({ proxyProfileIds: [proxy.id] });
+    expect(await repo.getMonitorNetworkSettings()).toEqual({ proxyProfileIds: [proxy.id] });
+    const circuit = { storeId: "supreme-eu", consecutiveProtectionSignals: 2, reopenAt: Date.now() + 1_000 };
+    await repo.setMonitorCircuit(circuit); expect(await repo.getMonitorCircuit("supreme-eu")).toEqual(circuit);
+  });
+
   it("saves reusable run setups separately from run history", async () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Sneakers", productKeywords: ["Sneaker"], maxRetailMinor: 20_000 });
     const setup = await repo.createRunSetup({ name: "Sneakers drop", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profile.id], targetId: target.id });

@@ -3,7 +3,7 @@ import { STORE_GENERAL, storeCurrencySchema } from "./stores";
 
 export * from "./stores";
 
-export const IPC_VERSION = 11 as const;
+export const IPC_VERSION = 12 as const;
 export const SCHEMA_VERSION = 10 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
@@ -25,13 +25,13 @@ export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(
 export type CreateTargetInput = z.input<typeof createTargetSchema>;
 export const updateTargetSchema = createTargetSchema.partial().refine((value) => Object.keys(value).length > 0, "Provide at least one field to update.");
 export type UpdateTargetInput = z.input<typeof updateTargetSchema>;
-export const productVariantSchema = z.object({ color: z.string().min(1).max(120), size: z.string().min(1).max(80), available: z.boolean() });
+export const productVariantSchema = z.object({ id: z.string().regex(/^\d{1,32}$/, "Variant IDs must be decimal strings."), color: z.string().min(1).max(120), size: z.string().min(1).max(80), available: z.boolean() });
 export type ProductVariant = z.infer<typeof productVariantSchema>;
 export const productCandidateSchema = z.object({ name: z.string().min(1).max(300), url: z.string().url(), imageUrl: z.string().url().nullable().default(null), priceMinor: z.number().int().min(0).nullable(), currency: z.string().regex(/^[A-Z]{3}$/).nullable(), variants: z.array(productVariantSchema), listingOrder: z.number().int().min(0) });
 export type ProductCandidate = z.infer<typeof productCandidateSchema>;
 export const targetDecisionSchema = z.object({ kind: z.enum(["NO_MATCH", "MATCHED", "VARIANT_SELECTED", "PRICE_LIMIT_EXCEEDED", "CURRENCY_MISMATCH", "NO_ACCEPTABLE_VARIANT", "ERROR"]), message: z.string().max(500), candidate: productCandidateSchema.nullable(), selectedVariant: productVariantSchema.nullable() });
 export type TargetDecision = z.infer<typeof targetDecisionSchema>;
-export const targetCheckSchema = z.object({ id: idSchema, targetId: idSchema, checkedAt: timestampSchema, status: z.enum(["SUCCESS", "ERROR"]), decision: targetDecisionSchema, candidateCount: z.number().int().min(0), errorMessage: z.string().nullable() });
+export const targetCheckSchema = z.object({ id: idSchema, targetId: idSchema, checkedAt: timestampSchema, status: z.enum(["SUCCESS", "ERROR"]), decision: targetDecisionSchema, candidateCount: z.number().int().min(0), errorMessage: z.string().nullable(), retryAfterMs: z.number().int().nonnegative().nullable().optional() });
 export type TargetCheck = z.infer<typeof targetCheckSchema>;
 export const targetSnapshotSchema = targetSchema.omit({ id: true, latestCheck: true, createdAt: true, updatedAt: true }).extend({ targetId: idSchema, capturedAt: timestampSchema });
 export type TargetSnapshot = z.infer<typeof targetSnapshotSchema>;
@@ -150,6 +150,15 @@ export const browserHealthSnapshotSchema = z.object({
   challengeCount: z.number().int().nonnegative(),
   checkoutFailures: z.number().int().nonnegative(),
   averagePageLoadMs: z.number().nonnegative().nullable(),
+  monitorTransport: z.enum(["HTTP"]).nullable().optional(),
+  monitorEndpoint: z.string().url().nullable().optional(),
+  configuredRouteCount: z.number().int().nonnegative().nullable().optional(),
+  healthyRouteCount: z.number().int().nonnegative().nullable().optional(),
+  pollIntervalMs: z.number().int().min(500).nullable().optional(),
+  lastHttpStatus: z.number().int().min(100).max(599).nullable().optional(),
+  lastResponseLatencyMs: z.number().nonnegative().nullable().optional(),
+  bytesReceived: z.number().int().nonnegative().nullable().optional(),
+  nextPollAt: timestampSchema.nullable().optional(),
   circuit: circuitStateSchema.nullable(),
 });
 export type BrowserHealthSnapshot = z.infer<typeof browserHealthSnapshotSchema>;
@@ -158,6 +167,17 @@ export type BrowserHealthDetail = z.infer<typeof browserHealthDetailSchema>;
 
 export const runnerProxySchema = z.object({ proxyProfileId: idSchema, proxyName: z.string(), protocol: proxyProtocolSchema, host: z.string().min(1), port: z.number().int().min(1).max(65_535), username: z.string().min(1).optional(), password: z.string().min(1).optional(), expectedCountry: z.string().nullable(), expectedCity: z.string().nullable() });
 export type RunnerProxy = z.infer<typeof runnerProxySchema>;
+export const monitorRouteSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("DIRECT"), id: z.literal("direct") }),
+  z.object({ kind: z.literal("PROXY"), id: idSchema, protocol: proxyProtocolSchema, host: z.string().min(1), port: z.number().int().min(1).max(65_535), username: z.string().min(1).optional(), password: z.string().min(1).optional() }),
+]);
+export type MonitorRoute = z.infer<typeof monitorRouteSchema>;
+export const monitorPolicySchema = z.object({ access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), pollIntervalMs: z.number().int().min(500), endpoint: z.string().url() });
+export type MonitorPolicy = z.infer<typeof monitorPolicySchema>;
+export const monitorNetworkSettingsSchema = z.object({ proxyProfileIds: z.array(idSchema).max(20).refine((ids) => new Set(ids).size === ids.length, "Monitor routes must be unique.") });
+export type MonitorNetworkSettings = z.infer<typeof monitorNetworkSettingsSchema>;
+export const persistedMonitorCircuitSchema = z.object({ storeId: storeIdSchema, consecutiveProtectionSignals: z.number().int().nonnegative(), reopenAt: timestampSchema.nullable() });
+export type PersistedMonitorCircuit = z.infer<typeof persistedMonitorCircuitSchema>;
 export const runnerShippingSchema = shippingDetailsSchema;
 export type RunnerShipping = z.infer<typeof runnerShippingSchema>;
 
@@ -206,7 +226,7 @@ export type ClipboardLeaseDenialReason = z.infer<typeof clipboardLeaseDenialReas
 export const runnerCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("START"), version: z.literal(IPC_VERSION), profileId: idSchema, userDataDir: z.string().min(1), driver: runnerBrowserDriverSchema, proxy: runnerProxySchema.nullable(), probeUrl: z.string().url(), recording: runnerRecordingSchema.nullable() }),
   z.object({ type: z.literal("END_RUN"), version: z.literal(IPC_VERSION), runSessionId: idSchema }),
-  z.object({ type: z.literal("ASSIST_TARGET"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, candidate: productCandidateSchema, variant: productVariantSchema, quantity: z.number().int().min(1).max(10), shipping: runnerShippingSchema }),
+  z.object({ type: z.literal("ASSIST_TARGET"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, candidate: productCandidateSchema, variant: productVariantSchema, quantity: z.number().int().min(1).max(10), priceConstraint: z.object({ currency: targetCurrencySchema, maxRetailMinor: z.number().int().nonnegative() }), shipping: runnerShippingSchema }),
   z.object({ type: z.literal("RESUME_ASSIST"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
   z.object({ type: z.literal("CHECK_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("EMPTY_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
@@ -232,8 +252,8 @@ export const runnerEventSchema = z.discriminatedUnion("type", [
 export type RunnerEvent = z.infer<typeof runnerEventSchema>;
 
 export const monitorCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("START_MONITOR"), version: z.literal(IPC_VERSION), runId: idSchema, target: targetSnapshotSchema, userDataDir: z.string().min(1) }),
-  z.object({ type: z.literal("TEST_TARGET"), version: z.literal(IPC_VERSION), target: targetSnapshotSchema, userDataDir: z.string().min(1) }),
+  z.object({ type: z.literal("START_MONITOR"), version: z.literal(IPC_VERSION), runId: idSchema, target: targetSnapshotSchema, policy: monitorPolicySchema, routes: z.array(monitorRouteSchema).max(20) }),
+  z.object({ type: z.literal("TEST_TARGET"), version: z.literal(IPC_VERSION), target: targetSnapshotSchema, policy: monitorPolicySchema, routes: z.array(monitorRouteSchema).max(20) }),
   z.object({ type: z.literal("PAUSE_MONITOR"), version: z.literal(IPC_VERSION), until: timestampSchema }),
   z.object({ type: z.literal("RESUME_MONITOR"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("STOP_MONITOR"), version: z.literal(IPC_VERSION) })
@@ -260,7 +280,7 @@ export const healthIpc = { get: "health:get", changed: "health:changed" } as con
 export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks" } as const;
 export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", changed: "shipping:changed" } as const;
 export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;
-export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", appInfo: "settings:app-info" } as const;
+export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", getMonitorNetwork: "settings:get-monitor-network", updateMonitorNetwork: "settings:update-monitor-network", appInfo: "settings:app-info" } as const;
 export type AppInfo = { version: string; electronVersion: string; chromeVersion: string | null; osVersion: string };
 export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", emptyCarts: "sessions:empty-carts", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
 export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", changed: "runs:changed" } as const;

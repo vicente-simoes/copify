@@ -11,7 +11,7 @@ Each browser profile uses the Native Stealth driver by default: real persistent 
 - Existing Playwright and Native CDP profile choices migrate to Native Stealth.
 - External CDP endpoints are encrypted with Electron `safeStorage`, never returned to the renderer, and never logged.
 - Run health records driver kind, browser version, and stealth verification status.
-- `pnpm test:stealth` runs the opt-in local Chrome compatibility gate; `pnpm test:stealth:live` records third-party validation evidence.
+- `pnpm test:stealth` runs the opt-in local Chrome compatibility gate; `pnpm test:monitor` validates the local JSON monitor; `pnpm test:direct-cart` validates exact-variant carting; `pnpm test:stealth:live` records third-party validation evidence.
 
 ## v0.5
 
@@ -30,7 +30,7 @@ The default route probe is `https://ipwho.is/`. It can be replaced with an HTTPS
 - Add Supreme EU targets with ordered keyword, color, and size priorities plus a currency-aware maximum retail-price kill switch.
 - Target setup offers a General preset for future store adapters and a Supreme EU preset with observed common apparel sizes (`Small` through `XXLarge`) and EUR pricing.
 - General targets are retained as templates but cannot be tested or attached to runs until their store adapter is available.
-- Test a target once on the direct route, or attach it to a recorded run for a single shared direct monitor that checks the public listing every 15 seconds.
+- Test a target once, or attach it to a recorded run for a shared JSON-only HTTP monitor. Supreme enforces a 60-second minimum and opens a persistent global cooldown after 403, 429, or challenge responses.
 - In Observation mode, product detection is read-only: Copify records matching candidates and selected variants without navigating persistent sessions, carting products, or starting checkout.
 
 - Observation runs stay read-only. Assisted Checkout runs require an explicit acknowledgement, can add an acceptable Supreme EU target to cart and fill an assigned encrypted shipping profile, then stop for manual payment and submission.

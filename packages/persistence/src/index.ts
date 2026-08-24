@@ -3,9 +3,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, monitorNetworkSettingsSchema, networkProbeSettingsSchema, persistedMonitorCircuitSchema, proxyBenchmarkSchema,
   proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type ProxyBenchmark, type ProxyProfile,
+  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type MonitorNetworkSettings, type PersistedMonitorCircuit, type ProxyBenchmark, type ProxyProfile,
   type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
@@ -342,6 +342,33 @@ export class ProfileRepository {
     return (await this.getRun(id))!;
   }
 
+  async getMonitorNetworkSettings(): Promise<MonitorNetworkSettings> {
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'monitor_network'");
+    if (!row) return { proxyProfileIds: [] };
+    try { const parsed = monitorNetworkSettingsSchema.parse(JSON.parse(String(row.value))); const enabled = new Set((await this.listProxies()).filter((proxy) => proxy.enabled).map((proxy) => proxy.id)); return { proxyProfileIds: parsed.proxyProfileIds.filter((id) => enabled.has(id)) }; } catch { return { proxyProfileIds: [] }; }
+  }
+
+  async setMonitorNetworkSettings(input: MonitorNetworkSettings): Promise<MonitorNetworkSettings> {
+    const value = monitorNetworkSettingsSchema.parse(input);
+    const existing = new Set((await this.listProxies()).filter((proxy) => proxy.enabled).map((proxy) => proxy.id));
+    const filtered = { proxyProfileIds: value.proxyProfileIds.filter((id) => existing.has(id)) };
+    this.setJsonSetting("monitor_network", filtered);
+    return filtered;
+  }
+
+  async getMonitorCircuit(storeId: string): Promise<PersistedMonitorCircuit> {
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = ?", [`monitor_circuit:${storeId}`]);
+    if (!row) return { storeId, consecutiveProtectionSignals: 0, reopenAt: null };
+    try { return persistedMonitorCircuitSchema.parse(JSON.parse(String(row.value))); }
+    catch { return { storeId, consecutiveProtectionSignals: 0, reopenAt: null }; }
+  }
+
+  async setMonitorCircuit(value: PersistedMonitorCircuit): Promise<PersistedMonitorCircuit> {
+    const parsed = persistedMonitorCircuitSchema.parse(value);
+    this.setJsonSetting(`monitor_circuit:${parsed.storeId}`, parsed);
+    return parsed;
+  }
+
   async listRunSetups(): Promise<RunSetup[]> {
     return this.all("SELECT * FROM run_setups ORDER BY created_at ASC").map((row) => runSetupSchema.parse(mapRunSetup(row)));
   }
@@ -440,6 +467,7 @@ export class ProfileRepository {
   private getRow(query: string, params: any[] = []): Row | undefined { return this.sql.prepare(query).get(...params) as Row | undefined; }
   private all(query: string, params: any[] = []): Row[] { return this.sql.prepare(query).all(...params) as Row[]; }
   private transaction(action: () => void): void { this.sql.exec("BEGIN IMMEDIATE"); try { action(); this.sql.exec("COMMIT"); } catch (error) { this.sql.exec("ROLLBACK"); throw error; } }
+  private setJsonSetting(key: string, value: unknown): void { this.sql.prepare("INSERT INTO app_settings (key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run(key, JSON.stringify(value), Date.now()); }
   private insertSecret(id: string, ciphertext: Buffer, now: number): void { this.sql.prepare("INSERT INTO app_secrets (id,ciphertext,created_at,updated_at) VALUES (?,?,?,?)").run(id, ciphertext, now, now); }
   private replaceSecret(currentId: unknown, value: EncryptedCredential, _now: number): string | null { if (value === undefined) return typeof currentId === "string" ? currentId : null; return value === null ? null : randomUUID(); }
   private updateSecret(currentId: unknown, nextId: string | null, value: EncryptedCredential, now: number): void {

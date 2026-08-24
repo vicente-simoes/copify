@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorNetworkSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorEvent, type MonitorNetworkSettings, type MonitorPolicy, type MonitorRoute, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -19,7 +19,6 @@ let orchestrator: SessionOrchestrator;
 let clipboardCoordinator: ClipboardCoordinator;
 let benchmarkRunning = false;
 let runsRoot = "";
-let watcherProfilesRoot = "";
 type ProtectionCircuit = { state: "CLOSED" | "OPEN"; consecutiveProtectionSignals: number; reopenAt: number | null; timer?: NodeJS.Timeout };
 type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; circuit: ProtectionCircuit };
 let activeRun: ActiveRun | undefined;
@@ -74,7 +73,7 @@ function registerIpc(): void {
   ipcMain.handle(targetIpc.create, (_event, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { const parsed = createTargetSchema.parse(input); assertKnownStore(parsed.storeId); const created = await profiles.createTarget(parsed); emitTargetsChanged(); return created; }));
   ipcMain.handle(targetIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { assertTargetInactive(id); const parsed = updateTargetSchema.parse(input); assertKnownStore(parsed.storeId); const updated = await profiles.updateTarget(id, parsed); emitTargetsChanged(); return updated; }));
   ipcMain.handle(targetIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertTargetInactive(id); const removed = await profiles.removeTarget(id); emitTargetsChanged(); return removed; }));
-  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (!isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet."); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
+  ipcMain.handle(targetIpc.test, (_event, id: string): Promise<ApiResult<Target>> => resultAsync(async () => { const target = await requireTarget(id); if (!isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet."); const minimum = getStoreManifest(target.storeId)?.monitorPolicy?.minimumPollIntervalMs ?? 0; const elapsed = target.latestCheck ? Date.now() - target.latestCheck.checkedAt : Number.POSITIVE_INFINITY; if (elapsed < minimum) throw new Error(`This public target can be checked again in ${Math.ceil((minimum - elapsed) / 1_000)} seconds.`); const check = await testTarget(target); const updated = await profiles.setTargetCheck(id, check); emitTargetsChanged(); return updated; }));
 
   ipcMain.handle(shippingIpc.list, (): Promise<ApiResult<ShippingProfile[]>> => resultAsync(() => profiles.listShippingProfiles()));
   ipcMain.handle(shippingIpc.create, (_event, input: unknown): Promise<ApiResult<ShippingProfile>> => resultAsync(async () => { const parsed = createShippingProfileSchema.parse(input); const created = await profiles.createShippingProfile(parsed, await encryptSecret(JSON.stringify(parsed.details))); emitShippingChanged(); return created; }));
@@ -95,6 +94,8 @@ function registerIpc(): void {
 
   ipcMain.handle(settingsIpc.getNetworkProbe, (): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => ({ probeUrl: await profiles.getNetworkProbeUrl() })));
   ipcMain.handle(settingsIpc.updateNetworkProbe, (_event, input: unknown): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => { const { probeUrl } = networkProbeSettingsSchema.parse(input); return { probeUrl: await profiles.setNetworkProbeUrl(probeUrl) }; }));
+  ipcMain.handle(settingsIpc.getMonitorNetwork, (): Promise<ApiResult<MonitorNetworkSettings>> => resultAsync(() => profiles.getMonitorNetworkSettings()));
+  ipcMain.handle(settingsIpc.updateMonitorNetwork, (_event, input: unknown): Promise<ApiResult<MonitorNetworkSettings>> => resultAsync(() => profiles.setMonitorNetworkSettings(monitorNetworkSettingsSchema.parse(input))));
 
   ipcMain.handle(sessionIpc.list, (): ApiResult<SessionSnapshot[]> => result(() => orchestrator.list()));
   ipcMain.handle(sessionIpc.open, (_event, id: string): Promise<ApiResult<SessionSnapshot>> => resultAsync(() => openSession(id)));
@@ -136,7 +137,8 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   const specifications = await Promise.all(selected.map(async (profile) => ({ ...(await launchSpec(profile)), shipping: profile.shippingProfileId ? await profiles.getShippingProfile(profile.shippingProfileId) : undefined })));
   const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, assistedEligible: input.executionMode === "ASSISTED_CHECKOUT" && Boolean(shipping?.enabled && shipping?.complete), executionState: input.executionMode === "ASSISTED_CHECKOUT" && shipping?.enabled && shipping.complete ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, status: "STARTING", startedAt, endedAt: null, finalError: null }));
   const environment = runEnvironment(); const detail = await profiles.createRun(input, environment, sessions, targetSnapshot);
-  const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), circuit: { state: "CLOSED", consecutiveProtectionSignals: 0, reopenAt: null } };
+  const storedCircuit = targetSnapshot ? await profiles.getMonitorCircuit(targetSnapshot.storeId) : null; const reopenAt = storedCircuit?.reopenAt && storedCircuit.reopenAt > Date.now() ? storedCircuit.reopenAt : null;
+  const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), circuit: { state: reopenAt ? "OPEN" : "CLOSED", consecutiveProtectionSignals: storedCircuit?.consecutiveProtectionSignals ?? 0, reopenAt } };
   const root = runDirectory(detail.run.id); await mkdir(root, { recursive: true }); await writeFile(join(root, "run.json"), JSON.stringify(detail.run, null, 2));
   await Promise.all(specifications.map(async ({ profile, driver, proxy }) => {
     const session = profileSessions.get(profile.id)!; const artifactDir = join(root, session.id); await mkdir(artifactDir, { recursive: true }); await writeFile(join(artifactDir, "manifest.json"), JSON.stringify({ runId: detail.run.id, runSessionId: session.id, profileId: profile.id, diagnosticLevel: input.diagnosticLevel }, null, 2));
@@ -209,16 +211,21 @@ async function decryptSecret(value: Buffer): Promise<string> { if (!await safeSt
 function sessionFailure(error: unknown): SessionError { const text = message(error); return { code: /credential storage/i.test(text) ? "SECRET_STORAGE_UNAVAILABLE" : /external CDP endpoint/i.test(text) ? "INVALID_DRIVER_ENDPOINT" : /disabled|assigned proxy|proxy profile/i.test(text) ? "PROXY_CONNECTION_FAILED" : "UNKNOWN", message: text }; }
 function runEnvironment(): RunEnvironment { return { appVersion: app.getVersion(), schemaVersion: SCHEMA_VERSION, osVersion: `${process.platform} ${process.getSystemVersion?.() ?? process.version}`, chromeVersion: process.versions.chrome ?? null, playwrightVersion: "rebrowser-playwright 1.52.0", capturedAt: Date.now() }; }
 function runDirectory(id: string): string { const root = resolve(runsRoot); const candidate = resolve(root, id); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid run artifact path."); return candidate; }
-function watcherDirectory(storeId: string): string { const root = resolve(watcherProfilesRoot); const safe = storeId.replace(/[^a-z0-9_-]/gi, "_"); const candidate = resolve(root, safe); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid watcher profile path."); return candidate; }
 function elapsedSince(active: ActiveRun): string { return (BigInt(Date.now() - active.detail.run.startedAt) * 1_000_000n).toString(); }
 
-function startMonitor(runId: string, target: TargetSnapshot): ChildProcess {
-  const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+function monitorPolicy(target: TargetSnapshot): MonitorPolicy { const policy = getStoreManifest(target.storeId)?.monitorPolicy; if (!policy) throw new Error("MONITOR_ENDPOINT_UNSUPPORTED"); return { access: policy.access, pollIntervalMs: policy.minimumPollIntervalMs, endpoint: policy.endpoint }; }
+async function monitorRoutes(): Promise<MonitorRoute[]> {
+  const settings = await profiles.getMonitorNetworkSettings(); const routes: MonitorRoute[] = [];
+  for (const id of settings.proxyProfileIds) { const stored = await profiles.getStoredProxy(id); if (!stored?.enabled) continue; routes.push({ kind: "PROXY", id: stored.id, protocol: stored.protocol, host: stored.host, port: stored.port, ...(stored.usernameCiphertext ? { username: await decryptSecret(stored.usernameCiphertext) } : {}), ...(stored.passwordCiphertext ? { password: await decryptSecret(stored.passwordCiphertext) } : {}) }); }
+  return routes;
+}
+async function startMonitor(runId: string, target: TargetSnapshot): Promise<ChildProcess> {
+  const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
   worker.on("message", (value) => { void onMonitorEvent(value); }); worker.once("exit", () => {
     if (intentionallyStoppedMonitors.delete(worker)) return;
     if (activeRun?.detail.run.id === runId && !activeRun.ending) void appendMonitorEvent(runId, "TARGET_MONITOR_FAILED", null, "The shared monitor exited unexpectedly.");
   });
-  worker.send({ type: "START_MONITOR", version: IPC_VERSION, runId, target, userDataDir: watcherDirectory(target.storeId) }); return worker;
+  worker.send({ type: "START_MONITOR", version: IPC_VERSION, runId, target, policy: monitorPolicy(target), routes: await monitorRoutes() }); return worker;
 }
 function stopMonitor(active: ActiveRun): void {
   if (active.circuit.timer) { clearTimeout(active.circuit.timer); active.circuit.timer = undefined; }
@@ -230,13 +237,20 @@ function stopMonitor(active: ActiveRun): void {
   active.monitor = undefined;
 }
 async function testTarget(target: Target): Promise<TargetCheck> {
-  const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "ignore", "ignore", "ipc"] }); const snapshot = snapshotTarget(target);
-  return new Promise<TargetCheck>((resolve, reject) => {
-    const timeout = setTimeout(() => { worker.kill(); reject(new Error("Target test timed out.")); }, 45_000);
-    worker.on("message", (value) => { const event = monitorEventSchema.safeParse(value); if (event.success && event.data.type === "MONITOR_TEST_RESULT") { clearTimeout(timeout); worker.kill(); resolve(event.data.check); } });
-    worker.once("exit", (code) => { if (code && code !== 0) { clearTimeout(timeout); reject(new Error("Target test monitor exited unexpectedly.")); } });
-    worker.send({ type: "TEST_TARGET", version: IPC_VERSION, target: snapshot, userDataDir: watcherDirectory(snapshot.storeId) });
+  const circuit = await profiles.getMonitorCircuit(target.storeId);
+  if (circuit.reopenAt && circuit.reopenAt > Date.now()) throw new Error(`Storefront monitor cooldown is active until ${new Date(circuit.reopenAt).toLocaleTimeString()}.`);
+  const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "inherit", "inherit", "ipc"] }); const snapshot = snapshotTarget(target);
+  let settled = false;
+  const check = await new Promise<TargetCheck>((resolve, reject) => {
+    const timeout = setTimeout(() => { if (!settled) { settled = true; worker.kill(); reject(new Error("Target test timed out.")); } }, 45_000);
+    worker.on("message", (value) => { const event = monitorEventSchema.safeParse(value); if (event.success && event.data.type === "MONITOR_TEST_RESULT") { if (!settled) { settled = true; clearTimeout(timeout); resolve(event.data.check); worker.kill(); } } });
+    worker.once("exit", (code) => { if (!settled && code && code !== 0) { settled = true; clearTimeout(timeout); reject(new Error(`Target test monitor exited unexpectedly (code ${code}).`)); } });
+    worker.on("error", (err) => { if (!settled) { settled = true; clearTimeout(timeout); reject(new Error(`Target test monitor error: ${err.message}`)); } });
+    void monitorRoutes().then((routes) => worker.send({ type: "TEST_TARGET", version: IPC_VERSION, target: snapshot, policy: monitorPolicy(snapshot), routes })).catch((err) => { if (!settled) { settled = true; clearTimeout(timeout); worker.kill(); reject(err); } });
   });
+  if (isProtectionCheck(check)) { const count = circuit.consecutiveProtectionSignals + 1; await profiles.setMonitorCircuit({ storeId: target.storeId, consecutiveProtectionSignals: count, reopenAt: Date.now() + circuitDelay(count, check.retryAfterMs) }); }
+  else if (check.status === "SUCCESS") await profiles.setMonitorCircuit({ storeId: target.storeId, consecutiveProtectionSignals: 0, reopenAt: null });
+  return check;
 }
 async function onMonitorEvent(value: unknown): Promise<void> {
   const parsed = monitorEventSchema.safeParse(value); if (!parsed.success) return; const event: MonitorEvent = parsed.data;
@@ -248,7 +262,8 @@ async function onMonitorEvent(value: unknown): Promise<void> {
   }
   if (event.type !== "MONITOR_EVENT" || !active || event.runId !== active.detail.run.id) return;
   await appendMonitorEvent(active.detail.run.id, event.eventType, event.check, null);
-  if (isProtectionCheck(event.check)) await tripCircuit(active, event.check?.errorMessage ?? "Storefront protection detected.");
+  if (isProtectionCheck(event.check)) await tripCircuit(active, event.check?.errorMessage ?? "Storefront protection detected.", event.check?.retryAfterMs);
+  else if (/\b503\b/.test(event.check?.errorMessage ?? "")) await tripServiceCooldown(active, event.check?.retryAfterMs);
   else if (event.check?.status === "SUCCESS") resetCircuitAfterSuccess(active);
   if (active.circuit.state === "CLOSED" && active.detail.run.executionMode === "ASSISTED_CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) {
     active.assistedDispatched = true;
@@ -265,7 +280,7 @@ async function dispatchAssistedTarget(active: ActiveRun, check: TargetCheck): Pr
   if (!candidate || !variant || !target) return;
   await Promise.all([...active.assistedShipping.entries()].map(async ([profileId, shippingId]) => {
     const runSession = active.profileSessions.get(profileId); if (!runSession || runSession.status === "FAILED" || active.assistedActivated.has(profileId) || orchestrator.snapshot(profileId).state !== "READY") return;
-    try { const shipping = await resolveShipping(shippingId); orchestrator.assist(profileId, active.detail.run.id, runSession.id, candidate, variant, target.quantity, shipping); active.assistedActivated.add(profileId); await profiles.setRunSessionExecution(runSession.id, "PRODUCT_OPEN"); }
+    try { const shipping = await resolveShipping(shippingId); orchestrator.assist(profileId, active.detail.run.id, runSession.id, candidate, variant, target.quantity, { currency: target.currency, maxRetailMinor: target.maxRetailMinor }, shipping); active.assistedActivated.add(profileId); await profiles.setRunSessionExecution(runSession.id, "PRODUCT_OPEN"); }
     catch (error) { await profiles.setRunSessionExecution(runSession.id, "FAILED"); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: runSession.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "ASSIST_FAILED", stateBefore: "WAITING_FOR_TARGET", stateAfter: "FAILED", payload: { code: "SECRET_STORAGE_UNAVAILABLE", message: "Shipping details could not be loaded for assisted checkout." } }); }
   }));
 }
@@ -278,32 +293,42 @@ function isProtectionCheck(check: TargetCheck | null): boolean {
   return Boolean(check?.errorMessage && /\b(?:403|429)\b|too many requests|rate limit|captcha|access (?:denied|challenge)|security[ -]check|verify you are human|just a moment/i.test(check.errorMessage));
 }
 function circuitSnapshot(active: ActiveRun): BrowserHealthSnapshot["circuit"] { return { state: active.circuit.state, consecutiveProtectionSignals: active.circuit.consecutiveProtectionSignals, reopenAt: active.circuit.reopenAt }; }
-function circuitDelay(count: number): number { return Math.min(60_000 * (2 ** Math.max(0, count - 1)), 5 * 60_000); }
-async function tripCircuit(active: ActiveRun, reason: string): Promise<void> {
-  const circuit = active.circuit; circuit.consecutiveProtectionSignals += 1; circuit.state = "OPEN"; circuit.reopenAt = Date.now() + circuitDelay(circuit.consecutiveProtectionSignals);
+function circuitDelay(count: number, retryAfterMs: number | null | undefined = null): number { return Math.max(retryAfterMs ?? 0, Math.min(15 * 60_000 * (2 ** Math.max(0, count - 1)), 6 * 60 * 60_000)); }
+async function tripCircuit(active: ActiveRun, reason: string, retryAfterMs: number | null | undefined = null): Promise<void> {
+  const circuit = active.circuit; circuit.consecutiveProtectionSignals += 1; circuit.state = "OPEN"; circuit.reopenAt = Date.now() + circuitDelay(circuit.consecutiveProtectionSignals, retryAfterMs);
+  const storeId = active.detail.run.targetSnapshot?.storeId; if (storeId) await profiles.setMonitorCircuit({ storeId, consecutiveProtectionSignals: circuit.consecutiveProtectionSignals, reopenAt: circuit.reopenAt });
   if (circuit.timer) clearTimeout(circuit.timer);
   active.monitor?.send({ type: "PAUSE_MONITOR", version: IPC_VERSION, until: circuit.reopenAt });
   for (const profileId of active.profileSessions.keys()) orchestrator.pauseAutomation(profileId, circuit.reopenAt);
   await appendMonitorEvent(active.detail.run.id, "STOREFRONT_PROTECTION_CIRCUIT_OPEN", null, `Automation paused until ${new Date(circuit.reopenAt).toLocaleTimeString()}: ${reason}`);
   circuit.timer = setTimeout(() => {
     if (activeRun !== active || active.ending) return;
-    circuit.state = "CLOSED"; circuit.reopenAt = null; active.monitor?.send({ type: "RESUME_MONITOR", version: IPC_VERSION });
+    circuit.state = "CLOSED"; circuit.reopenAt = null; if (storeId) void profiles.setMonitorCircuit({ storeId, consecutiveProtectionSignals: circuit.consecutiveProtectionSignals, reopenAt: null }); active.monitor?.send({ type: "RESUME_MONITOR", version: IPC_VERSION });
     for (const profileId of active.profileSessions.keys()) orchestrator.resumeAutomation(profileId);
     void appendMonitorEvent(active.detail.run.id, "STOREFRONT_PROTECTION_CIRCUIT_CLOSED", null, "The protection cooldown elapsed; monitoring resumed."); emitRunsChanged(); emitHealthChanged();
-  }, circuitDelay(circuit.consecutiveProtectionSignals));
+  }, Math.max(0, circuit.reopenAt - Date.now()));
   emitRunsChanged(); emitHealthChanged();
 }
-function resetCircuitAfterSuccess(active: ActiveRun): void { if (active.circuit.state === "CLOSED") active.circuit.consecutiveProtectionSignals = 0; }
+async function tripServiceCooldown(active: ActiveRun, retryAfterMs: number | null | undefined = null): Promise<void> {
+  const cooldownMs = Math.max(60_000, retryAfterMs ?? 0); const circuit = active.circuit; circuit.state = "OPEN"; circuit.reopenAt = Date.now() + cooldownMs; if (circuit.timer) clearTimeout(circuit.timer); active.monitor?.send({ type: "PAUSE_MONITOR", version: IPC_VERSION, until: circuit.reopenAt });
+  await appendMonitorEvent(active.detail.run.id, "STOREFRONT_SERVICE_COOLDOWN_STARTED", null, `HTTP 503 paused every monitor route for ${Math.ceil(cooldownMs / 1_000)} seconds.`);
+  circuit.timer = setTimeout(() => { if (activeRun !== active || active.ending) return; circuit.state = "CLOSED"; circuit.reopenAt = null; circuit.timer = undefined; active.monitor?.send({ type: "RESUME_MONITOR", version: IPC_VERSION }); void appendMonitorEvent(active.detail.run.id, "STOREFRONT_SERVICE_COOLDOWN_ENDED", null, "The service cooldown elapsed; monitoring resumed."); emitRunsChanged(); emitHealthChanged(); }, cooldownMs);
+}
+function resetCircuitAfterSuccess(active: ActiveRun): void { if (active.circuit.state === "CLOSED") { active.circuit.consecutiveProtectionSignals = 0; const storeId = active.detail.run.targetSnapshot?.storeId; if (storeId) void profiles.setMonitorCircuit({ storeId, consecutiveProtectionSignals: 0, reopenAt: null }); } }
 async function saveHealth(snapshot: BrowserHealthSnapshot): Promise<void> { await profiles.addBrowserHealthSnapshot(snapshot); emitHealthChanged(); }
 async function appendMonitorEvent(runId: string, type: string, check: TargetCheck | null, fallback: string | null): Promise<void> {
   const active = activeRun; if (!active || active.detail.run.id !== runId) return; const decision = check?.decision;
-  await profiles.addRunEvent({ id: randomUUID(), runId, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type, stateBefore: null, stateAfter: null, payload: check ? { checkedAt: check.checkedAt, status: check.status, candidateCount: check.candidateCount, decision: decision?.kind, message: decision?.message, candidate: decision?.candidate ? { name: decision.candidate.name, url: decision.candidate.url, imageUrl: decision.candidate.imageUrl, priceMinor: decision.candidate.priceMinor, currency: decision.candidate.currency, variants: decision.candidate.variants } : null, selectedVariant: decision?.selectedVariant ?? null, errorMessage: check.errorMessage } : { message: fallback } });
+  await profiles.addRunEvent({ id: randomUUID(), runId, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type, stateBefore: null, stateAfter: null, payload: check ? { checkedAt: check.checkedAt, status: check.status, candidateCount: check.candidateCount, decision: decision?.kind, message: decision?.message, candidate: decision?.candidate ? { name: decision.candidate.name, url: decision.candidate.url, imageUrl: decision.candidate.imageUrl, priceMinor: decision.candidate.priceMinor, currency: decision.candidate.currency, variants: decision.candidate.variants } : null, selectedVariant: decision?.selectedVariant ?? null, retryAfterMs: check.retryAfterMs ?? null, errorMessage: check.errorMessage } : { message: fallback } });
 }
 
 async function onSessionChanged(snapshot: SessionSnapshot): Promise<void> {
   if (snapshot.state === "STOPPED" || snapshot.state === "ERROR" || snapshot.state === "CRASHED") clipboardCoordinator.cancelProfile(snapshot.profileId);
   mainWindow?.webContents.send(sessionIpc.changed, snapshot); const active = activeRun; const runSession = active?.profileSessions.get(snapshot.profileId); if (!active || !runSession) return;
-  if (canStartTargetMonitor(Boolean(active.detail.run.targetSnapshot), Boolean(active.monitor), active.ending, snapshot.state)) active.monitor = startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!);
+  if (canStartTargetMonitor(Boolean(active.detail.run.targetSnapshot), Boolean(active.monitor), active.ending, snapshot.state)) {
+    if (active.circuit.state === "OPEN" && active.circuit.reopenAt && active.circuit.reopenAt > Date.now()) {
+      if (!active.circuit.timer) active.circuit.timer = setTimeout(() => { if (activeRun !== active || active.ending) return; active.circuit.state = "CLOSED"; active.circuit.reopenAt = null; active.circuit.timer = undefined; void startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!).then((worker) => { if (activeRun === active) active.monitor = worker; else worker.kill(); }); }, active.circuit.reopenAt - Date.now());
+    } else active.monitor = await startMonitor(active.detail.run.id, active.detail.run.targetSnapshot!);
+  }
   if (snapshot.state === "READY") { runSession.status = "RECORDING"; runSession.route = snapshot.route; await profiles.setRunSession(runSession.id, "RECORDING", snapshot.route); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: runSession.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "SESSION_READY", stateBefore: "STARTING", stateAfter: "RECORDING", payload: { route: snapshot.route.kind, verification: snapshot.route.verification.status } }); await profiles.setRunStatus(active.detail.run.id, "RECORDING"); if (active.pendingAssist) await dispatchAssistedTarget(active, active.pendingAssist); emitRunsChanged(); }
   if (snapshot.state === "ERROR" || snapshot.state === "CRASHED") await recordSessionFailure(snapshot.profileId, runSession, snapshot.error ?? { code: "RUNNER_CRASHED", message: "The browser runner exited unexpectedly." });
 }
@@ -346,7 +371,7 @@ async function resumeRunSession(profileId: string): Promise<boolean> {
 }
 
 app.whenReady().then(async () => {
-  const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); watcherProfilesRoot = join(dataRoot, "watcher-profiles"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
+  const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
   clipboardCoordinator = new ClipboardCoordinator({
     availableFormats: () => clipboard.availableFormats(),
     writeLease: (value, requestId) => clipboard.write({ text: value, html: `<span data-copify-clipboard-lease="${requestId}"></span>` }),

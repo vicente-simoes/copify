@@ -16,7 +16,7 @@ let startedMono: bigint | undefined;
 let assistPage: Page | undefined;
 let assistState = "OBSERVING";
 type AssistCommand = Extract<import("@copify/shared").RunnerCommand, { type: "ASSIST_TARGET" }>;
-type CartInspection = { state: "EMPTY" } | { state: "ITEMS"; itemCount: number | null; hasTarget: boolean } | { state: "UNKNOWN" } | { state: "BLOCKED" };
+type CartInspection = { state: "EMPTY" } | { state: "ITEMS"; itemCount: number | null; hasTarget: boolean; hasVariant: boolean; currency: string | null; priceMinor: number | null } | { state: "UNKNOWN" } | { state: "BLOCKED" };
 let pendingAssist: AssistCommand | undefined;
 let cartResumeMode: "EMPTY_CART" | "TARGET_ONLY" | undefined;
 let tracingStoppedForPrivacy = false;
@@ -158,14 +158,20 @@ async function continueFromEmptyCart(command: AssistCommand): Promise<void> {
   if (cart.state === "BLOCKED") { cartResumeMode = "EMPTY_CART"; return; }
   if (cart.state !== "EMPTY") { cartResumeMode = "EMPTY_CART"; await showCartForReview(assistPage, command.candidate.url); transition("CHECKPOINT", cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", { reason: cart.state === "ITEMS" ? "CART_NOT_EMPTY" : "CART_STATE_UNKNOWN", itemCount: cart.state === "ITEMS" ? cart.itemCount : null, message: "Copify left the existing cart unchanged. Empty the cart manually, then resume this session." }); await assistPage.bringToFront(); return; }
   cartResumeMode = undefined;
-  transition("PRODUCT_OPEN", "PRODUCT_NAVIGATION_STARTED", { product: command.candidate.name, variant: command.variant, quantity: command.quantity });
-  await assistPage.goto(command.candidate.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-  if (await checkpoint(assistPage)) return;
-  await selectVariant(assistPage, command.variant);
-  transition("VARIANT_SELECTED", "VARIANT_SELECTED", { color: command.variant.color, size: command.variant.size });
-  transition("CARTING", "ADD_TO_CART_STARTED", {});
-  atcAttempts += 1; const added = await addToCart(assistPage);
-  if (!added) throw new AssistError("ATC_FAILED", "The storefront did not confirm that the item was added to cart.");
+  const directCartStartedAt = Date.now();
+  transition("VARIANT_SELECTED", "VARIANT_SELECTED", { color: command.variant.color, size: command.variant.size }); transition("CARTING", "DIRECT_CART_STARTED", { method: "cart/add.js" }); atcAttempts += 1;
+  const direct = await directCart(assistPage, command);
+  if (direct === "PROTECTION") { transition("CHECKPOINT", "CHECKPOINT_DETECTED", { reason: "STOREFRONT_PROTECTION", message: "The storefront rejected the cart request. Copify did not try another route or fallback." }); return; }
+  if (direct === "UNAVAILABLE") throw new AssistError("VARIANT_NOT_AVAILABLE", "The selected variant is no longer available.");
+  let verified = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id);
+  if (verified.state === "EMPTY" && direct === "UNSUPPORTED") {
+    emitRun("DIRECT_CART_FALLBACK", { method: "cart-permalink" }); await assistPage.goto(new URL(`/cart/${command.variant.id}:1`, command.candidate.url).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 }); verified = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id);
+  }
+  if (verified.state === "EMPTY" && direct === "UNSUPPORTED") { emitRun("DIRECT_CART_FALLBACK", { method: "product-ui" }); await assistPage.goto(command.candidate.url, { waitUntil: "domcontentloaded", timeout: 30_000 }); if (await checkpoint(assistPage)) return; await selectVariant(assistPage, command.variant); if (!await addToCart(assistPage)) throw new AssistError("ATC_FAILED", "The storefront did not confirm that the item was added to cart."); verified = await inspectVisibleCart(assistPage, command.candidate.name, command.variant.id); }
+  if (verified.state !== "ITEMS" || verified.itemCount !== 1 || !verified.hasVariant) throw new AssistError("ATC_FAILED", "Copify could not verify the exact selected variant in the cart.");
+  if (verified.currency && verified.currency !== command.priceConstraint.currency) throw new AssistError("ATC_FAILED", "The cart currency changed after detection.");
+  if (verified.priceMinor !== null && verified.priceMinor > command.priceConstraint.maxRetailMinor) { transition("CHECKPOINT", "PRICE_LIMIT_EXCEEDED", { reason: "PRICE_LIMIT_EXCEEDED", detectedPriceMinor: verified.priceMinor, maximumPriceMinor: command.priceConstraint.maxRetailMinor }); return; }
+  emitRun("DIRECT_CART_VERIFIED", { method: direct === "ADDED" ? "cart/add.js" : "fallback", elapsedMs: Date.now() - directCartStartedAt });
   transition("CARTED", "CART_CONFIRMED", { requestedQuantity: command.quantity, actualQuantity: 1 });
   if (command.quantity > 1) emitRun("QUANTITY_FALLBACK", { requestedQuantity: command.quantity, actualQuantity: 1 });
   await continueFromTargetOnlyCart(command);
@@ -186,7 +192,7 @@ async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void>
   transition("READY_TO_CONFIRM", "READY_TO_CONFIRM", { message: "Shipping details were filled. Review payment and confirm manually." }); await assistPage.bringToFront();
 }
 
-async function inspectCart(page: Page, targetName: string, productUrl: string): Promise<CartInspection> {
+async function inspectCart(page: Page, targetName: string, productUrl: string, variantId?: string): Promise<CartInspection> {
   try {
     // Supreme currently redirects a browser navigation to /cart to /pages/shop
     // when the cart is empty. Read Shopify's public cart state through this
@@ -194,7 +200,7 @@ async function inspectCart(page: Page, targetName: string, productUrl: string): 
     // assisted tab away from its current step.
     const response = await page.context().request.get(new URL("/cart.js", productUrl).toString(), { timeout: 30_000 });
     if (!response.ok()) return { state: "UNKNOWN" };
-    return parseShopifyCart(await response.json(), targetName) ?? { state: "UNKNOWN" };
+    return parseShopifyCart(await response.json(), targetName, variantId) ?? { state: "UNKNOWN" };
   } catch {
     return { state: "UNKNOWN" };
   }
@@ -205,7 +211,7 @@ async function warmStorefront(activeContext: BrowserContext): Promise<void> {
   await page.goto("https://eu.supreme.com/pages/shop", { waitUntil: "domcontentloaded", timeout: 15_000 });
 }
 
-async function inspectVisibleCart(page: Page, targetName: string): Promise<CartInspection> {
+async function inspectVisibleCart(page: Page, targetName: string, variantId?: string): Promise<CartInspection> {
   try {
     // Keep this request in the page itself. Shopify can associate cart changes
     // with browser-only session state that is not immediately reflected in the
@@ -215,7 +221,7 @@ async function inspectVisibleCart(page: Page, targetName: string): Promise<CartI
       return { ok: value.ok, body: await value.text() };
     });
     if (!response.ok) return { state: "UNKNOWN" };
-    return parseShopifyCart(JSON.parse(response.body), targetName) ?? { state: "UNKNOWN" };
+    return parseShopifyCart(JSON.parse(response.body), targetName, variantId) ?? { state: "UNKNOWN" };
   } catch {
     return { state: "UNKNOWN" };
   }
@@ -231,7 +237,7 @@ async function showCartForReview(page: Page, productUrl: string): Promise<void> 
   }
 }
 
-export function parseShopifyCart(value: unknown, targetName: string): CartInspection | null {
+export function parseShopifyCart(value: unknown, targetName: string, expectedVariantId?: string): CartInspection | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const cart = value as Record<string, unknown>; const itemCount = cart.item_count;
   if (!Number.isInteger(itemCount) || typeof itemCount !== "number" || itemCount < 0 || !Array.isArray(cart.items)) return null;
@@ -242,7 +248,19 @@ export function parseShopifyCart(value: unknown, targetName: string): CartInspec
     const product = item as Record<string, unknown>;
     return [product.product_title, product.title, product.handle, product.url].some((candidate) => typeof candidate === "string" && normalizeVariantValue(candidate).includes(target));
   });
-  return { state: "ITEMS", itemCount, hasTarget };
+  const expected = expectedVariantId ?? ""; const selected = cart.items.find((item) => item && typeof item === "object" && !Array.isArray(item) && String((item as Record<string, unknown>).variant_id ?? (item as Record<string, unknown>).id ?? "") === expected) as Record<string, unknown> | undefined;
+  const currency = typeof cart.currency === "string" ? cart.currency : null; const price = selected?.final_line_price ?? selected?.line_price ?? selected?.final_price ?? selected?.price;
+  return { state: "ITEMS", itemCount, hasTarget, hasVariant: expected ? Boolean(selected) : hasTarget, currency, priceMinor: typeof price === "number" && Number.isSafeInteger(price) && price >= 0 ? price : null };
+}
+
+async function directCart(page: Page, command: AssistCommand): Promise<"ADDED" | "UNSUPPORTED" | "UNAVAILABLE" | "PROTECTION" | "UNCERTAIN"> {
+  return submitDirectCart(page, command.variant.id);
+}
+export async function submitDirectCart(page: Page, variantId: string): Promise<"ADDED" | "UNSUPPORTED" | "UNAVAILABLE" | "PROTECTION" | "UNCERTAIN"> {
+  try {
+    const result = await page.evaluate(async ({ id }) => { try { const response = await fetch("/cart/add.js", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ items: [{ id, quantity: 1 }] }) }); return { status: response.status }; } catch { return { status: 0 }; } }, { id: variantId });
+    if (result.status === 403 || result.status === 429) return "PROTECTION"; if (result.status === 404 || result.status === 405) return "UNSUPPORTED"; if (result.status === 422) return "UNAVAILABLE"; if (result.status >= 200 && result.status < 300) return "ADDED"; return "UNCERTAIN";
+  } catch { return "UNCERTAIN"; }
 }
 
 async function checkCart(id: string): Promise<void> {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { BrowserDriverInput, BrowserProfile, ProxyBenchmark, ProxyProfile, SessionSnapshot, Store } from "@copify/shared";
 import type { ProxyDraft } from "../types";
 import { Field, Benchmark } from "../ui/primitives";
@@ -44,6 +44,10 @@ export function Settings(props: {
   onBrowserDriver: (id: string, driver: BrowserDriverInput) => void;
 }) {
   const [tab, setTab] = useState<Tab>("routes");
+  const [monitorProxyIds, setMonitorProxyIds] = useState<string[]>([]);
+  const [monitorNotice, setMonitorNotice] = useState<string>("");
+  useEffect(() => { void window.copify.settings.getMonitorNetwork().then((result) => { if (result.ok) setMonitorProxyIds(result.value.proxyProfileIds); }); }, []);
+  const saveMonitorRoutes = async () => { const result = await window.copify.settings.updateMonitorNetwork({ proxyProfileIds: monitorProxyIds }); setMonitorNotice(result.ok ? "Monitor routes saved." : result.error); if (result.ok) setMonitorProxyIds(result.value.proxyProfileIds); };
 
   return (
     <div className="page-stack">
@@ -102,6 +106,14 @@ export function Settings(props: {
             onSave={props.onSaveProxy}
             onCancel={props.onCancelProxy}
           />
+          <section className="panel">
+            <div className="section-title"><div><h2>HTTP monitor routes</h2><p className="muted">No selection uses your direct connection. Selected routes are used round-robin only between scheduled polls; any 403 or 429 stops the entire monitor.</p></div><button disabled={props.busy} onClick={() => void saveMonitorRoutes()}>Save</button></div>
+            <div className="rows">
+              {props.proxies.filter((proxy) => proxy.enabled).map((proxy) => <label className="row" key={proxy.id}><span className="row-main"><span className="row-name">{proxy.name}</span><span className="row-meta">{proxy.protocol} · {proxy.host}:{proxy.port}</span></span><input type="checkbox" checked={monitorProxyIds.includes(proxy.id)} onChange={(event) => setMonitorProxyIds((ids) => event.target.checked ? [...ids, proxy.id] : ids.filter((id) => id !== proxy.id))} /></label>)}
+              {!props.proxies.some((proxy) => proxy.enabled) && <div className="row"><span className="row-meta">No enabled proxies. The monitor will use the direct connection.</span></div>}
+            </div>
+            {monitorNotice && <p className="field-note">{monitorNotice}</p>}
+          </section>
         </>
       )}
 
