@@ -17,7 +17,7 @@
 - Typecheck: **Passed**
 - Production build: **Passed**
 - Built-app launch smoke with an isolated temporary profile: **Passed**
-- Normal regression suite: **Passed — 108 tests**
+- Normal regression suite: **Passed — 109 tests**
 - Profile-coherence resolver and launch-policy tests: **Passed**
 - v11-to-v12 migration and warming persistence tests: **Passed**
 - Local monitor integration suite: **Passed — 4 tests, 1 live test skipped**
@@ -39,7 +39,9 @@
 
 The following require the existing local DataImpulse account and interactive browser state and must pass before package versions are changed to 0.10.0:
 
-- Direct and sticky DataImpulse PT profiles show internally consistent country, `pt-PT`, `Europe/Lisbon`, geolocation, and WebRTC policy.
+- Direct and sticky DataImpulse PT profiles show internally consistent country, `pt-PT`, `Europe/Lisbon`, geolocation, and WebRTC policy: **Passed**
+  - Direct: PT / Ponta do Sol, `pt-PT`, `Europe/Lisbon`, geolocation applied, `default_public_interface_only`.
+  - Sticky DataImpulse: PT / Amadora, `pt-PT`, `Europe/Lisbon`, geolocation applied, `disable_non_proxied_udp`.
 - A warmed profile retains manually established Google/Shop/Shopify state after browser and app restart.
 - Supreme monitoring plus sticky-route assisted checkout still reaches `READY_TO_CONFIRM` without submitting a purchase.
 - A controlled PSD2/3DS handoff raises one Windows notification, focuses the affected Chrome session, highlights it on the Run board, and records a sanitized return event.
