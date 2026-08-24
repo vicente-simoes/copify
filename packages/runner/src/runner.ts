@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserContext, CDPSession, Locator, Page } from "rebrowser-playwright";
-import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type ProductVariant, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
-import { verifyRoute } from "./network";
+import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
+import { routeFromIdentity, verifyRoute } from "./network";
 import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
+import { externalCoherence, resolveNetworkCoherence } from "./coherence";
 import { HumanInput, type ClipboardPasteClient, type HumanInputTelemetry } from "./human-input";
 
 let context: BrowserContext | undefined;
@@ -22,12 +23,14 @@ let cartResumeMode: "EMPTY_CART" | "TARGET_ONLY" | undefined;
 let tracingStoppedForPrivacy = false;
 let driverSession: DriverSession | undefined;
 let driverMetadata: BrowserDriverMetadata | undefined;
+let coherence: ProfileCoherenceSummary | undefined;
 let automationPausedUntil: number | null = null;
 let humanInputs = new WeakMap<Page, HumanInput>();
 const pendingClipboardLeases = new Map<string, (granted: boolean) => void>();
 let heldClipboardLeaseId: string | undefined;
 let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
 let trafficReceivedBytes = 0; let trafficSentBytes = 0; let trafficCdpAttached = 0; let trafficFallbackSeen = false; let observedPages = new WeakSet<Page>(); let trafficSessions: CDPSession[] = [];
+let paymentHandoffLatch: PaymentHandoffLatch | undefined;
 
 process.on("message", async (message: unknown) => {
   const command = runnerCommandSchema.safeParse(message); if (!command.success) return;
@@ -37,6 +40,7 @@ process.on("message", async (message: unknown) => {
   if (command.data.type === "RESUME_ASSIST") await resumeAssist(command.data.runId, command.data.runSessionId);
   if (command.data.type === "CHECK_CART") await checkCart(command.data.profileId);
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
+  if (command.data.type === "OPEN_WARM_DESTINATION") await openWarmDestination(command.data.url);
   if (command.data.type === "PAUSE_AUTOMATION") pauseAutomation(command.data.until);
   if (command.data.type === "RESUME_AUTOMATION") automationPausedUntil = null;
   if (command.data.type === "CLIPBOARD_LEASE_GRANTED") resolveClipboardLease(command.data.requestId, true);
@@ -45,7 +49,7 @@ process.on("message", async (message: unknown) => {
 });
 
 async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null): Promise<void> {
-  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
+  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
   try {
     await disableChromeTranslation(userDataDir);
     const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
@@ -56,8 +60,15 @@ async function start(id: string, userDataDir: string, driver: RunnerBrowserDrive
         persistentOptions.recordVideo = { dir: join(recording.artifactDir, "video") };
       }
     }
-    driverSession = await createBrowserDriver(driver).launch({ driver, userDataDir, proxy, persistentOptions });
+    const resolved = driver.kind === "NATIVE_STEALTH" ? await resolveNetworkCoherence(proxy, probeUrl) : undefined;
+    driverSession = await createBrowserDriver(driver).launch({ driver, userDataDir, proxy, persistentOptions, coherence: resolved?.launch });
     context = driverSession.context; driverMetadata = driverSession.metadata;
+    if (resolved) coherence = resolved.summary;
+    else {
+      const page = context.pages()[0] ?? await context.newPage();
+      const values = await page.evaluate(() => ({ locale: navigator.language || null, timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone || null })).catch(() => ({ locale: null, timezoneId: null }));
+      coherence = externalCoherence(values.locale, values.timezoneId);
+    }
     context.on("close", () => {
       context = undefined;
       if (!stopping) {
@@ -70,13 +81,16 @@ async function start(id: string, userDataDir: string, driver: RunnerBrowserDrive
       if (recording.diagnosticLevel === "DEEP_DEBUG" && driver.kind === "EXTERNAL_CDP") emitRun("DRIVER_CAPABILITY_UNAVAILABLE", { capability: "launchHarVideo", message: "External CDP attachment cannot add launch-time HAR or video recording." });
     }
     if (context.pages().length === 0) await context.newPage();
-    const route = await verifyRoute(context, proxy, probeUrl);
+    const route = resolved?.identity.publicIp
+      ? routeFromIdentity(proxy, resolved.identity, resolved.summary)
+      : await verifyRoute(context, proxy, probeUrl);
     emitRun("ROUTE_VERIFIED", { kind: route.kind, verification: route.verification });
+    emitRun("PROFILE_COHERENCE_APPLIED", { status: coherence.status, country: coherence.country, city: coherence.city, locale: coherence.locale, timezoneId: coherence.timezoneId, geolocationApplied: coherence.geolocationApplied, webRtcPolicy: coherence.webRtcPolicy, source: coherence.source, message: coherence.message });
     // Do not leave the visible browser on an unused blank tab while the target
     // monitor performs its first check. This is a normal storefront warm-up,
     // not an artificial delay or stealth behavior.
     if (recording?.assisted) await warmStorefront(context).catch(() => undefined);
-    send({ type: "READY", version: IPC_VERSION, profileId: id, route, driver: driverSession.metadata });
+    send({ type: "READY", version: IPC_VERSION, profileId: id, route, coherence, driver: driverSession.metadata });
   } catch (error) {
     if (recording) emitRun("RECORDING_OR_LAUNCH_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
     await driverSession?.stop().catch(() => undefined); driverSession = undefined;
@@ -108,7 +122,8 @@ async function beginRecording(activeContext: BrowserContext, value: RunnerRecord
 
 function observePage(page: Page): void {
   if (observedPages.has(page)) return; observedPages.add(page); void attachTrafficSession(page);
-  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) { navigationCount += 1; emitRun("NAVIGATION", sanitizeRequest(frame.url(), "GET", "document")); void page.evaluate(() => performance.getEntriesByType("navigation").at(-1)?.duration ?? null).then((value) => { if (typeof value === "number" && value >= 0) pageLoads.push(value); }).catch(() => undefined); } });
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) { navigationCount += 1; emitRun("NAVIGATION", sanitizeRequest(frame.url(), "GET", "document")); void page.evaluate(() => performance.getEntriesByType("navigation").at(-1)?.duration ?? null).then((value) => { if (typeof value === "number" && value >= 0) pageLoads.push(value); }).catch(() => undefined); } void inspectPaymentHandoff(page, frame.url()); });
+  page.on("domcontentloaded", () => void inspectPaymentHandoff(page, page.url()));
   page.on("pageerror", (error) => { emitRun("PAGE_ERROR", { message: sanitizeText(error.message) }); void screenshot(`error-${Date.now()}.png`, false); });
   page.on("console", (message) => { if (recording?.diagnosticLevel !== "NORMAL") emitRun("CONSOLE", { level: message.type(), text: sanitizeText(message.text()) }); });
 }
@@ -338,6 +353,16 @@ async function emptyCart(id: string): Promise<void> {
     send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "EMPTY", itemCount: 0, checkedAt: Date.now(), message: "Cart emptied." } });
   } catch (error) { send({ type: "CART_STATUS", version: IPC_VERSION, profileId: id, status: { status: "ERROR", itemCount: null, checkedAt: Date.now(), message: sanitizeText(error instanceof Error ? error.message : "Cart removal failed.") } }); }
   finally { await page.close().catch(() => undefined); }
+}
+
+async function openWarmDestination(url: string): Promise<void> {
+  if (!context) return;
+  // Electron main resolves this from an immutable store manifest or one of the
+  // two built-in destinations. The runner still enforces HTTPS and rejects URL
+  // credentials at its process boundary.
+  const parsed = new URL(url); const allowed = parsed.protocol === "https:" && !parsed.username && !parsed.password;
+  if (!allowed) return;
+  const page = await context.newPage(); await page.goto(parsed.toString(), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined); await page.bringToFront();
 }
 
 export async function inspectBrowserCartDocument(page: Page, targetName: string, productUrl: string, variantId?: string): Promise<CartInspection> {
@@ -689,7 +714,7 @@ async function emitHealth(): Promise<void> {
   const profileAgeMs = profileUserDataDir ? await stat(profileUserDataDir).then((value) => Math.max(0, Date.now() - value.birthtimeMs)).catch(() => null) : null;
   const cookieCount = await context.cookies().then((value) => value.length).catch(() => null);
   const minutes = Math.max(Number(process.hrtime.bigint() - startedMono) / 60_000_000_000, 1 / 60);
-  send({ type: "HEALTH", version: IPC_VERSION, profileId, health: { capturedAt: Date.now(), navigatorWebdriver: await (context.pages()[0]?.evaluate(() => navigator.webdriver).catch(() => null) ?? null), browserVersion: driverMetadata?.browserVersion ?? context.browser()?.version() ?? null, driverKind: driverMetadata?.kind ?? null, stealthStatus: driverMetadata?.stealthStatus ?? null, profileAgeMs, cookieCount, requestCount, requestsPerMinute: requestCount / minutes, navigationCount, navigationsPerMinute: navigationCount / minutes, atcAttempts, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures, averagePageLoadMs: pageLoads.length ? pageLoads.reduce((sum, value) => sum + value, 0) / pageLoads.length : null, circuit: null } });
+  send({ type: "HEALTH", version: IPC_VERSION, profileId, health: { capturedAt: Date.now(), navigatorWebdriver: await (context.pages()[0]?.evaluate(() => navigator.webdriver).catch(() => null) ?? null), browserVersion: driverMetadata?.browserVersion ?? context.browser()?.version() ?? null, driverKind: driverMetadata?.kind ?? null, stealthStatus: driverMetadata?.stealthStatus ?? null, profileAgeMs, cookieCount, requestCount, requestsPerMinute: requestCount / minutes, navigationCount, navigationsPerMinute: navigationCount / minutes, atcAttempts, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures, averagePageLoadMs: pageLoads.length ? pageLoads.reduce((sum, value) => sum + value, 0) / pageLoads.length : null, coherence: coherence ?? null, circuit: null } });
   emitNetworkUsage();
 }
 
@@ -703,8 +728,46 @@ async function stop(): Promise<void> {
   try {
     await runnerClipboard.release();
     for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear();
-    if (recording) await endRun(recording.runSessionId); for (const session of trafficSessions) await session.detach().catch(() => undefined); trafficSessions = []; await driverSession?.stop();
-  } finally { context = undefined; driverSession = undefined; driverMetadata = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
+    paymentHandoffLatch?.stop(); if (recording) await endRun(recording.runSessionId); for (const session of trafficSessions) await session.detach().catch(() => undefined); trafficSessions = []; await driverSession?.stop();
+  } finally { context = undefined; driverSession = undefined; driverMetadata = undefined; coherence = undefined; if (id) send({ type: "STOPPED", version: IPC_VERSION, profileId: id }); process.exit(0); }
+}
+
+export function paymentHandoffSignal(url: string, bodyText = ""): boolean {
+  let safeUrl = ""; try { const parsed = new URL(url); safeUrl = `${parsed.hostname}${parsed.pathname}`.toLowerCase(); } catch { safeUrl = url.toLowerCase(); }
+  return /(?:^|[./_-])(3ds2?|three.?d.?secure|acs|cardinalcommerce|secure.?auth(?:entication)?)(?:[./_-]|$)/i.test(safeUrl) || /3d secure|strong customer authentication|authenticate (?:this|your) payment|verify (?:this|your) payment|approve (?:it|the payment) in your (?:bank|banking) app/i.test(bodyText);
+}
+
+export class PaymentHandoffLatch {
+  private active = false;
+  private returnTimer: NodeJS.Timeout | undefined;
+  constructor(private readonly returnDelayMs = 1_500) {}
+  observe(detected: boolean, onDetected: () => void, onReturned: () => void): void {
+    if (detected) {
+      if (this.returnTimer) clearTimeout(this.returnTimer); this.returnTimer = undefined;
+      if (this.active) return;
+      this.active = true; onDetected(); return;
+    }
+    if (!this.active || this.returnTimer) return;
+    this.returnTimer = setTimeout(() => { this.returnTimer = undefined; if (!this.active) return; this.active = false; onReturned(); }, this.returnDelayMs);
+    this.returnTimer.unref?.();
+  }
+  stop(): void { if (this.returnTimer) clearTimeout(this.returnTimer); this.returnTimer = undefined; this.active = false; }
+}
+
+async function inspectPaymentHandoff(page: Page, navigatedUrl: string): Promise<void> {
+  if (!recording || !profileId || !["READY_TO_CONFIRM", "CHECKOUT_HANDOFF"].includes(assistState)) return;
+  const text = await page.locator("body").innerText().then((value) => value.slice(0, 12_000)).catch(() => "");
+  const detected = paymentHandoffSignal(navigatedUrl, text) || page.frames().some((frame) => paymentHandoffSignal(frame.url()));
+  paymentHandoffLatch?.observe(detected, () => {
+    if (!recording || !profileId) return;
+    transition("CHECKOUT_HANDOFF", "PAYMENT_HANDOFF_DETECTED", { category: "PSD2_3DS" });
+    send({ type: "PAYMENT_HANDOFF", version: IPC_VERSION, profileId, runId: recording.runId, runSessionId: recording.runSessionId, phase: "DETECTED", category: "PSD2_3DS" });
+    void page.bringToFront().catch(() => undefined);
+  }, () => {
+    if (!recording || !profileId) return;
+    transition("READY_TO_CONFIRM", "PAYMENT_HANDOFF_RETURNED", { category: "PSD2_3DS" });
+    send({ type: "PAYMENT_HANDOFF", version: IPC_VERSION, profileId, runId: recording.runId, runSessionId: recording.runSessionId, phase: "RETURNED", category: "PSD2_3DS" });
+  });
 }
 
 function sanitizeRequest(url: string, method: string, resourceType: string, error?: string): Record<string, unknown> {

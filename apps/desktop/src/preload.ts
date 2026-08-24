@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc,
-  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
+  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -61,6 +61,14 @@ const api = {
   health: {
     get: (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string): Promise<ApiResult<BrowserHealthDetail>> => ipcRenderer.invoke(healthIpc.get, subjectKind, subjectId),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(healthIpc.changed, callback); return () => ipcRenderer.removeListener(healthIpc.changed, callback); },
+  },
+  warming: {
+    list: (): Promise<ApiResult<ProfileWarmState[]>> => ipcRenderer.invoke(warmingIpc.list),
+    start: (browserProfileId: string, storeId: string): Promise<ApiResult<ProfileWarmState>> => ipcRenderer.invoke(warmingIpc.start, browserProfileId, storeId),
+    update: (browserProfileId: string, storeId: string, input: UpdateProfileWarmStateInput): Promise<ApiResult<ProfileWarmState>> => ipcRenderer.invoke(warmingIpc.update, browserProfileId, storeId, input),
+    openDestination: (browserProfileId: string, storeId: string, destination: WarmDestination): Promise<ApiResult<boolean>> => ipcRenderer.invoke(warmingIpc.openDestination, browserProfileId, storeId, destination),
+    complete: (browserProfileId: string, storeId: string): Promise<ApiResult<ProfileWarmState>> => ipcRenderer.invoke(warmingIpc.complete, browserProfileId, storeId),
+    onChanged: (listener: (states: ProfileWarmState[]) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, states: ProfileWarmState[]) => listener(states); ipcRenderer.on(warmingIpc.changed, callback); return () => ipcRenderer.removeListener(warmingIpc.changed, callback); },
   },
   monitor: {
     status: (): Promise<ApiResult<MonitorRuntimeStatus>> => ipcRenderer.invoke(monitorIpc.status),

@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { fork, type ChildProcess } from "node:child_process";
 import {
   DEFAULT_NETWORK_PROBE_URL, IPC_VERSION, defaultRoute, runnerEventSchema,
-  type BrowserDriverMetadata, type BrowserProfile, type ProductCandidate, type ProductVariant, type RunnerBrowserDriver, type RunnerCommand, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot
+  type BrowserDriverMetadata, type BrowserProfile, type ProductCandidate, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerCommand, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot
 } from "@copify/shared";
 
 export type RunnerChild = Pick<ChildProcess, "send" | "kill" | "on" | "once" | "removeAllListeners">;
@@ -18,7 +18,7 @@ export class SessionOrchestrator extends EventEmitter {
 
   constructor(private readonly createRunner: RunnerFactory) { super(); }
   list(): SessionSnapshot[] { return [...this.sessions.values()].sort((a, b) => a.profileId.localeCompare(b.profileId)); }
-  snapshot(profileId: string): SessionSnapshot { return this.sessions.get(profileId) ?? { profileId, state: "STOPPED", error: null, route: defaultRoute(), driver: null, updatedAt: Date.now() }; }
+  snapshot(profileId: string): SessionSnapshot { return this.sessions.get(profileId) ?? { profileId, state: "STOPPED", error: null, route: defaultRoute(), coherence: null, driver: null, updatedAt: Date.now() }; }
 
   async open(input: BrowserProfile | SessionLaunchSpec): Promise<void> {
     const spec = toLaunchSpec(input);
@@ -55,14 +55,15 @@ export class SessionOrchestrator extends EventEmitter {
   denyClipboardLease(profileId: string, requestId: string, reason: "CLIPBOARD_NOT_EMPTY" | "CLIPBOARD_UNAVAILABLE" | "QUEUE_TIMEOUT" | "SESSION_ENDED"): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "CLIPBOARD_LEASE_DENIED", version: IPC_VERSION, requestId, reason }); }
   checkCart(profileId: string): void { this.pendingCartActions.set(profileId, "CHECK_CART"); this.dispatchCartAction(profileId); }
   emptyCart(profileId: string): void { this.pendingCartActions.set(profileId, "EMPTY_CART"); this.dispatchCartAction(profileId); }
+  openWarmDestination(profileId: string, url: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "OPEN_WARM_DESTINATION", version: IPC_VERSION, url }); }
 
   private onRunnerMessage(profileId: string, message: unknown): void {
     const parsed = runnerEventSchema.safeParse(message); if (!parsed.success || (parsed.data.profileId !== null && parsed.data.profileId !== profileId)) return;
     const event: RunnerEvent = parsed.data;
-    if (event.type === "READY") { this.setState(profileId, "READY", null, event.route, event.driver); this.dispatchCartAction(profileId); }
+    if (event.type === "READY") { this.setState(profileId, "READY", null, event.route, event.driver, event.coherence); this.dispatchCartAction(profileId); }
     if (event.type === "STOPPED") this.setState(profileId, "STOPPED");
     if (event.type === "ERROR") this.setState(profileId, "ERROR", { code: event.code, message: event.message });
-    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "NETWORK_USAGE" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE") this.emit("runner-event", event);
+    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "NETWORK_USAGE" || event.type === "PAYMENT_HANDOFF" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE") this.emit("runner-event", event);
   }
 
   private onRunnerExit(profileId: string, active: ActiveRunner): void {
@@ -70,8 +71,8 @@ export class SessionOrchestrator extends EventEmitter {
     if (active.expectedStop || current.state === "STOPPED") this.setState(profileId, "STOPPED"); else if (current.state !== "ERROR") this.setState(profileId, "CRASHED", { code: "RUNNER_CRASHED", message: "The isolated browser runner exited unexpectedly." });
   }
 
-  private setState(profileId: string, state: SessionSnapshot["state"], error: SessionError | null = null, route?: SessionRoute, driver?: BrowserDriverMetadata | null): void {
-    const current = this.snapshot(profileId); const snapshot: SessionSnapshot = { profileId, state, error, route: route ?? current.route, driver: driver === undefined ? current.driver : driver, updatedAt: Date.now() }; this.sessions.set(profileId, snapshot); this.emit("changed", snapshot);
+  private setState(profileId: string, state: SessionSnapshot["state"], error: SessionError | null = null, route?: SessionRoute, driver?: BrowserDriverMetadata | null, coherence?: ProfileCoherenceSummary | null): void {
+    const current = this.snapshot(profileId); const snapshot: SessionSnapshot = { profileId, state, error, route: route ?? current.route, coherence: coherence === undefined ? current.coherence : coherence, driver: driver === undefined ? current.driver : driver, updatedAt: Date.now() }; this.sessions.set(profileId, snapshot); this.emit("changed", snapshot);
   }
   private send(child: RunnerChild, command: RunnerCommand): void { child.send(command, (error) => { if (error) child.kill(); }); }
   private dispatchCartAction(profileId: string): void { const active = this.runners.get(profileId); const action = this.pendingCartActions.get(profileId); if (!active || this.snapshot(profileId).state !== "READY" || !action) return; this.pendingCartActions.delete(profileId); this.send(active.child, { type: action, version: IPC_VERSION, profileId }); }

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { checkoutValuesEquivalent, isColorThumbnailTitle, parseShopifyAddResponse, parseShopifyCart, sanitizeText, shippingCountryNames, splitShippingName, withChromeTranslationDisabled } from "./runner";
+import { describe, expect, it, vi } from "vitest";
+import { checkoutValuesEquivalent, isColorThumbnailTitle, parseShopifyAddResponse, parseShopifyCart, PaymentHandoffLatch, paymentHandoffSignal, sanitizeText, shippingCountryNames, splitShippingName, withChromeTranslationDisabled } from "./runner";
 
 describe("runner recording redaction", () => {
   it("removes credential-like headers and query values before event persistence", () => {
@@ -33,5 +33,17 @@ describe("runner recording redaction", () => {
     expect(parseShopifyCart({ item_count: "1", items: [] }, "Capital Hooded Sweatshirt")).toBeNull();
     expect(parseShopifyAddResponse({ items: [{ id: 123, variant_id: 123 }] }, "123")).toBe(true);
     expect(parseShopifyAddResponse({ items: [{ id: 456, variant_id: 456 }] }, "123")).toBe(false);
+  });
+  it("recognizes payment handoffs without retaining their sensitive URL", () => {
+    expect(paymentHandoffSignal("https://issuer.example/3ds/challenge?token=private")).toBe(true);
+    expect(paymentHandoffSignal("https://secure.example/checkout", "Complete your Strong Customer Authentication challenge")).toBe(true);
+    expect(paymentHandoffSignal("https://eu.supreme.com/checkouts/example", "Shipping and payment details")).toBe(false);
+  });
+  it("deduplicates repeated handoff signals and reports one stable return", () => {
+    vi.useFakeTimers(); const detected = vi.fn(); const returned = vi.fn(); const latch = new PaymentHandoffLatch(1_500);
+    latch.observe(true, detected, returned); latch.observe(true, detected, returned); latch.observe(false, detected, returned); latch.observe(false, detected, returned);
+    expect(detected).toHaveBeenCalledTimes(1); expect(returned).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1_499); expect(returned).not.toHaveBeenCalled(); vi.advanceTimersByTime(1); expect(returned).toHaveBeenCalledTimes(1);
+    latch.stop(); vi.useRealTimers();
   });
 });

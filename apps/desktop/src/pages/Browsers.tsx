@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store } from "@copify/shared";
+import { type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store, type WarmDestination } from "@copify/shared";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
 
@@ -11,6 +11,7 @@ const STOPPED_SESSION = (profileId: string): SessionSnapshot => ({
     kind: "direct",
     verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null },
   },
+  coherence: null,
   driver: null,
   updatedAt: 0,
 });
@@ -34,6 +35,7 @@ function HealthDrawer({ detail, title, onClose }: { detail: BrowserHealthDetail 
     {!health ? <p className="muted">No recorded health yet. It appears after this profile participates in a run.</p> : <div className="page-stack health-detail">
       {health.monitorTransport === "HTTP" && <section><h3>HTTP monitor</h3><p className="muted">Endpoint: {health.monitorEndpoint ?? "—"}</p><p className="muted">Interval: {number(health.pollIntervalMs, " ms")} · Routes: {number(health.healthyRouteCount)}/{number(health.configuredRouteCount)} healthy · Last status: {number(health.lastHttpStatus)}</p><p className="muted">Last response: {number(health.lastResponseLatencyMs, " ms")} · Received: {number(health.bytesReceived, " bytes")} · Next poll: {health.nextPollAt ? new Date(health.nextPollAt).toLocaleTimeString() : "—"}</p></section>}
       <section><h3>Identity</h3><p className="muted">webdriver: {health.navigatorWebdriver === null ? "—" : String(health.navigatorWebdriver)} · {health.browserVersion ?? "Browser version unavailable"}</p><p className="muted">Profile age: {number(health.profileAgeMs == null ? null : health.profileAgeMs / 86_400_000, " days")} · Cookies: {number(health.cookieCount)}</p></section>
+      {health.coherence && <section><h3>Route coherence</h3><p className="muted">{health.coherence.status} · {health.coherence.country ?? "unknown country"}{health.coherence.city ? ` / ${health.coherence.city}` : ""} · {health.coherence.locale ?? "locale unavailable"} · {health.coherence.timezoneId ?? "timezone unavailable"}</p><p className="muted">Geolocation {health.coherence.geolocationApplied ? "applied" : "not applied"} · WebRTC {health.coherence.webRtcPolicy.toLowerCase().replaceAll("_", " ")}</p>{health.coherence.message && <p className="error-detail">{health.coherence.message}</p>}</section>}
       <section><h3>Activity</h3><p className="muted">Requests: {number(health.requestCount)} ({number(health.requestsPerMinute)}/min) · Navigations: {number(health.navigationCount)} ({number(health.navigationsPerMinute)}/min)</p><p className="muted">ATC attempts: {number(health.atcAttempts)} · Average page load: {number(health.averagePageLoadMs, " ms")}</p></section>
       <section><h3>Protection & checkout</h3><p className="muted">403: {number(health.forbiddenCount)} · 429: {number(health.rateLimitedCount)} · Challenges: {number(health.challengeCount)} · Checkout failures: {number(health.checkoutFailures)}</p>{health.circuit?.state === "OPEN" && <p className="error-detail">Circuit open until {health.circuit.reopenAt ? new Date(health.circuit.reopenAt).toLocaleTimeString() : "unknown"}.</p>}</section>
     </div>}
@@ -46,6 +48,8 @@ export function Browsers({
   stores,
   sessions,
   cartStatuses,
+  warmStates,
+  activeRun,
   latest,
   profileName,
   busy,
@@ -59,12 +63,15 @@ export function Browsers({
   onEmptyCarts,
   onOpenAll,
   onCloseAll,
+  onFailure,
 }: {
   profiles: BrowserProfile[];
   proxies: ProxyProfile[];
   stores: Store[];
   sessions: Record<string, SessionSnapshot>;
   cartStatuses: Record<string, CartStatus>;
+  warmStates: ProfileWarmState[];
+  activeRun: boolean;
   latest: (id: string) => ProxyBenchmark | undefined;
   profileName: string;
   busy: boolean;
@@ -82,9 +89,15 @@ export function Browsers({
   onEmptyCarts: () => void;
   onOpenAll: () => void;
   onCloseAll: () => void;
+  onFailure: (message: string) => void;
 }) {
   const [healthDetail, setHealthDetail] = useState<BrowserHealthDetail | null>(null);
   const [healthTitle, setHealthTitle] = useState("");
+  const [warmProfile, setWarmProfile] = useState<BrowserProfile | null>(null);
+  const [warmStore, setWarmStore] = useState<Store | null>(null);
+  const [warmState, setWarmState] = useState<ProfileWarmState | null>(null);
+  const [warmBusy, setWarmBusy] = useState(false);
+  const [warmError, setWarmError] = useState<string | null>(null);
   const showHealth = async (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string, title: string) => {
     const result = await window.copify.health.get(subjectKind, subjectId); if (result.ok) { setHealthTitle(title); setHealthDetail(result.value); }
   };
@@ -92,6 +105,19 @@ export function Browsers({
   // adapter can actually read one.
   const showCart = stores.some((store) => store.enabled && store.capabilities.cartInspection);
   const watcherStores = stores.filter((store) => store.enabled && store.capabilities.monitor === "shared");
+  const warmingStore = stores.find((store) => store.enabled && store.warming);
+  const beginWarming = async (profile: BrowserProfile) => {
+    if (!warmingStore) return; setWarmBusy(true); setWarmError(null);
+    try { const result = await window.copify.warming.start(profile.id, warmingStore.id); if (!result.ok) { setWarmError(result.error); onFailure(result.error); return; } setWarmProfile(profile); setWarmStore(warmingStore); setWarmState(result.value); }
+    finally { setWarmBusy(false); }
+  };
+  const updateWarming = async (field: "storefrontReady" | "googleReady" | "shopPayReady", checked: boolean) => {
+    if (!warmProfile || !warmStore || !warmState) return; setWarmBusy(true); setWarmError(null);
+    try { const input = { storefrontReady: warmState.storefrontReady, googleReady: warmState.googleReady, shopPayReady: warmState.shopPayReady, [field]: checked }; const result = await window.copify.warming.update(warmProfile.id, warmStore.id, input); if (result.ok) setWarmState(result.value); else setWarmError(result.error); }
+    finally { setWarmBusy(false); }
+  };
+  const openWarmDestination = async (destination: WarmDestination) => { if (!warmProfile || !warmStore) return; setWarmBusy(true); setWarmError(null); try { const result = await window.copify.warming.openDestination(warmProfile.id, warmStore.id, destination); if (!result.ok) setWarmError(result.error); } finally { setWarmBusy(false); } };
+  const completeWarming = async () => { if (!warmProfile || !warmStore) return; setWarmBusy(true); setWarmError(null); try { const result = await window.copify.warming.complete(warmProfile.id, warmStore.id); if (result.ok) setWarmState(result.value); else setWarmError(result.error); } finally { setWarmBusy(false); } };
 
   const activeCount = profiles.filter((profile) =>
     ["STARTING", "READY", "STOPPING"].includes((sessions[profile.id] ?? STOPPED_SESSION(profile.id)).state),
@@ -162,9 +188,11 @@ export function Browsers({
               const proxy = proxies.find((item) => item.id === profile.proxyProfileId);
               const benchmark = latest(profile.proxyProfileId ?? "direct");
               const check = session.route.verification;
+              const warm = warmStates.find((item) => item.browserProfileId === profile.id && item.storeId === warmingStore?.id);
 
               const entries: MenuEntry[] = [
                 { kind: "item", label: "Details", onSelect: () => void showHealth("CHECKOUT", profile.id, profile.name) },
+                { kind: "item", label: warm?.status === "READY" ? "Warm profile again" : "Warm profile", disabled: busy || warmBusy || activeRun || !warmingStore || busyState, onSelect: () => void beginWarming(profile) },
                 { kind: "item", label: "Restart", disabled: busy || !profile.enabled || busyState, onSelect: () => onProfile(profile.id, window.copify.sessions.restart) },
                 { kind: "item", label: "Rename", disabled: busy || active, onSelect: () => {
                   const name = window.prompt("Browser name", profile.name)?.trim();
@@ -205,6 +233,8 @@ export function Browsers({
                   <div className="col-name row-main">
                     <span className="row-name">{profile.name}</span>
                     {!profile.enabled && <span className="row-meta">Disabled</span>}
+                    {warm && <span className={`row-meta ${warm.status === "REVIEW" ? "warning" : ""}`}>Warming: {warm.status.toLowerCase().replaceAll("_", " ")}{warm.completedAt ? ` · ${new Date(warm.completedAt).toLocaleString()}` : ""}</span>}
+                    {session.coherence && <span className={`row-meta ${session.coherence.status === "WARNING" ? "warning" : ""}`}>{session.coherence.status} coherence · {session.coherence.locale ?? "locale unavailable"} · {session.coherence.timezoneId ?? "timezone unavailable"}</span>}
                     {cart.status === "ERROR" && cart.message && <span className="error-detail">{cart.message}</span>}
                     {session.error && <span className="error-detail">{session.error.message}</span>}
                     {check.status === "FAILED" && !session.error && (
@@ -250,6 +280,16 @@ export function Browsers({
         )}
       </section>
       <HealthDrawer detail={healthDetail} title={healthTitle} onClose={() => setHealthDetail(null)} />
+      <Drawer open={Boolean(warmProfile && warmStore && warmState)} title={warmProfile ? `Warm ${warmProfile.name}` : "Warm profile"} onClose={() => { setWarmProfile(null); setWarmStore(null); setWarmState(null); setWarmError(null); }}>
+        {warmState && warmStore && <div className="page-stack">
+          <section><h3>Route snapshot</h3><p className="muted">{warmStore.name} · {warmState.routeCountry ?? "unknown country"} · {warmState.routePublicIp ?? "IP unavailable"}</p><p className="muted">This workflow keeps sign-in manual. Copify never reads or stores account passwords or cookie values.</p></section>
+          <section><h3>1. Storefront</h3><button disabled={warmBusy} onClick={() => void openWarmDestination("STOREFRONT")}>Open {warmStore.name}</button><label className="check"><input type="checkbox" checked={warmState.storefrontReady} disabled={warmBusy} onChange={(event) => void updateWarming("storefrontReady", event.target.checked)} /> I reviewed the storefront in this profile.</label>{warmState.storefrontCompletedAt && <p className="muted">Last confirmed {new Date(warmState.storefrontCompletedAt).toLocaleString()}</p>}</section>
+          <section><h3>2. Google account</h3><button disabled={warmBusy} onClick={() => void openWarmDestination("GOOGLE")}>Open Google sign-in</button><label className="check"><input type="checkbox" checked={warmState.googleReady} disabled={warmBusy} onChange={(event) => void updateWarming("googleReady", event.target.checked)} /> Google account state is ready.</label>{warmState.googleCompletedAt && <p className="muted">Last confirmed {new Date(warmState.googleCompletedAt).toLocaleString()}</p>}</section>
+          <section><h3>3. Shop / Shop Pay</h3><button disabled={warmBusy} onClick={() => void openWarmDestination("SHOP_PAY")}>Open Shop</button><label className="check"><input type="checkbox" checked={warmState.shopPayReady} disabled={warmBusy} onChange={(event) => void updateWarming("shopPayReady", event.target.checked)} /> Shop or Shop Pay state is ready.</label>{warmState.shopPayCompletedAt && <p className="muted">Last confirmed {new Date(warmState.shopPayCompletedAt).toLocaleString()}</p>}</section>
+          {warmError && <p className="error-detail">{warmError}</p>}
+          <div className="drawer-actions"><button className="primary" disabled={warmBusy || !warmState.storefrontReady || !warmState.googleReady || !warmState.shopPayReady || warmState.status === "READY"} onClick={() => void completeWarming()}>{warmState.status === "READY" ? "Profile ready" : "Finish warming"}</button></div>
+        </div>}
+      </Drawer>
     </div>
   );
 }

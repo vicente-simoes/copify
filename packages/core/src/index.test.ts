@@ -15,6 +15,7 @@ function profile(): BrowserProfile {
   return { id, name: "Test", userDataDir: `C:/profiles/${id}`, proxyProfileId: null, shippingProfileId: null, driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 1, updatedAt: 1 };
 }
 const driver = { kind: "NATIVE_STEALTH" as const, ownsBrowser: true, browserVersion: "Chrome/1", stealthStatus: "PASS" as const, capabilities: { managedProxy: true, launchHarVideo: true } };
+const coherence = { status: "VERIFIED" as const, country: "PT", city: "Lisbon", locale: "pt-PT", timezoneId: "Europe/Lisbon", geolocationApplied: true, webRtcPolicy: "DEFAULT_PUBLIC_INTERFACE_ONLY" as const, source: "ROUTE_PROBE" as const, resolvedAt: 1, message: null };
 
 describe("SessionOrchestrator", () => {
   it("keeps each runner isolated and marks an unexpected exit as crashed", async () => {
@@ -25,8 +26,8 @@ describe("SessionOrchestrator", () => {
     const first = profile(); const second = profile();
     await Promise.all([orchestrator.open(first), orchestrator.open(second)]);
     expect(runners).toHaveLength(2);
-    runners[0].emit("message", { type: "READY", version: IPC_VERSION, profileId: first.id, driver, route: { kind: "direct", verification: { status: "VERIFIED", publicIp: "203.0.113.1", country: "PT", city: "Lisbon", verifiedAt: 1, message: null } } });
-    runners[1].emit("message", { type: "READY", version: IPC_VERSION, profileId: second.id, driver, route: { kind: "direct", verification: { status: "VERIFIED", publicIp: "203.0.113.2", country: "PT", city: "Lisbon", verifiedAt: 1, message: null } } });
+    runners[0].emit("message", { type: "READY", version: IPC_VERSION, profileId: first.id, driver, coherence, route: { kind: "direct", verification: { status: "VERIFIED", publicIp: "203.0.113.1", country: "PT", city: "Lisbon", verifiedAt: 1, message: null } } });
+    runners[1].emit("message", { type: "READY", version: IPC_VERSION, profileId: second.id, driver, coherence, route: { kind: "direct", verification: { status: "VERIFIED", publicIp: "203.0.113.2", country: "PT", city: "Lisbon", verifiedAt: 1, message: null } } });
     expect(orchestrator.snapshot(first.id).state).toBe("READY");
     runners[0].emit("exit", 1);
     expect(orchestrator.snapshot(first.id).state).toBe("CRASHED");

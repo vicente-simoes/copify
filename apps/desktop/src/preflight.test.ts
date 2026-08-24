@@ -119,6 +119,25 @@ describe("preflight", () => {
     expect(shared.canStart).toBe(true); expect(check(shared, "routes")?.detail).toContain("Shared route affinity");
   });
 
+  it("surfaces coherence and warming gaps without blocking assisted checkout", () => {
+    const unknown = preflight(base({ mode: "ASSISTED_CHECKOUT", profiles: [profile({ shippingProfileId: id(7) })], shipping: [shippingProfile()] }));
+    expect(unknown.canStart).toBe(true);
+    expect(check(unknown, "coherence")?.status).toBe("warn");
+    expect(check(unknown, "warming")?.status).toBe("warn");
+
+    const readySession = (profileId: string): SessionSnapshot => ({
+      ...stopped(profileId),
+      coherence: { status: "VERIFIED", country: "PT", city: "Lisbon", locale: "pt-PT", timezoneId: "Europe/Lisbon", geolocationApplied: true, webRtcPolicy: "DEFAULT_PUBLIC_INTERFACE_ONLY", source: "ROUTE_PROBE", resolvedAt: 1, message: null },
+    });
+    const ready = preflight(base({
+      mode: "ASSISTED_CHECKOUT", profiles: [profile({ shippingProfileId: id(7) })], shipping: [shippingProfile()], session: readySession,
+      warmStates: [{ id: id(8), browserProfileId: id(1), storeId: "supreme-eu", status: "READY", storefrontReady: true, googleReady: true, shopPayReady: true, storefrontCompletedAt: 1, googleCompletedAt: 1, shopPayCompletedAt: 1, proxyProfileId: null, driverKind: "NATIVE_STEALTH", routePublicIp: "203.0.113.9", routeCountry: "PT", startedAt: 1, completedAt: 2, updatedAt: 2 }],
+    }));
+    expect(ready.canStart).toBe(true);
+    expect(check(ready, "coherence")?.status).toBe("pass");
+    expect(check(ready, "warming")?.status).toBe("pass");
+  });
+
   it("blocks incomplete or proxy-conflicted external CDP profiles", () => {
     const missing = preflight(base({ profiles: [profile({ driver: { kind: "EXTERNAL_CDP", endpointConfigured: false } })] }));
     expect(check(missing, "drivers")?.status).toBe("fail");

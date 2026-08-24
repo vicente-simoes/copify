@@ -4,6 +4,22 @@ Copify is a local Windows desktop console for isolated persistent Chrome session
 
 Each browser profile uses the Native Stealth driver by default: real persistent Google Chrome controlled through the exact-pinned Rebrowser Playwright runtime. Power users may instead attach Copify to an already-running local anti-detect browser through an encrypted, loopback-only external CDP endpoint. External browsers own their profile and network route.
 
+## v0.10
+
+- Native Stealth resolves a route-aware GeoIP snapshot before Chrome starts, then fixes locale, `Accept-Language`, timezone, approximate geolocation, and WebRTC policy for the browser lifetime.
+- Missing or contradictory identity fields are visible warnings and do not block assisted checkout. Rotating-residential checkout routes remain blocked because they cannot preserve IP affinity.
+- Browser rows include a guided, fully manual warming workflow for the storefront, Google, and Shop/Shop Pay. Existing persistent Chrome state is reused; Copify never extracts account passwords, cookies, or session tokens.
+- Warming readiness is isolated by browser and store, records per-step confirmation times, and requires review after its route or browser driver changes.
+- Assisted checkout recognizes PSD2/SCA/3DS handoffs after `READY_TO_CONFIRM`, brings the affected Chrome forward once, highlights the session, and raises a Windows notification. Payment remains entirely manual.
+- IPC contract version 14 and SQLite schema version 12 migrate the v0.9 database without replacing profiles, encrypted secrets, browser directories, runs, monitor settings, usage, or benchmarks.
+
+## v0.9
+
+- Supreme monitoring uses its supported storefront HTML and embedded product data while preserving conditional-cache behavior.
+- DataImpulse metadata, rotating monitor routes, fixed sticky checkout routes, Turbo, type-aware route health, and monitor-only cooldowns are supported.
+- Assisted checkout verifies the exact cart variant, fills the configured shipping form, accepts required terms, and stops at `READY_TO_CONFIRM` for manual payment.
+- Monitor and browser traffic/cost aggregates are persisted without URLs, headers, cookies, bodies, checkout tokens, addresses, or payment data.
+
 ## v0.7
 
 - Native Stealth removes Playwright's automation flag, adds `AutomationControlled` hardening, and refuses startup unless `navigator.webdriver === false`.

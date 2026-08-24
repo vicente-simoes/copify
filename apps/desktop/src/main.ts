@@ -1,11 +1,11 @@
-import { app, BrowserWindow, Menu, clipboard, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, Notification, clipboard, ipcMain, safeStorage } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, resolveMonitorBehavior, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc,
-  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, resolveMonitorBehavior, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -35,6 +35,7 @@ function emitTargetsChanged(): void { void profiles.listTargets().then((targets)
 function emitShippingChanged(): void { void profiles.listShippingProfiles().then((shipping) => mainWindow?.webContents.send(shippingIpc.changed, shipping)); }
 function emitHealthChanged(): void { mainWindow?.webContents.send(healthIpc.changed); }
 function emitMonitorChanged(): void { mainWindow?.webContents.send(monitorIpc.changed, monitorStatus); }
+function emitWarmingChanged(): void { void profiles.listProfileWarmStates().then((states) => mainWindow?.webContents.send(warmingIpc.changed, states)); }
 
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
@@ -65,10 +66,26 @@ function registerIpc(): void {
   ipcMain.handle(profileIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<BrowserProfile>> => resultAsync(async () => {
     const update = updateBrowserProfileSchema.parse(input); if (orchestrator.isActive(id) && (update.proxyProfileId !== undefined || update.driver !== undefined)) throw new Error("Close this browser session before changing its route or browser driver."); if (activeRun?.profileSessions.has(id)) throw new Error("End the active run before changing a selected browser profile.");
     const endpoint = update.driver?.kind === "EXTERNAL_CDP" ? update.driver.endpoint === undefined ? undefined : update.driver.endpoint === null ? null : await encryptSecret(update.driver.endpoint) : update.driver?.kind === "NATIVE_STEALTH" ? null : undefined;
-    return profiles.update(id, update, endpoint);
+    const updated = await profiles.update(id, update, endpoint); if (update.proxyProfileId !== undefined || update.driver !== undefined) emitWarmingChanged(); return updated;
   }));
   ipcMain.handle(profileIpc.remove, async (_event, id: string): Promise<ApiResult<boolean>> => { if (activeRun?.profileSessions.has(id)) return { ok: false, error: "End the active run before removing a selected browser profile." }; await orchestrator.close(id); return resultAsync(() => profiles.remove(id)); });
   ipcMain.handle(healthIpc.get, (_event, subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string): Promise<ApiResult<import("@copify/shared").BrowserHealthDetail>> => resultAsync(() => profiles.getBrowserHealth(subjectKind, subjectId)));
+  ipcMain.handle(warmingIpc.list, (): Promise<ApiResult<ProfileWarmState[]>> => resultAsync(() => profiles.listProfileWarmStates()));
+  ipcMain.handle(warmingIpc.start, (_event, browserProfileId: string, storeId: string): Promise<ApiResult<ProfileWarmState>> => resultAsync(async () => {
+    if (activeRun) throw new Error("End the active run before warming a profile."); const profile = await requireProfile(browserProfileId); if (!profile.enabled) throw new Error("Disabled profiles cannot be warmed.");
+    const manifest = getStoreManifest(storeId); if (!manifest?.warming) throw new Error("This store does not provide a profile-warming destination.");
+    if (!orchestrator.isActive(browserProfileId)) await openSession(browserProfileId); const session = await waitForSessionReady(browserProfileId); const existing = await profiles.getProfileWarmState(browserProfileId, storeId); const now = Date.now();
+    const state = await profiles.upsertProfileWarmState({ id: existing?.id ?? randomUUID(), browserProfileId, storeId, status: "IN_PROGRESS", storefrontReady: false, googleReady: false, shopPayReady: false, storefrontCompletedAt: existing?.storefrontCompletedAt ?? null, googleCompletedAt: existing?.googleCompletedAt ?? null, shopPayCompletedAt: existing?.shopPayCompletedAt ?? null, proxyProfileId: profile.proxyProfileId, driverKind: profile.driver.kind, routePublicIp: session.route.verification.publicIp, routeCountry: session.route.verification.country, startedAt: now, completedAt: existing?.completedAt ?? null, updatedAt: now }); emitWarmingChanged(); return state;
+  }));
+  ipcMain.handle(warmingIpc.update, (_event, browserProfileId: string, storeId: string, input: unknown): Promise<ApiResult<ProfileWarmState>> => resultAsync(async () => {
+    const existing = await profiles.getProfileWarmState(browserProfileId, storeId); if (!existing) throw new Error("Start profile warming before updating its checklist."); const values = updateProfileWarmStateSchema.parse(input); const now = Date.now(); const state = await profiles.upsertProfileWarmState({ ...existing, ...values, status: "IN_PROGRESS", storefrontCompletedAt: values.storefrontReady && !existing.storefrontReady ? now : existing.storefrontCompletedAt, googleCompletedAt: values.googleReady && !existing.googleReady ? now : existing.googleCompletedAt, shopPayCompletedAt: values.shopPayReady && !existing.shopPayReady ? now : existing.shopPayCompletedAt, updatedAt: now }); emitWarmingChanged(); return state;
+  }));
+  ipcMain.handle(warmingIpc.openDestination, (_event, browserProfileId: string, storeId: string, destination: unknown): Promise<ApiResult<boolean>> => resultAsync(async () => {
+    if (activeRun) throw new Error("Profile warming is unavailable during a run."); const state = await profiles.getProfileWarmState(browserProfileId, storeId); if (!state) throw new Error("Start profile warming first."); const value = warmDestinationSchema.parse(destination); const manifest = getStoreManifest(storeId); const url = warmDestinationUrl(value, manifest?.warming?.storefrontUrl); if (!orchestrator.isActive(browserProfileId)) await openSession(browserProfileId); await waitForSessionReady(browserProfileId); orchestrator.openWarmDestination(browserProfileId, url); return true;
+  }));
+  ipcMain.handle(warmingIpc.complete, (_event, browserProfileId: string, storeId: string): Promise<ApiResult<ProfileWarmState>> => resultAsync(async () => {
+    const existing = await profiles.getProfileWarmState(browserProfileId, storeId); if (!existing) throw new Error("Start profile warming first."); if (!existing.storefrontReady || !existing.googleReady || !existing.shopPayReady) throw new Error("Confirm every warming step before marking the profile ready."); const session = orchestrator.snapshot(browserProfileId); const now = Date.now(); const state = await profiles.upsertProfileWarmState({ ...existing, status: "READY", routePublicIp: session.route.verification.publicIp, routeCountry: session.route.verification.country, completedAt: now, updatedAt: now }); emitWarmingChanged(); return state;
+  }));
 
   ipcMain.handle(targetIpc.list, (): Promise<ApiResult<Target[]>> => resultAsync(() => profiles.listTargets()));
   ipcMain.handle(targetIpc.create, (_event, input: unknown): Promise<ApiResult<Target>> => resultAsync(async () => { const parsed = createTargetSchema.parse(input); assertKnownStore(parsed.storeId); const created = await profiles.createTarget(parsed); emitTargetsChanged(); return created; }));
@@ -83,8 +100,8 @@ function registerIpc(): void {
 
   ipcMain.handle(proxyIpc.list, (): Promise<ApiResult<ProxyProfile[]>> => resultAsync(() => profiles.listProxies()));
   ipcMain.handle(proxyIpc.create, (_event, input: unknown): Promise<ApiResult<ProxyProfile>> => resultAsync(async () => { const parsed = createProxyProfileSchema.parse(input); return profiles.createProxy(parsed, await encryptCreateCredentials(parsed)); }));
-  ipcMain.handle(proxyIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<ProxyProfile>> => resultAsync(async () => { await assertProxyInactive(id); const parsed = updateProxyProfileSchema.parse(input); return profiles.updateProxy(id, parsed, await encryptUpdateCredentials(parsed)); }));
-  ipcMain.handle(proxyIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { await assertProxyInactive(id); return profiles.removeProxy(id); }));
+  ipcMain.handle(proxyIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<ProxyProfile>> => resultAsync(async () => { await assertProxyInactive(id); const parsed = updateProxyProfileSchema.parse(input); const updated = await profiles.updateProxy(id, parsed, await encryptUpdateCredentials(parsed)); emitWarmingChanged(); return updated; }));
+  ipcMain.handle(proxyIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { await assertProxyInactive(id); const removed = await profiles.removeProxy(id); if (removed) emitWarmingChanged(); return removed; }));
   ipcMain.handle(proxyIpc.benchmarks, (_event, proxyId: string | null): Promise<ApiResult<ProxyBenchmark[]>> => resultAsync(() => profiles.listBenchmarks(proxyId, 10)));
   ipcMain.handle(proxyIpc.test, (_event, proxyId: string | null): Promise<ApiResult<ProxyBenchmark>> => resultAsync(async () => { if (benchmarkRunning) throw new Error("A network benchmark is already running."); benchmarkRunning = true; try { const proxy = proxyId ? await resolveProxy(proxyId, true) : null; return profiles.addBenchmark(await benchmarkRoute(proxy, await profiles.getNetworkProbeUrl())); } finally { benchmarkRunning = false; } }));
 
@@ -181,6 +198,16 @@ async function removeRun(id: string): Promise<boolean> {
 }
 
 async function openSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.open(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
+async function waitForSessionReady(id: string, timeoutMs = 20_000): Promise<SessionSnapshot> {
+  const current = orchestrator.snapshot(id); if (current.state === "READY") return current; if (["ERROR", "CRASHED"].includes(current.state)) throw new Error(current.error?.message ?? "The browser failed to open.");
+  return new Promise<SessionSnapshot>((resolvePromise, reject) => {
+    let timeout: NodeJS.Timeout;
+    const changed = (snapshot: SessionSnapshot) => { if (snapshot.profileId !== id) return; if (snapshot.state === "READY") { clearTimeout(timeout); orchestrator.off("changed", changed); resolvePromise(snapshot); } else if (["ERROR", "CRASHED"].includes(snapshot.state)) { clearTimeout(timeout); orchestrator.off("changed", changed); reject(new Error(snapshot.error?.message ?? "The browser failed to open.")); } };
+    orchestrator.on("changed", changed);
+    timeout = setTimeout(() => { orchestrator.off("changed", changed); reject(new Error("The browser did not become ready in time.")); }, timeoutMs);
+  });
+}
+function warmDestinationUrl(destination: WarmDestination, storefrontUrl?: string): string { if (destination === "STOREFRONT") { if (!storefrontUrl) throw new Error("The store has no warming URL."); return storefrontUrl; } return destination === "GOOGLE" ? "https://accounts.google.com/" : "https://shop.app/"; }
 async function requestCartEmpty(id: string): Promise<CartStatus> {
   if (activeRun) throw new Error("End the active run before emptying a cart.");
   const profile = await requireProfile(id);
@@ -358,12 +385,19 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
     const active = activeRun; if (!active || event.runId !== active.detail.run.id) return; const session = active.profileSessions.get(event.profileId); if (!session) return; const profile = await profiles.get(event.profileId); const proxy = profile?.proxyProfileId ? await profiles.getProxy(profile.proxyProfileId) : undefined; const rate = proxy?.costPerGbMicrosUsd ?? null;
     await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); emitMonitorChanged(); return;
   }
+  if (event.type === "PAYMENT_HANDOFF") { if (event.phase === "DETECTED") notifyPaymentHandoff(event.profileId); else mainWindow?.flashFrame(false); return; }
   const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
   const session = active.profileSessions.get(event.profileId); if (!session) return;
   if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
   if (event.type === "RUN_ARTIFACT" && event.artifact.runId === active.detail.run.id) await profiles.addRunArtifact(event.artifact);
   if (event.type === "RUN_ENDED" && event.runSessionId === session.id) { if (session.status !== "FAILED") session.status = "ENDED"; await profiles.setRunSession(session.id, session.status); active.pendingEnd.delete(session.id); if (active.pendingEnd.size === 0) active.resolveEnd?.(); }
   emitRunsChanged();
+}
+
+function notifyPaymentHandoff(profileId: string): void {
+  const active = activeRun; const name = active?.profileSessions.get(profileId)?.browserProfileName ?? "Checkout browser"; mainWindow?.show(); mainWindow?.focus(); mainWindow?.flashFrame(true);
+  if (Notification.isSupported()) { const notification = new Notification({ title: "Payment authentication required", body: `${name} is waiting for PSD2 / 3DS approval. Complete it manually in Chrome.`, silent: false }); notification.on("click", () => { mainWindow?.show(); mainWindow?.focus(); }); notification.show(); }
+  setTimeout(() => mainWindow?.flashFrame(false), 15_000).unref();
 }
 
 async function resumeRunSession(profileId: string): Promise<boolean> {

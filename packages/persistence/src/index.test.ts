@@ -140,6 +140,35 @@ describe("ProfileRepository", () => {
     await repo.upsertRunNetworkUsage(usage); expect(await repo.listRunNetworkUsage(runId)).toMatchObject([usage]);
   });
 
+  it("migrates a v11 database to v12 without removing its browser profiles", async () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-v11-")); roots.push(root); const databasePath = join(root, "copify.sqlite");
+    const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(databasePath);
+    database.exec("CREATE TABLE browser_profiles (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, user_data_dir TEXT NOT NULL, proxy_profile_id TEXT, shipping_profile_id TEXT, driver_kind TEXT NOT NULL DEFAULT 'NATIVE_STEALTH', external_cdp_endpoint_secret_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version=11;");
+    database.prepare("INSERT INTO browser_profiles VALUES (?,?,?,?,?,?,?,?,?,?)").run(idFor(11), "v0.9 profile", "C:/persistent-profile", null, null, "NATIVE_STEALTH", null, 1, 1, 1); database.close();
+    const repo = openProfileRepository(databasePath, join(root, "browser-profiles")); repositories.push(repo);
+    expect(await repo.list()).toMatchObject([{ id: idFor(11), name: "v0.9 profile", userDataDir: "C:/persistent-profile" }]);
+    const inspection = new DatabaseSync(databasePath, { readOnly: true });
+    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
+    expect(inspection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profile_warm_states'").get()).toBeTruthy(); inspection.close();
+  });
+
+  it("round-trips isolated warming state and marks it for review when route identity changes", async () => {
+    const repo = repository(); const firstProxy = await repo.createProxy({ name: "PT sticky A", host: "proxy-a.invalid", port: 8080 }); const secondProxy = await repo.createProxy({ name: "PT sticky B", host: "proxy-b.invalid", port: 8081 });
+    const created = await repo.create({ name: "Warm browser" }); const profile = await repo.update(created.id, { proxyProfileId: firstProxy.id }); const now = Date.now();
+    const supreme = { id: randomUUID(), browserProfileId: profile.id, storeId: "supreme-eu" as const, status: "READY" as const, storefrontReady: true, googleReady: true, shopPayReady: true, storefrontCompletedAt: now - 80, googleCompletedAt: now - 60, shopPayCompletedAt: now - 40, proxyProfileId: firstProxy.id, driverKind: "NATIVE_STEALTH" as const, routePublicIp: "203.0.113.8", routeCountry: "PT", startedAt: now - 100, completedAt: now, updatedAt: now };
+    const general = { ...supreme, id: randomUUID(), storeId: "general" as const, status: "IN_PROGRESS" as const, storefrontReady: false, completedAt: null };
+    await repo.upsertProfileWarmState(supreme); await repo.upsertProfileWarmState(general);
+    expect(await repo.getProfileWarmState(profile.id, "supreme-eu")).toEqual(supreme);
+    expect(await repo.listProfileWarmStates(profile.id)).toHaveLength(2);
+    await repo.updateProxy(firstProxy.id, { host: "proxy-a2.invalid" });
+    expect((await repo.getProfileWarmState(profile.id, "supreme-eu"))?.status).toBe("REVIEW");
+    await repo.upsertProfileWarmState(supreme);
+    await repo.update(profile.id, { proxyProfileId: secondProxy.id });
+    expect((await repo.getProfileWarmState(profile.id, "supreme-eu"))?.status).toBe("REVIEW");
+    expect((await repo.getProfileWarmState(profile.id, "general"))?.status).toBe("REVIEW");
+    await repo.remove(profile.id); expect(await repo.listProfileWarmStates(profile.id)).toEqual([]);
+  });
+
   it("saves reusable run setups separately from run history", async () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Sneakers", productKeywords: ["Sneaker"], maxRetailMinor: 20_000 });
     const setup = await repo.createRunSetup({ name: "Sneakers drop", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profile.id], targetId: target.id });
@@ -165,3 +194,5 @@ describe("ProfileRepository", () => {
     expect((await repo.getRun(detail.run.id))?.run.targetSnapshot?.name).toBe("Jacket");
   });
 });
+
+function idFor(value: number): string { return `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`; }

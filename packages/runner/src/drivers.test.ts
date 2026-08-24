@@ -18,6 +18,32 @@ describe("browser drivers", () => {
     expect(() => buildNativeStealthArgs(["--disable-blink-features=SomethingElse"])).toThrow(/contradictory/i);
   });
 
+  it("applies one immutable route identity at native context creation", () => {
+    const options = nativeStealthLaunchOptions({
+      proxyProfileId: "00000000-0000-4000-8000-000000000001", proxyName: "PT sticky", protocol: "http",
+      host: "proxy.invalid", port: 8080, username: "user", password: "secret", expectedCountry: "PT", expectedCity: null,
+    }, {}, {
+      locale: "pt-PT", timezoneId: "Europe/Lisbon", acceptLanguage: "pt-PT,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+      geolocation: { latitude: 38.7223, longitude: -9.1393 }, webRtcPolicy: "disable_non_proxied_udp",
+    });
+    expect(options.args).toEqual(expect.arrayContaining([
+      "--lang=pt-PT", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ]));
+    expect(options).toMatchObject({
+      locale: "pt-PT", timezoneId: "Europe/Lisbon", geolocation: { latitude: 38.7223, longitude: -9.1393 },
+      extraHTTPHeaders: { "Accept-Language": "pt-PT,pt;q=0.9,en-US;q=0.8,en;q=0.7" },
+      proxy: { server: "http://proxy.invalid:8080", username: "user", password: "secret" },
+    });
+  });
+
+  it("uses the direct-session WebRTC policy without inventing identity fields", () => {
+    const options = nativeStealthLaunchOptions(null);
+    expect(options.args).toContain("--force-webrtc-ip-handling-policy=default_public_interface_only");
+    expect(options).not.toHaveProperty("locale");
+    expect(options).not.toHaveProperty("timezoneId");
+    expect(options).not.toHaveProperty("geolocation");
+  });
+
   it("selects the configured driver without a standard Playwright fallback", () => {
     expect(createBrowserDriver({ kind: "NATIVE_STEALTH" })).toBeInstanceOf(NativeStealthDriver);
     expect(createBrowserDriver({ kind: "EXTERNAL_CDP", endpoint: "http://127.0.0.1:9222" })).toBeInstanceOf(ExternalCdpDriver);

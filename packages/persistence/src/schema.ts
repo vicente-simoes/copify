@@ -53,6 +53,14 @@ export const runArtifacts = sqliteTable("run_artifacts", {
   relativePath: text("relative_path").notNull(), sensitive: integer("sensitive", { mode: "boolean" }).notNull(), createdAt: integer("created_at").notNull()
 });
 
+export const profileWarmStates = sqliteTable("profile_warm_states", {
+  id: text("id").primaryKey(), browserProfileId: text("browser_profile_id").notNull(), storeId: text("store_id").notNull(), status: text("status").notNull(),
+  storefrontReady: integer("storefront_ready", { mode: "boolean" }).notNull(), googleReady: integer("google_ready", { mode: "boolean" }).notNull(), shopPayReady: integer("shop_pay_ready", { mode: "boolean" }).notNull(),
+  storefrontCompletedAt: integer("storefront_completed_at"), googleCompletedAt: integer("google_completed_at"), shopPayCompletedAt: integer("shop_pay_completed_at"),
+  proxyProfileId: text("proxy_profile_id"), driverKind: text("driver_kind").notNull(), routePublicIp: text("route_public_ip"), routeCountry: text("route_country"),
+  startedAt: integer("started_at").notNull(), completedAt: integer("completed_at"), updatedAt: integer("updated_at").notNull()
+});
+
 export const runNetworkUsage = sqliteTable("run_network_usage", {
   id: text("id").primaryKey(), runId: text("run_id").notNull(), usageKey: text("usage_key").notNull(), source: text("source").notNull(),
   runSessionId: text("run_session_id"), storeId: text("store_id"), proxyProfileId: text("proxy_profile_id"), proxyName: text("proxy_name"),

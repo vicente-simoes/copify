@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type MonitorRuntimeStatus, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type MonitorRuntimeStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 import { preflight, type PreflightCheck } from "../preflight";
 import { Field, Route } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
@@ -67,9 +67,10 @@ function LiveBoard({
         {sessions.map((session, index) => {
           const waiting = session.executionState === "CHECKPOINT";
           const readyToConfirm = session.executionState === "READY_TO_CONFIRM";
+          const paymentHandoff = session.executionState === "CHECKOUT_HANDOFF";
           const cartCheckpoint = /^CART_/.test(session.checkpointReason ?? "");
           return (
-            <div key={session.id} className={`row ${waiting || readyToConfirm ? "needs-action" : ""}`}>
+            <div key={session.id} className={`row ${waiting || readyToConfirm || paymentHandoff ? "needs-action" : ""}`}>
               <span className={`state ${session.status.toLowerCase()}`}>{session.executionState}</span>
               <div className="row-main">
                 <span className="row-name">{session.browserProfileName}</span>
@@ -77,6 +78,7 @@ function LiveBoard({
                 <Route route={session.route} />
                 {waiting && <span className="row-meta">{checkpointCopy(session.checkpointReason)}</span>}
                 {readyToConfirm && <span className="row-meta">Checkout is filled. Review payment and confirm manually in the browser.</span>}
+                {paymentHandoff && <span className="row-meta">PSD2 / 3DS authentication needs manual attention in this Chrome window.</span>}
                 {session.finalError && (
                   <span className="error-detail">{session.finalError.code}: {session.finalError.message}</span>
                 )}
@@ -102,6 +104,7 @@ export function Run({
   targets,
   proxies,
   shipping,
+  warmStates,
   latest,
   getSession,
   runs,
@@ -133,6 +136,7 @@ export function Run({
   targets: Target[];
   proxies: ProxyProfile[];
   shipping: ShippingProfile[];
+  warmStates: ProfileWarmState[];
   latest: (id: string) => ProxyBenchmark | undefined;
   getSession: (id: string) => SessionSnapshot;
   runs: RunDetail["run"][];
@@ -182,6 +186,7 @@ export function Run({
     latestBenchmark: latest,
     shipping,
     target,
+    warmStates,
   });
 
   const blocked =

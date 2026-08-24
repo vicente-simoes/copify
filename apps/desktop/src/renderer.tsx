@@ -6,6 +6,7 @@ import type {
   DiagnosticLevel,
   ProxyBenchmark,
   ProxyProfile,
+  ProfileWarmState,
   RunDetail,
   RunSetup,
   SessionSnapshot,
@@ -38,6 +39,7 @@ function App() {
   const [proxies, setProxies] = useState<ProxyProfile[]>([]);
   const [sessions, setSessions] = useState<Record<string, SessionSnapshot>>({});
   const [cartStatuses, setCartStatuses] = useState<Record<string, CartStatus>>({});
+  const [warmStates, setWarmStates] = useState<ProfileWarmState[]>([]);
   const [benchmarks, setBenchmarks] = useState<
     Record<string, ProxyBenchmark[]>
   >({});
@@ -85,6 +87,7 @@ function App() {
       shippingResult,
       cartResult,
       storeResult,
+      warmingResult,
     ] = await Promise.all([
       window.copify.profiles.list(),
       window.copify.proxies.list(),
@@ -96,6 +99,7 @@ function App() {
       window.copify.shipping.list(),
       window.copify.sessions.carts(),
       window.copify.stores.list(),
+      window.copify.warming.list(),
     ]);
     if (!profileResult.ok) {
       setNotice({ kind: "error", message: profileResult.error });
@@ -110,6 +114,7 @@ function App() {
     if (targetResult.ok) setTargets(targetResult.value);
     if (shippingResult.ok) setShippingProfiles(shippingResult.value);
     if (storeResult.ok) setStores(storeResult.value);
+    if (warmingResult.ok) setWarmStates(warmingResult.value);
     if (cartResult.ok) setCartStatuses(Object.fromEntries(cartResult.value.map((item) => [item.profileId, item])));
     if (sessionResult.ok)
       setSessions(
@@ -161,6 +166,7 @@ function App() {
     const offCarts = window.copify.sessions.onCartChanged((status) => setCartStatuses((current) => ({ ...current, [status.profileId]: status })));
     const offTargets = window.copify.targets.onChanged(() => void reload());
     const offShipping = window.copify.shipping.onChanged(() => void reload());
+    const offWarming = window.copify.warming.onChanged((states) => setWarmStates(states));
     return () => {
       offSessions();
       offRuns();
@@ -168,6 +174,7 @@ function App() {
       offCarts();
       offTargets();
       offShipping();
+      offWarming();
     };
   }, []);
   const readyCount = useMemo(
@@ -191,6 +198,8 @@ function App() {
           message: null,
         },
       },
+      coherence: null,
+      driver: null,
       updatedAt: 0,
     };
   const latest = (id: string) => benchmarks[id]?.[0];
@@ -432,6 +441,7 @@ function App() {
               targets={targets}
               proxies={proxies}
               shipping={shippingProfiles}
+              warmStates={warmStates}
               latest={latest}
               getSession={session}
               runs={runs}
@@ -482,6 +492,8 @@ function App() {
             stores={stores}
             sessions={sessions}
             cartStatuses={cartStatuses}
+            warmStates={warmStates}
+            activeRun={Boolean(activeRunId)}
             latest={latest}
             profileName={profileName}
             busy={busy}
@@ -512,6 +524,7 @@ function App() {
             }}
             onOpenAll={() => void execute(() => window.copify.sessions.openAll())}
             onCloseAll={() => void execute(() => window.copify.sessions.closeAll())}
+            onFailure={(message) => setNotice({ kind: "error", message })}
           />
         )}
         {workspace === "settings" && (

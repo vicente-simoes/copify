@@ -1,6 +1,7 @@
 import { chromium, type Browser, type BrowserContext } from "rebrowser-playwright";
 import type { BrowserDriverMetadata, RunnerBrowserDriver, RunnerProxy } from "@copify/shared";
 import { findChromeExecutable, toPlaywrightProxy } from "./network";
+import type { NativeCoherenceOptions } from "./coherence";
 
 export type DriverSession = {
   context: BrowserContext;
@@ -16,6 +17,7 @@ export type DriverLaunchInput = {
     recordHar?: { path: string; mode?: "full" | "minimal"; content?: "omit" | "embed" | "attach" };
     recordVideo?: { dir: string; size?: { width: number; height: number } };
   };
+  coherence?: NativeCoherenceOptions;
 };
 
 export interface BrowserDriver {
@@ -41,13 +43,20 @@ export function buildNativeStealthArgs(extraArgs: readonly string[] = []): strin
   return args;
 }
 
-export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistentOptions: DriverLaunchInput["persistentOptions"] = {}): NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> {
+export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistentOptions: DriverLaunchInput["persistentOptions"] = {}, coherence?: NativeCoherenceOptions): NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> {
   return {
     headless: false,
     executablePath: findChromeExecutable(),
-    args: buildNativeStealthArgs(),
+    args: buildNativeStealthArgs([
+      `--force-webrtc-ip-handling-policy=${coherence?.webRtcPolicy ?? (proxy ? "disable_non_proxied_udp" : "default_public_interface_only")}`,
+      ...(coherence?.locale ? [`--lang=${coherence.locale}`] : []),
+    ]),
     ignoreDefaultArgs: [...UNSAFE_OR_AUTOMATION_DEFAULT_ARGS],
     proxy: proxy ? toPlaywrightProxy(proxy) : undefined,
+    ...(coherence?.locale ? { locale: coherence.locale } : {}),
+    ...(coherence?.timezoneId ? { timezoneId: coherence.timezoneId } : {}),
+    ...(coherence?.geolocation ? { geolocation: coherence.geolocation } : {}),
+    ...(coherence?.acceptLanguage ? { extraHTTPHeaders: { "Accept-Language": coherence.acceptLanguage } } : {}),
     ...persistentOptions,
   };
 }
@@ -55,7 +64,7 @@ export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistent
 export class NativeStealthDriver implements BrowserDriver {
   async launch(input: DriverLaunchInput): Promise<DriverSession> {
     if (input.driver.kind !== "NATIVE_STEALTH") throw new BrowserDriverError("INVALID_DRIVER_ENDPOINT", "NativeStealthDriver received an incompatible driver configuration.");
-    const context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions));
+    const context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions, input.coherence));
     try {
       const page = context.pages()[0] ?? await context.newPage();
       const webdriver = await page.evaluate(() => navigator.webdriver);

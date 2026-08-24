@@ -23,6 +23,7 @@ export const storeManifestSchema = z.object({
   id: z.string().min(1).max(64), name: z.string().min(1).max(80), region: z.string().min(1).max(40).nullable(),
   currency: storeCurrencySchema, status: storeStatusSchema, capabilities: storeCapabilitiesSchema,
   monitorPolicy: z.object({ access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), recommendedPollIntervalMs: z.number().int().min(200), endpoint: z.string().url() }).nullable(),
+  warming: z.object({ storefrontUrl: z.string().url() }).nullable(),
   variants: z.object({ sizes: storeVariantSizesSchema, colors: z.object({ kind: z.literal("freeform") }) })
 });
 export type StoreManifest = z.infer<typeof storeManifestSchema>;
@@ -37,12 +38,14 @@ const MANIFESTS: readonly StoreManifest[] = [
     id: STORE_SUPREME_EU, name: "Supreme", region: "EU", currency: "EUR", status: "stable",
     capabilities: { monitor: "shared", cartInspection: true, addToCart: true, checkoutAutofill: true },
     monitorPolicy: { access: "PUBLIC", recommendedPollIntervalMs: 1_000, endpoint: "https://eu.supreme.com/collections/all" },
+    warming: { storefrontUrl: "https://eu.supreme.com/pages/shop" },
     variants: { sizes: { kind: "enum", values: SUPREME_EU_APPAREL_SIZES }, colors: { kind: "freeform" } }
   },
   {
     id: STORE_GENERAL, name: "General", region: null, currency: "EUR", status: "unsupported",
     capabilities: { monitor: null, cartInspection: false, addToCart: false, checkoutAutofill: false },
     monitorPolicy: null,
+    warming: null,
     variants: { sizes: { kind: "freeform" }, colors: { kind: "freeform" } }
   }
 ];

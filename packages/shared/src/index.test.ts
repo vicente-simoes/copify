@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IPC_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -32,6 +32,9 @@ describe("store registry", () => {
 });
 
 describe("shared contracts", () => {
+  it("publishes the v0.10 IPC and SQLite contract versions", () => {
+    expect(IPC_VERSION).toBe(14); expect(SCHEMA_VERSION).toBe(12);
+  });
   it("validates profile input", () => {
     expect(createBrowserProfileSchema.safeParse({ name: "  " }).success).toBe(false);
     expect(createBrowserProfileSchema.parse({ name: " Home " })).toMatchObject({ name: "Home", driver: { kind: "NATIVE_STEALTH" } });
@@ -90,5 +93,12 @@ describe("shared contracts", () => {
     expect(externalCdpEndpointSchema.safeParse("https://remote.example/devtools").success).toBe(false);
     expect(externalCdpEndpointSchema.safeParse("http://user:password@127.0.0.1:9222").success).toBe(false);
     expect(updateBrowserProfileSchema.parse({ driver: { kind: "EXTERNAL_CDP", endpoint: null } })).toMatchObject({ driver: { kind: "EXTERNAL_CDP", endpoint: null } });
+  });
+  it("validates warming history and sanitized payment handoff events", () => {
+    const profileId = "00000000-0000-4000-8000-000000000001"; const runId = "00000000-0000-4000-8000-000000000002"; const runSessionId = "00000000-0000-4000-8000-000000000003";
+    expect(profileWarmStateSchema.safeParse({ id: runSessionId, browserProfileId: profileId, storeId: "supreme-eu", status: "READY", storefrontReady: true, googleReady: true, shopPayReady: true, storefrontCompletedAt: 1, googleCompletedAt: 2, shopPayCompletedAt: 3, proxyProfileId: null, driverKind: "NATIVE_STEALTH", routePublicIp: "203.0.113.10", routeCountry: "PT", startedAt: 1, completedAt: 4, updatedAt: 4 }).success).toBe(true);
+    const handoff = { type: "PAYMENT_HANDOFF", version: IPC_VERSION, profileId, runId, runSessionId, phase: "DETECTED", category: "PSD2_3DS" };
+    expect(runnerEventSchema.safeParse(handoff).success).toBe(true);
+    expect(JSON.stringify(handoff)).not.toMatch(/url|token|payment details/i);
   });
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chromium, type BrowserContext } from "rebrowser-playwright";
-import { type ProxyBenchmark, type RunnerProxy, type SessionRoute } from "@copify/shared";
+import { type GeoIdentitySnapshot, type ProfileCoherenceSummary, type ProxyBenchmark, type RunnerProxy, type SessionRoute } from "@copify/shared";
 
 type ProbePayload = { ip?: string; country?: string; country_code?: string; city?: string; success?: boolean };
 type Sample = { latencyMs: number; connectLatencyMs: number | null; payload: ProbePayload };
@@ -19,6 +19,11 @@ export async function verifyRoute(context: BrowserContext, proxy: RunnerProxy | 
   } catch {
     return { ...base, verification: { status: "FAILED", publicIp: null, country: null, city: null, verifiedAt: Date.now(), message: "Route verification could not reach the configured HTTPS probe." } };
   } finally { await page?.close().catch(() => undefined); }
+}
+
+export function routeFromIdentity(proxy: RunnerProxy | null, identity: GeoIdentitySnapshot, coherence: ProfileCoherenceSummary): SessionRoute {
+  const base = proxy ? { kind: "proxy" as const, proxyProfileId: proxy.proxyProfileId, proxyName: proxy.proxyName, protocol: proxy.protocol } : { kind: "direct" as const };
+  return { ...base, verification: { status: identity.publicIp && coherence.status !== "WARNING" ? "VERIFIED" : "WARNING", publicIp: identity.publicIp, country: identity.country, city: identity.city, verifiedAt: identity.resolvedAt, message: coherence.message } };
 }
 
 export async function benchmarkRoute(proxy: RunnerProxy | null, probeUrl: string): Promise<ProxyBenchmark> {

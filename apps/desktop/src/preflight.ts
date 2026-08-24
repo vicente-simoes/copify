@@ -1,4 +1,4 @@
-import { supportsAssistedCheckout, type BrowserProfile, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { supportsAssistedCheckout, type BrowserProfile, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -27,6 +27,7 @@ export type PreflightInput = {
   latestBenchmark: (routeId: string) => ProxyBenchmark | undefined;
   shipping: ShippingProfile[];
   target: Target | null;
+  warmStates?: ProfileWarmState[];
 };
 
 export function preflight(input: PreflightInput): Preflight {
@@ -129,6 +130,17 @@ export function preflight(input: PreflightInput): Preflight {
 
   // --- assisted-only checks ---
   if (assisted) {
+    const coherenceWarnings = selected.filter((profile) => session(profile.id).coherence?.status === "WARNING");
+    const coherenceUnknown = selected.filter((profile) => !session(profile.id).coherence);
+    checks.push(coherenceWarnings.length || coherenceUnknown.length
+      ? { id: "coherence", label: "Profile coherence", status: "warn", detail: [coherenceWarnings.length ? `Warnings: ${coherenceWarnings.map((profile) => profile.name).join(", ")}.` : "", coherenceUnknown.length ? `Not checked yet: ${coherenceUnknown.map((profile) => profile.name).join(", ")}.` : ""].filter(Boolean).join(" ") }
+      : { id: "coherence", label: "Profile coherence", status: "pass", detail: "Every selected profile has a verified route identity snapshot." });
+    if (target) {
+      const warming = input.warmStates ?? []; const notReady = selected.filter((profile) => warming.find((state) => state.browserProfileId === profile.id && state.storeId === target.storeId)?.status !== "READY");
+      checks.push(notReady.length
+        ? { id: "warming", label: "Profiles warmed", status: "warn", detail: `${notReady.map((profile) => profile.name).join(", ")} ${notReady.length === 1 ? "has" : "have"} not completed the guided warming checklist.` }
+        : { id: "warming", label: "Profiles warmed", status: "pass", detail: "Every selected profile completed the warming checklist for this store." });
+    }
     const complete = new Set(shipping.filter((item) => item.enabled && item.complete).map((item) => item.id));
     const eligible = selected.filter((profile) => profile.shippingProfileId && complete.has(profile.shippingProfileId));
     const observers = selected.filter((profile) => !eligible.includes(profile));

@@ -3,9 +3,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, proxyBenchmarkSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
   proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type MonitorSettings, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
+  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
   type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
@@ -145,7 +145,18 @@ export class ProfileRepository {
       CREATE INDEX IF NOT EXISTS run_network_usage_proxy_idx ON run_network_usage(proxy_profile_id, updated_at DESC);
       CREATE INDEX IF NOT EXISTS run_network_usage_store_idx ON run_network_usage(store_id, updated_at DESC);`);
     }
-    this.sql.exec("PRAGMA user_version = 11;");
+    if (version < 12) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS profile_warm_states (
+        id TEXT PRIMARY KEY NOT NULL, browser_profile_id TEXT NOT NULL, store_id TEXT NOT NULL, status TEXT NOT NULL,
+        storefront_ready INTEGER NOT NULL, google_ready INTEGER NOT NULL, shop_pay_ready INTEGER NOT NULL,
+        storefront_completed_at INTEGER, google_completed_at INTEGER, shop_pay_completed_at INTEGER,
+        proxy_profile_id TEXT, driver_kind TEXT NOT NULL, route_public_ip TEXT, route_country TEXT,
+        started_at INTEGER NOT NULL, completed_at INTEGER, updated_at INTEGER NOT NULL,
+        UNIQUE(browser_profile_id, store_id)
+      );
+      CREATE INDEX IF NOT EXISTS profile_warm_states_profile_idx ON profile_warm_states(browser_profile_id, updated_at DESC);`);
+    }
+    this.sql.exec("PRAGMA user_version = 12;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -193,6 +204,7 @@ export class ProfileRepository {
         this.updateSecret(existingRow.external_cdp_endpoint_secret_id, endpointSecretId, endpointUpdate, updated.updatedAt);
         this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, driver_kind=?, external_cdp_endpoint_secret_id=?, proxy_profile_id=?, shipping_profile_id=?, updated_at=? WHERE id=?")
           .run(updated.name, updated.enabled ? 1 : 0, updated.driver.kind, endpointSecretId, updated.proxyProfileId, updated.shippingProfileId, updated.updatedAt, id);
+        if (parsed.proxyProfileId !== undefined || parsed.driver !== undefined) this.sql.prepare("UPDATE profile_warm_states SET status='REVIEW', updated_at=? WHERE browser_profile_id=?").run(updated.updatedAt, id);
       });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not update the browser profile."); }
     return updated;
@@ -200,7 +212,7 @@ export class ProfileRepository {
 
   async remove(id: string): Promise<boolean> {
     const existing = this.getRow("SELECT external_cdp_endpoint_secret_id FROM browser_profiles WHERE id=?", [id]); if (!existing) return false;
-    this.transaction(() => { this.sql.prepare("DELETE FROM browser_profiles WHERE id = ?").run(id); if (existing.external_cdp_endpoint_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(existing.external_cdp_endpoint_secret_id); });
+    this.transaction(() => { this.sql.prepare("DELETE FROM profile_warm_states WHERE browser_profile_id=?").run(id); this.sql.prepare("DELETE FROM browser_profiles WHERE id = ?").run(id); if (existing.external_cdp_endpoint_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(existing.external_cdp_endpoint_secret_id); });
     return true;
   }
 
@@ -269,6 +281,7 @@ export class ProfileRepository {
       try {
         this.sql.prepare(`UPDATE proxy_profiles SET name=?,provider=?,type=?,protocol=?,host=?,port=?,username_secret_id=?,password_secret_id=?,expected_country=?,expected_city=?,cost_per_gb_micros_usd=?,enabled=?,updated_at=? WHERE id=?`)
           .run(updated.name, updated.provider, updated.type, updated.protocol, updated.host, updated.port, usernameSecretId, passwordSecretId, updated.expectedCountry, updated.expectedCity, updated.costPerGbMicrosUsd, updated.enabled ? 1 : 0, now, id);
+        this.sql.prepare("UPDATE profile_warm_states SET status='REVIEW', updated_at=? WHERE proxy_profile_id=?").run(now, id);
       } catch (error) { throw new Error(isUniqueError(error) ? "A proxy profile with that name already exists." : "Could not update the proxy profile."); }
     });
     return proxyProfileSchema.parse(updated);
@@ -277,6 +290,7 @@ export class ProfileRepository {
   async removeProxy(id: string): Promise<boolean> {
     const existing = this.getProxyRow(id); if (!existing) return false;
     this.transaction(() => {
+      this.sql.prepare("UPDATE profile_warm_states SET status='REVIEW', updated_at=? WHERE proxy_profile_id=?").run(Date.now(), id);
       this.sql.prepare("UPDATE browser_profiles SET proxy_profile_id = NULL, updated_at = ? WHERE proxy_profile_id = ?").run(Date.now(), id);
       this.sql.prepare("DELETE FROM proxy_profiles WHERE id = ?").run(id);
       if (existing.username_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id = ?").run(existing.username_secret_id);
@@ -442,6 +456,26 @@ export class ProfileRepository {
     return { latest: recent[0] ?? null, recent };
   }
 
+  async listProfileWarmStates(browserProfileId?: string): Promise<ProfileWarmState[]> {
+    const rows = browserProfileId
+      ? this.all("SELECT * FROM profile_warm_states WHERE browser_profile_id=? ORDER BY updated_at DESC", [browserProfileId])
+      : this.all("SELECT * FROM profile_warm_states ORDER BY updated_at DESC");
+    return rows.map((row) => profileWarmStateSchema.parse(mapWarmState(row)));
+  }
+
+  async getProfileWarmState(browserProfileId: string, storeId: string): Promise<ProfileWarmState | undefined> {
+    const row = this.getRow("SELECT * FROM profile_warm_states WHERE browser_profile_id=? AND store_id=?", [browserProfileId, storeId]);
+    return row ? profileWarmStateSchema.parse(mapWarmState(row)) : undefined;
+  }
+
+  async upsertProfileWarmState(input: ProfileWarmState): Promise<ProfileWarmState> {
+    const value = profileWarmStateSchema.parse(input);
+    this.sql.prepare(`INSERT INTO profile_warm_states (id,browser_profile_id,store_id,status,storefront_ready,google_ready,shop_pay_ready,storefront_completed_at,google_completed_at,shop_pay_completed_at,proxy_profile_id,driver_kind,route_public_ip,route_country,started_at,completed_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(browser_profile_id,store_id) DO UPDATE SET status=excluded.status,storefront_ready=excluded.storefront_ready,google_ready=excluded.google_ready,shop_pay_ready=excluded.shop_pay_ready,storefront_completed_at=excluded.storefront_completed_at,google_completed_at=excluded.google_completed_at,shop_pay_completed_at=excluded.shop_pay_completed_at,proxy_profile_id=excluded.proxy_profile_id,driver_kind=excluded.driver_kind,route_public_ip=excluded.route_public_ip,route_country=excluded.route_country,started_at=excluded.started_at,completed_at=excluded.completed_at,updated_at=excluded.updated_at`)
+      .run(value.id, value.browserProfileId, value.storeId, value.status, value.storefrontReady ? 1 : 0, value.googleReady ? 1 : 0, value.shopPayReady ? 1 : 0, value.storefrontCompletedAt, value.googleCompletedAt, value.shopPayCompletedAt, value.proxyProfileId, value.driverKind, value.routePublicIp, value.routeCountry, value.startedAt, value.completedAt, value.updatedAt);
+    return value;
+  }
+
   async upsertRunNetworkUsage(input: RunNetworkUsage): Promise<RunNetworkUsage> {
     const value = runNetworkUsageSchema.parse(input);
     this.sql.prepare(`INSERT INTO run_network_usage (id,run_id,usage_key,source,run_session_id,store_id,proxy_profile_id,proxy_name,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,updated_at)
@@ -509,6 +543,9 @@ export function openProfileRepository(databasePath: string, profilesRoot: string
 function mapProfile(row: Row): Record<string, unknown> {
   const kind = row.driver_kind === "EXTERNAL_CDP" ? "EXTERNAL_CDP" : "NATIVE_STEALTH";
   return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+}
+function mapWarmState(row: Row): Record<string, unknown> {
+  return { id: row.id, browserProfileId: row.browser_profile_id, storeId: row.store_id, status: row.status, storefrontReady: Boolean(row.storefront_ready), googleReady: Boolean(row.google_ready), shopPayReady: Boolean(row.shop_pay_ready), storefrontCompletedAt: nullableNumber(row.storefront_completed_at), googleCompletedAt: nullableNumber(row.google_completed_at), shopPayCompletedAt: nullableNumber(row.shop_pay_completed_at), proxyProfileId: row.proxy_profile_id ?? null, driverKind: row.driver_kind, routePublicIp: row.route_public_ip ?? null, routeCountry: row.route_country ?? null, startedAt: Number(row.started_at), completedAt: row.completed_at == null ? null : Number(row.completed_at), updatedAt: Number(row.updated_at) };
 }
 function mapProxy(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, provider: row.provider, type: row.type, protocol: row.protocol, host: row.host, port: Number(row.port), expectedCountry: row.expected_country ?? null, expectedCity: row.expected_city ?? null, costPerGbMicrosUsd: nullableNumber(row.cost_per_gb_micros_usd), usernameConfigured: Boolean(row.username_secret_id), passwordConfigured: Boolean(row.password_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };

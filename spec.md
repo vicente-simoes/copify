@@ -1862,15 +1862,15 @@ Success criteria:
 
 Deliver:
 
-- Auto-sync Timezone (`--timezone`, `timezoneId`), Locale (`--lang`, `Accept-Language`), and Geolocation coordinates based on proxy GeoIP lookup.
-- Inject WebRTC leak prevention flags (`--force-webrtc-ip-handling-policy=default_public_interface_only`).
-- Add "Warm Profile" UI action for pre-drop Google login, Shop Pay setup, and cookie accumulation.
-- Preserve Shop Pay session tokens (`_shopify_essential`) for 1-click checkout acceleration.
-- Enhanced European PSD2 / 3DS Strong Customer Authentication handoff notifications.
+- Resolve route-aware GeoIP before Native Stealth launch and apply verified timezone, locale, `Accept-Language`, and approximate geolocation fields independently.
+- Apply `disable_non_proxied_udp` WebRTC policy to proxied sessions and `default_public_interface_only` to direct sessions; keep the snapshot immutable for the browser lifetime.
+- Add a guided "Warm profile" workflow for manual storefront, Google, and Shop/Shop Pay setup in the existing persistent Chrome directory.
+- Preserve browser-owned Shopify and Shop Pay state without extracting, copying, displaying, or logging cookie/token values.
+- Detect European PSD2 / 3DS Strong Customer Authentication handoffs, deduplicate alerts, focus the checkout once, and keep all payment interaction manual.
 
 Success criteria:
 
-- Profiles maintain consistent GeoIP coherence and pass Turnstile challenges passively with 0 visual CAPTCHAs.
+- Profiles expose their applied GeoIP coherence and warming readiness; incomplete coherence warns without blocking. CAPTCHA occurrence is an external observation rather than a guaranteed gate.
 
 ---
 
