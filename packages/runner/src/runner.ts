@@ -711,12 +711,14 @@ function checkpointForCircuit(): void {
 }
 async function emitHealth(): Promise<void> {
   if (!profileId || !recording || !startedMono || !context) return;
-  const profileAgeMs = profileUserDataDir ? await stat(profileUserDataDir).then((value) => Math.max(0, Date.now() - value.birthtimeMs)).catch(() => null) : null;
+  const profileAgeMs = profileUserDataDir ? await stat(profileUserDataDir).then((value) => profileAgeMilliseconds(Date.now(), value.birthtimeMs)).catch(() => null) : null;
   const cookieCount = await context.cookies().then((value) => value.length).catch(() => null);
   const minutes = Math.max(Number(process.hrtime.bigint() - startedMono) / 60_000_000_000, 1 / 60);
   send({ type: "HEALTH", version: IPC_VERSION, profileId, health: { capturedAt: Date.now(), navigatorWebdriver: await (context.pages()[0]?.evaluate(() => navigator.webdriver).catch(() => null) ?? null), browserVersion: driverMetadata?.browserVersion ?? context.browser()?.version() ?? null, driverKind: driverMetadata?.kind ?? null, stealthStatus: driverMetadata?.stealthStatus ?? null, profileAgeMs, cookieCount, requestCount, requestsPerMinute: requestCount / minutes, navigationCount, navigationsPerMinute: navigationCount / minutes, atcAttempts, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures, averagePageLoadMs: pageLoads.length ? pageLoads.reduce((sum, value) => sum + value, 0) / pageLoads.length : null, coherence: coherence ?? null, circuit: null } });
   emitNetworkUsage();
 }
+
+export function profileAgeMilliseconds(now: number, birthtimeMs: number): number { return Math.max(0, Math.round(now - birthtimeMs)); }
 
 function emitNetworkUsage(): void {
   if (!profileId || !recording) return;

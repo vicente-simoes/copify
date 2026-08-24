@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { checkoutValuesEquivalent, isColorThumbnailTitle, parseShopifyAddResponse, parseShopifyCart, PaymentHandoffLatch, paymentHandoffSignal, sanitizeText, shippingCountryNames, splitShippingName, withChromeTranslationDisabled } from "./runner";
+import { checkoutValuesEquivalent, isColorThumbnailTitle, parseShopifyAddResponse, parseShopifyCart, PaymentHandoffLatch, paymentHandoffSignal, profileAgeMilliseconds, sanitizeText, shippingCountryNames, splitShippingName, withChromeTranslationDisabled } from "./runner";
 
 describe("runner recording redaction", () => {
   it("removes credential-like headers and query values before event persistence", () => {
@@ -45,5 +45,9 @@ describe("runner recording redaction", () => {
     expect(detected).toHaveBeenCalledTimes(1); expect(returned).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1_499); expect(returned).not.toHaveBeenCalled(); vi.advanceTimersByTime(1); expect(returned).toHaveBeenCalledTimes(1);
     latch.stop(); vi.useRealTimers();
+  });
+  it("normalizes fractional filesystem timestamps for the integer health contract", () => {
+    expect(profileAgeMilliseconds(10_000, 1_000.4)).toBe(9_000);
+    expect(profileAgeMilliseconds(1_000, 1_000.6)).toBe(0);
   });
 });
