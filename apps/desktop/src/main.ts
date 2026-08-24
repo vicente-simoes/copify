@@ -26,6 +26,8 @@ const cartStatuses = new Map<string, CartStatus>();
 const closeAfterCartCheck = new Set<string>();
 const intentionallyStoppedMonitors = new WeakSet<ChildProcess>();
 
+if (process.platform === "win32") app.setAppUserModelId("com.copify.app");
+
 function result<T>(action: () => T): ApiResult<T> { try { return { ok: true, value: action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 async function resultAsync<T>(action: () => Promise<T>): Promise<ApiResult<T>> { try { return { ok: true, value: await action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : "Unexpected application error."; }
