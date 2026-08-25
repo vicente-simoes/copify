@@ -1,3 +1,8 @@
+import { randomBytes } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "rebrowser-playwright";
 import type { BrowserDriverMetadata, RunnerBrowserDriver, RunnerProxy } from "@copify/shared";
 import { findChromeExecutable, toPlaywrightProxy } from "./network";
@@ -43,13 +48,14 @@ export function buildNativeStealthArgs(extraArgs: readonly string[] = []): strin
   return args;
 }
 
-export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistentOptions: DriverLaunchInput["persistentOptions"] = {}, coherence?: NativeCoherenceOptions): NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> {
+export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistentOptions: DriverLaunchInput["persistentOptions"] = {}, coherence?: NativeCoherenceOptions, proxyAuthExtensionDir?: string): NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> {
   return {
     headless: false,
     executablePath: findChromeExecutable(),
     args: buildNativeStealthArgs([
       `--force-webrtc-ip-handling-policy=${coherence?.webRtcPolicy ?? (proxy ? "disable_non_proxied_udp" : "default_public_interface_only")}`,
       ...(coherence?.locale ? [`--lang=${coherence.locale}`] : []),
+      ...(proxyAuthExtensionDir ? [`--load-extension=${proxyAuthExtensionDir}`] : []),
     ]),
     ignoreDefaultArgs: [...UNSAFE_OR_AUTOMATION_DEFAULT_ARGS],
     proxy: proxy ? toPlaywrightProxy(proxy) : undefined,
@@ -64,26 +70,89 @@ export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistent
 export class NativeStealthDriver implements BrowserDriver {
   async launch(input: DriverLaunchInput): Promise<DriverSession> {
     if (input.driver.kind !== "NATIVE_STEALTH") throw new BrowserDriverError("INVALID_DRIVER_ENDPOINT", "NativeStealthDriver received an incompatible driver configuration.");
-    const context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions, input.coherence));
+    const proxyAuthBridge = await createProxyAuthenticationBridge(input.proxy);
+    let context: BrowserContext | undefined;
     try {
+      context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions, input.coherence, proxyAuthBridge?.extensionDir));
+      const launchedContext = context;
       // Chromium's launch-time proxy credentials are normally sufficient. Some
       // authenticated gateways still surface a native 407 dialog, however. Handle
       // only proxy challenges through CDP, never by adding a Proxy-Authorization
       // header to storefront requests.
-      await installProxyAuthenticationFallback(context, input.proxy);
-      const page = context.pages()[0] ?? await context.newPage();
+      await installProxyAuthenticationFallback(launchedContext, input.proxy);
+      const page = launchedContext.pages()[0] ?? await launchedContext.newPage();
       const webdriver = await page.evaluate(() => navigator.webdriver);
       if (webdriver !== false) throw new BrowserDriverError("STEALTH_VERIFICATION_FAILED", "Chrome reported an automated webdriver environment. Copify refused to continue without stealth hardening.");
       return {
-        context,
-        metadata: metadata("NATIVE_STEALTH", true, context.browser()?.version() ?? null, "PASS", true, true),
-        stop: async () => { await context.close(); },
+        context: launchedContext,
+        metadata: metadata("NATIVE_STEALTH", true, launchedContext.browser()?.version() ?? null, "PASS", true, true),
+        stop: async () => { await launchedContext.close(); await proxyAuthBridge?.close(); },
       };
     } catch (error) {
-      await context.close().catch(() => undefined);
+      await context?.close().catch(() => undefined);
+      await proxyAuthBridge?.close();
       throw error;
     }
   }
+}
+
+type ProxyAuthenticationBridge = { extensionDir: string; close(): Promise<void> };
+
+/**
+ * Chrome may restore a persistent tab and issue its proxy-auth request before a
+ * page-scoped CDP session can attach. This session-only extension is available at
+ * Chrome launch time and asks an in-memory loopback server for credentials only
+ * after an `isProxy` auth challenge. The extension files never contain a proxy
+ * username or password and are deleted after the browser closes.
+ */
+export async function createProxyAuthenticationBridge(proxy: RunnerProxy | null): Promise<ProxyAuthenticationBridge | null> {
+  if (!proxy?.username || !proxy.password) return null;
+  const token = randomBytes(32).toString("base64url");
+  const server = createServer((request, response) => {
+    if (request.method !== "GET" || request.url !== `/${token}`) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+    response.end(JSON.stringify({ username: proxy.username, password: proxy.password }));
+  });
+  let extensionDir: string | undefined;
+  try {
+    const port = await listenOnLoopback(server);
+    extensionDir = await mkdtemp(join(tmpdir(), "copify-proxy-auth-"));
+    await Promise.all([
+      writeFile(join(extensionDir, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "Copify session proxy authentication", version: "1.0.0", permissions: ["webRequest", "webRequestAuthProvider"], host_permissions: ["<all_urls>"], background: { service_worker: "background.js" } })),
+      writeFile(join(extensionDir, "background.js"), proxyAuthExtensionScript(`http://127.0.0.1:${port}/${token}`)),
+    ]);
+    return {
+      extensionDir,
+      close: async () => {
+        await closeServer(server);
+        await rm(extensionDir!, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    await closeServer(server);
+    if (extensionDir) await rm(extensionDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export function proxyAuthExtensionScript(endpoint: string): string {
+  return `const endpoint = ${JSON.stringify(endpoint)};\nchrome.webRequest.onAuthRequired.addListener((details, callback) => {\n  if (!details.isProxy) { callback({}); return; }\n  fetch(endpoint, { cache: \"no-store\" })\n    .then((response) => response.ok ? response.json() : Promise.reject(new Error(\"proxy credentials unavailable\")))\n    .then(({ username, password }) => callback({ authCredentials: { username, password } }))\n    .catch(() => callback({ cancel: true }));\n}, { urls: [\"<all_urls>\"] }, [\"asyncBlocking\"]);\n`;
+}
+
+function listenOnLoopback(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      if (!address || typeof address === "string") { reject(new Error("The proxy-auth bridge did not receive a loopback port.")); return; }
+      resolve(address.port);
+    });
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => { server.close(() => resolve()); });
 }
 
 type ProxyAuthChallenge = { requestId?: unknown; authChallenge?: { source?: unknown } };

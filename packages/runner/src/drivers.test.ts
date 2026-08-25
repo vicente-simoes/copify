@@ -1,6 +1,8 @@
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import type { Browser, BrowserContext, CDPSession, Page } from "rebrowser-playwright";
-import { BrowserDriverError, buildNativeStealthArgs, createBrowserDriver, nativeStealthLaunchOptions, ExternalCdpDriver, installProxyAuthenticationFallback, NativeStealthDriver } from "./drivers";
+import { BrowserDriverError, buildNativeStealthArgs, createBrowserDriver, createProxyAuthenticationBridge, nativeStealthLaunchOptions, ExternalCdpDriver, installProxyAuthenticationFallback, NativeStealthDriver } from "./drivers";
 
 describe("browser drivers", () => {
   it("builds a hardened deterministic Chrome argument list", () => {
@@ -69,6 +71,23 @@ describe("browser drivers", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls).toContainEqual({ method: "Fetch.continueWithAuth", params: { requestId: "proxy-request", authChallengeResponse: { response: "ProvideCredentials", username: "private-user", password: "private-pass" } } });
     expect(calls).toContainEqual({ method: "Fetch.continueWithAuth", params: { requestId: "storefront-request", authChallengeResponse: { response: "Default" } } });
+  });
+
+  it("keeps proxy credentials out of the launch-time extension and serves them only from loopback memory", async () => {
+    const bridge = await createProxyAuthenticationBridge({
+      proxyProfileId: "00000000-0000-4000-8000-000000000001", proxyName: "PT sticky", protocol: "http",
+      host: "proxy.invalid", port: 8080, username: "private-user", password: "private-pass", expectedCountry: "PT", expectedCity: null,
+    });
+    expect(bridge).not.toBeNull();
+    const script = await readFile(`${bridge!.extensionDir}/background.js`, "utf8");
+    expect(script).not.toContain("private-user");
+    expect(script).not.toContain("private-pass");
+    const endpoint = JSON.parse(script.match(/const endpoint = (.*);/)![1]) as string;
+    const response = await fetch(endpoint);
+    await expect(response.json()).resolves.toEqual({ username: "private-user", password: "private-pass" });
+    const extensionDir = bridge!.extensionDir;
+    await bridge!.close();
+    expect(existsSync(extensionDir)).toBe(false);
   });
 
   it("selects the configured driver without a standard Playwright fallback", () => {
