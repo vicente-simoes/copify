@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext } from "rebrowser-playwright";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "rebrowser-playwright";
 import type { BrowserDriverMetadata, RunnerBrowserDriver, RunnerProxy } from "@copify/shared";
 import { findChromeExecutable, toPlaywrightProxy } from "./network";
 import type { NativeCoherenceOptions } from "./coherence";
@@ -66,6 +66,11 @@ export class NativeStealthDriver implements BrowserDriver {
     if (input.driver.kind !== "NATIVE_STEALTH") throw new BrowserDriverError("INVALID_DRIVER_ENDPOINT", "NativeStealthDriver received an incompatible driver configuration.");
     const context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions, input.coherence));
     try {
+      // Chromium's launch-time proxy credentials are normally sufficient. Some
+      // authenticated gateways still surface a native 407 dialog, however. Handle
+      // only proxy challenges through CDP, never by adding a Proxy-Authorization
+      // header to storefront requests.
+      await installProxyAuthenticationFallback(context, input.proxy);
       const page = context.pages()[0] ?? await context.newPage();
       const webdriver = await page.evaluate(() => navigator.webdriver);
       if (webdriver !== false) throw new BrowserDriverError("STEALTH_VERIFICATION_FAILED", "Chrome reported an automated webdriver environment. Copify refused to continue without stealth hardening.");
@@ -79,6 +84,48 @@ export class NativeStealthDriver implements BrowserDriver {
       throw error;
     }
   }
+}
+
+type ProxyAuthChallenge = { requestId?: unknown; authChallenge?: { source?: unknown } };
+
+/**
+ * Keeps proxy credentials inside the runner and answers only CDP challenges that
+ * Chromium identifies as originating from the proxy. Storefront 401 challenges
+ * retain Chrome's normal behaviour and never receive proxy credentials.
+ */
+export async function installProxyAuthenticationFallback(
+  context: Pick<BrowserContext, "pages" | "on" | "newCDPSession">,
+  proxy: RunnerProxy | null,
+): Promise<void> {
+  if (!proxy?.username || !proxy.password) return;
+  const attachedPages = new WeakSet<Page>();
+  const attach = async (page: Page): Promise<void> => {
+    if (attachedPages.has(page) || page.isClosed()) return;
+    attachedPages.add(page);
+    let session: CDPSession;
+    try {
+      session = await context.newCDPSession(page);
+      await session.send("Fetch.enable", { handleAuthRequests: true, patterns: [] });
+    } catch {
+      // Launch-time proxy credentials remain the primary path. A CDP fallback
+      // failure must not make an otherwise valid browser session unavailable.
+      return;
+    }
+    session.on("Fetch.authRequired", (event: ProxyAuthChallenge) => {
+      const requestId = typeof event.requestId === "string" ? event.requestId : null;
+      if (!requestId) return;
+      const isProxyChallenge = event.authChallenge?.source === "Proxy";
+      void session.send("Fetch.continueWithAuth", {
+        requestId,
+        authChallengeResponse: isProxyChallenge
+          ? { response: "ProvideCredentials", username: proxy.username, password: proxy.password }
+          : { response: "Default" },
+      }).catch(() => undefined);
+    });
+    page.once("close", () => { void session.detach().catch(() => undefined); });
+  };
+  await Promise.all(context.pages().map(attach));
+  context.on("page", (page) => { void attach(page); });
 }
 
 export class ExternalCdpDriver implements BrowserDriver {

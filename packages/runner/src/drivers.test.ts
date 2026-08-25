@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Browser, BrowserContext } from "rebrowser-playwright";
-import { BrowserDriverError, buildNativeStealthArgs, createBrowserDriver, nativeStealthLaunchOptions, ExternalCdpDriver, NativeStealthDriver } from "./drivers";
+import type { Browser, BrowserContext, CDPSession, Page } from "rebrowser-playwright";
+import { BrowserDriverError, buildNativeStealthArgs, createBrowserDriver, nativeStealthLaunchOptions, ExternalCdpDriver, installProxyAuthenticationFallback, NativeStealthDriver } from "./drivers";
 
 describe("browser drivers", () => {
   it("builds a hardened deterministic Chrome argument list", () => {
@@ -42,6 +42,33 @@ describe("browser drivers", () => {
     expect(options).not.toHaveProperty("locale");
     expect(options).not.toHaveProperty("timezoneId");
     expect(options).not.toHaveProperty("geolocation");
+  });
+
+  it("answers only proxy authentication challenges with the configured proxy credentials", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    let authRequired: ((event: { requestId: string; authChallenge: { source: string } }) => void) | undefined;
+    const page = { isClosed: () => false, once: () => undefined } as unknown as Page;
+    const session = {
+      send: async (method: string, params?: unknown) => { calls.push({ method, params }); },
+      on: (event: string, listener: typeof authRequired) => { if (event === "Fetch.authRequired") authRequired = listener; },
+      detach: async () => undefined,
+    } as unknown as CDPSession;
+    const context = {
+      pages: () => [page], on: () => undefined, newCDPSession: async () => session,
+    } as unknown as Pick<BrowserContext, "pages" | "on" | "newCDPSession">;
+    const proxy = {
+      proxyProfileId: "00000000-0000-4000-8000-000000000001", proxyName: "PT sticky", protocol: "http" as const,
+      host: "proxy.invalid", port: 8080, username: "private-user", password: "private-pass", expectedCountry: "PT", expectedCity: null,
+    };
+
+    await installProxyAuthenticationFallback(context, proxy);
+    expect(calls).toContainEqual({ method: "Fetch.enable", params: { handleAuthRequests: true, patterns: [] } });
+
+    authRequired?.({ requestId: "proxy-request", authChallenge: { source: "Proxy" } });
+    authRequired?.({ requestId: "storefront-request", authChallenge: { source: "Server" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toContainEqual({ method: "Fetch.continueWithAuth", params: { requestId: "proxy-request", authChallengeResponse: { response: "ProvideCredentials", username: "private-user", password: "private-pass" } } });
+    expect(calls).toContainEqual({ method: "Fetch.continueWithAuth", params: { requestId: "storefront-request", authChallengeResponse: { response: "Default" } } });
   });
 
   it("selects the configured driver without a standard Playwright fallback", () => {
