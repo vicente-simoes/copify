@@ -266,6 +266,60 @@ export function resolveMonitorBehavior(settings: MonitorSettings, storeId: strin
   return monitorBehaviorSchema.parse({ ...settings.defaults, ...(settings.stores[storeId] ?? {}) });
 }
 
+/* Appearance. A theme is four numbers on top of a built-in palette: every
+   override is nullable, so "unset" keeps following the shipped token rather
+   than freezing today's hex into the database. */
+export const hexColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "Use a 6-digit hex colour.");
+export const themeModeSchema = z.enum(["dark", "light", "system"]);
+export type ThemeMode = z.infer<typeof themeModeSchema>;
+export const resolvedThemeSchema = z.enum(["dark", "light"]);
+export type ResolvedTheme = z.infer<typeof resolvedThemeSchema>;
+export const themeOverridesSchema = z.object({
+  accent: hexColorSchema.nullable(),
+  background: hexColorSchema.nullable(),
+  foreground: hexColorSchema.nullable(),
+  contrast: z.number().min(0.7).max(1.4).nullable(),
+});
+export type ThemeOverrides = z.infer<typeof themeOverridesSchema>;
+/* Density is spacing only — control heights, row heights, padding. The type
+   scale is deliberately not part of it: section 33.3 caps type at 17px on a
+   13px base, and a console that lets the operator grow the text past that
+   stops being the interface the layouts were designed against. */
+export const densitySchema = z.enum(["comfortable", "compact"]);
+export type Density = z.infer<typeof densitySchema>;
+export const appearanceSettingsSchema = z.object({
+  mode: themeModeSchema,
+  /* Keyed by the resolved theme, not by mode: System borrows whichever of the
+     two is active, so customising under System edits the one on screen. */
+  themes: z.object({ dark: themeOverridesSchema, light: themeOverridesSchema }),
+  /* Defaulted, not required: a row written before density existed must still
+     parse, or adding a field would silently reset the operator's theme. */
+  density: densitySchema.default("comfortable"),
+});
+export type AppearanceSettings = z.infer<typeof appearanceSettingsSchema>;
+export const chromeColorsSchema = z.object({ backgroundColor: hexColorSchema, symbolColor: hexColorSchema });
+export type ChromeColors = z.infer<typeof chromeColorsSchema>;
+export function defaultThemeOverrides(): ThemeOverrides { return { accent: null, background: null, foreground: null, contrast: null }; }
+export function defaultAppearanceSettings(): AppearanceSettings {
+  return { mode: "dark", themes: { dark: defaultThemeOverrides(), light: defaultThemeOverrides() }, density: "comfortable" };
+}
+
+/* Window placement. Position is nullable because a first launch has none and a
+   saved one can point at a display that is no longer attached; size is always
+   the restore size, never the maximised frame. */
+export const WINDOW_MIN_WIDTH = 960;
+export const WINDOW_MIN_HEIGHT = 650;
+export const WINDOW_DEFAULT_WIDTH = 1240;
+export const WINDOW_DEFAULT_HEIGHT = 860;
+export const windowBoundsSchema = z.object({
+  x: z.number().int().nullable(),
+  y: z.number().int().nullable(),
+  width: z.number().int().min(WINDOW_MIN_WIDTH),
+  height: z.number().int().min(WINDOW_MIN_HEIGHT),
+  maximized: z.boolean(),
+});
+export type WindowBounds = z.infer<typeof windowBoundsSchema>;
+
 export const networkUsageCompletenessSchema = z.enum(["EXACT", "PARTIAL", "UNSUPPORTED"]);
 export type NetworkUsageCompleteness = z.infer<typeof networkUsageCompletenessSchema>;
 export const networkUsageSourceSchema = z.enum(["MONITOR", "BROWSER"]);
@@ -393,7 +447,7 @@ export const warmingIpc = { list: "warming:list", start: "warming:start", update
 export const proxyIpc = { list: "proxies:list", create: "proxies:create", update: "proxies:update", remove: "proxies:remove", test: "proxies:test", benchmarks: "proxies:benchmarks", reveal: "proxies:reveal", copyRevealed: "proxies:copy-revealed" } as const;
 export const shippingIpc = { list: "shipping:list", create: "shipping:create", update: "shipping:update", remove: "shipping:remove", reveal: "shipping:reveal", copyRevealed: "shipping:copy-revealed", changed: "shipping:changed" } as const;
 export const storeIpc = { list: "stores:list", update: "stores:update", changed: "stores:changed" } as const;
-export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", getMonitor: "settings:get-monitor", updateMonitor: "settings:update-monitor", appInfo: "settings:app-info" } as const;
+export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", updateNetworkProbe: "settings:update-network-probe", getMonitor: "settings:get-monitor", updateMonitor: "settings:update-monitor", getAppearance: "settings:get-appearance", updateAppearance: "settings:update-appearance", applyChrome: "settings:apply-chrome", appInfo: "settings:app-info" } as const;
 export const monitorIpc = { status: "monitor:status", setTurbo: "monitor:set-turbo", changed: "monitor:changed" } as const;
 export const usageIpc = { run: "usage:run", totals: "usage:totals" } as const;
 export type AppInfo = { version: string; electronVersion: string; chromeVersion: string | null; osVersion: string };

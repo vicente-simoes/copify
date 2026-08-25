@@ -5,6 +5,7 @@ import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
 import { SensitiveValue } from "../ui/SensitiveValue";
+import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 
 type AssignmentColumn = { id: string; label: string };
 
@@ -45,6 +46,8 @@ export function Shipping({
 }) {
   const [reveal, setReveal] = useState<ShippingSecretReveal | null>(null);
   const [revealError, setRevealError] = useState("");
+  const [query, setQuery] = useState("");
+  const visible = shipping.filter((profile) => matchesQuery(query, profile.name, profile.country));
   useEffect(() => {
     if (!reveal) return;
     const close = () => setReveal(null); const timer = window.setTimeout(close, Math.max(0, reveal.expiresAt - Date.now()));
@@ -78,7 +81,10 @@ export function Shipping({
             <h2>Addresses</h2>
             <p className="muted">Encrypted by Windows. Viewing requires explicit consent and expires automatically.</p>
           </div>
-          <button className="primary" disabled={busy || activeRun} onClick={onNew}>New address</button>
+          <div className="header-actions">
+            <ListFilter value={query} onChange={setQuery} label="addresses" hidden={shipping.length < FILTER_THRESHOLD} />
+            <button className="primary" disabled={busy || activeRun} onClick={onNew}>New address</button>
+          </div>
         </div>
 
         {shipping.length === 0 ? (
@@ -86,6 +92,8 @@ export function Shipping({
             No addresses yet.
             <button disabled={busy || activeRun} onClick={onNew}>New address</button>
           </div>
+        ) : visible.length === 0 ? (
+          <NoMatches label="addresses" onClear={() => setQuery("")} />
         ) : (
           <div className="rows address-rows">
             <div className="row row-head">
@@ -94,7 +102,7 @@ export function Shipping({
               <span>Status</span>
               <span />
             </div>
-            {shipping.map((item) => {
+            {visible.map((item) => {
               const ready = item.enabled && item.complete;
               const entries: MenuEntry[] = [
                 { kind: "item", label: "View", disabled: busy || activeRun || !item.detailsConfigured, onSelect: () => { void viewShipping(item); } },
@@ -130,7 +138,7 @@ export function Shipping({
         </div>
 
         {profiles.length === 0 ? (
-          <div className="empty">No browsers yet.</div>
+          <div className="empty">Assignments appear once a browser profile exists.</div>
         ) : (
           <div className="rows assignment-rows">
             <div className="row row-head">

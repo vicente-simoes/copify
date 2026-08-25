@@ -1,11 +1,11 @@
-import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, safeStorage, screen, type Rectangle } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
-  type ApiResult, type AppInfo, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, appearanceSettingsSchema, chromeColorsSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -45,18 +45,73 @@ function emitMonitorChanged(): void { mainWindow?.webContents.send(monitorIpc.ch
 function emitWarmingChanged(): void { void profiles.listProfileWarmStates().then((states) => mainWindow?.webContents.send(warmingIpc.changed, states)); }
 
 async function createWindow(): Promise<void> {
+  // The frame is painted before the renderer exists, so the theme it should
+  // wear comes from the cache the renderer wrote on its last change.
+  const chrome = profiles.getChromeColors() ?? { backgroundColor: CHROME_BACKGROUND, symbolColor: CHROME_SYMBOL };
+  const placement = restorePlacement(profiles.getWindowBounds());
   mainWindow = new BrowserWindow({
-    width: 1240, height: 860, minWidth: 960, minHeight: 650, icon: windowIconPath(), show: false, backgroundColor: CHROME_BACKGROUND,
-    titleBarStyle: "hidden", titleBarOverlay: { color: CHROME_BACKGROUND, symbolColor: CHROME_SYMBOL, height: TITLEBAR_HEIGHT },
+    ...placement.bounds, minWidth: WINDOW_MIN_WIDTH, minHeight: WINDOW_MIN_HEIGHT, icon: windowIconPath(), show: false,
+    backgroundColor: chrome.backgroundColor,
+    titleBarStyle: "hidden", titleBarOverlay: { color: chrome.backgroundColor, symbolColor: chrome.symbolColor, height: TITLEBAR_HEIGHT },
     webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false }
   });
+  if (placement.maximized) mainWindow.maximize();
+  trackPlacement(mainWindow);
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   if (process.env.ELECTRON_RENDERER_URL) await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL); else await mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
-// Copify draws its own titlebar; these keep the OS-drawn window controls in the app palette.
+
+/* A saved position can name a display that is no longer attached, which would
+   open the window off-screen with no way to drag it back. Size is always kept;
+   only the position is dropped, which centres the window on the primary display. */
+function restorePlacement(saved: WindowBounds | null): { bounds: Rectangle | { width: number; height: number }; maximized: boolean } {
+  const width = Math.max(saved?.width ?? WINDOW_DEFAULT_WIDTH, WINDOW_MIN_WIDTH);
+  const height = Math.max(saved?.height ?? WINDOW_DEFAULT_HEIGHT, WINDOW_MIN_HEIGHT);
+  const maximized = saved?.maximized ?? false;
+  if (!saved || saved.x === null || saved.y === null) return { bounds: { width, height }, maximized };
+  const frame = { x: saved.x, y: saved.y, width, height };
+  const onScreen = screen.getAllDisplays().some((display) => intersects(frame, display.workArea));
+  return { bounds: onScreen ? frame : { width, height }, maximized };
+}
+
+function intersects(a: Rectangle, b: Rectangle): boolean {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+/* Resizing fires continuously, so the write is debounced; closing flushes it,
+   because the last drag before quitting is the one worth keeping. `app.exit`
+   skips window close events, so before-quit calls this directly. */
+let flushPlacement: () => void = () => {};
+
+function trackPlacement(window: BrowserWindow): void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const persist = (): void => {
+    if (window.isDestroyed() || window.isMinimized() || window.isFullScreen()) return;
+    // getNormalBounds, not getBounds: a maximised frame must not overwrite the
+    // size the window should return to when it is restored.
+    const { x, y, width, height } = window.getNormalBounds();
+    try { profiles.setWindowBounds({ x, y, width, height, maximized: window.isMaximized() }); } catch { /* placement is not worth failing a resize over */ }
+  };
+  const schedule = (): void => { clearTimeout(timer); timer = setTimeout(persist, 300); };
+  flushPlacement = () => { clearTimeout(timer); persist(); };
+  window.on("resize", schedule);
+  window.on("move", schedule);
+  window.on("maximize", schedule);
+  window.on("unmaximize", schedule);
+  window.on("close", () => flushPlacement());
+}
+// Copify draws its own titlebar; these keep the OS-drawn window controls in the
+// app palette until the renderer reports the resolved colours of its theme.
 const CHROME_BACKGROUND = "#0B0B0C";
 const CHROME_SYMBOL = "#8A8A93";
 const TITLEBAR_HEIGHT = 40;
+
+function applyChromeColors(colors: ChromeColors): void {
+  profiles.setChromeColors(colors);
+  if (!mainWindow) return;
+  if (process.platform === "win32") mainWindow.setTitleBarOverlay({ color: colors.backgroundColor, symbolColor: colors.symbolColor, height: TITLEBAR_HEIGHT });
+  mainWindow.setBackgroundColor(colors.backgroundColor);
+}
 
 // Windows and Linux get no menu at all. Chromium still handles clipboard shortcuts inside
 // inputs there, but macOS needs the roles to exist for them to work, so keep a minimal one.
@@ -125,6 +180,9 @@ function registerIpc(): void {
   ipcMain.handle(settingsIpc.updateNetworkProbe, (_event, input: unknown): Promise<ApiResult<{ probeUrl: string }>> => resultAsync(async () => { const { probeUrl } = networkProbeSettingsSchema.parse(input); return { probeUrl: await profiles.setNetworkProbeUrl(probeUrl) }; }));
   ipcMain.handle(settingsIpc.getMonitor, (): Promise<ApiResult<MonitorSettings>> => resultAsync(() => profiles.getMonitorSettings()));
   ipcMain.handle(settingsIpc.updateMonitor, (_event, input: unknown): Promise<ApiResult<MonitorSettings>> => resultAsync(() => profiles.setMonitorSettings(monitorSettingsSchema.parse(input))));
+  ipcMain.handle(settingsIpc.getAppearance, (): Promise<ApiResult<AppearanceSettings>> => resultAsync(() => profiles.getAppearanceSettings()));
+  ipcMain.handle(settingsIpc.updateAppearance, (_event, input: unknown): Promise<ApiResult<AppearanceSettings>> => resultAsync(() => profiles.setAppearanceSettings(appearanceSettingsSchema.parse(input))));
+  ipcMain.handle(settingsIpc.applyChrome, (_event, input: unknown): ApiResult<boolean> => result(() => { applyChromeColors(chromeColorsSchema.parse(input)); return true; }));
   ipcMain.handle(monitorIpc.status, (): ApiResult<MonitorRuntimeStatus> => result(() => monitorStatus));
   ipcMain.handle(monitorIpc.setTurbo, (_event, enabled: boolean): ApiResult<MonitorRuntimeStatus> => result(() => { if (!activeRun?.monitor || !trySendMonitorCommand(activeRun.monitor, { type: "SET_MONITOR_TURBO", version: IPC_VERSION, enabled: Boolean(enabled) })) throw new Error("There is no active target monitor."); return monitorStatus; }));
   ipcMain.handle(usageIpc.run, (_event, runId: string): Promise<ApiResult<RunNetworkUsage[]>> => resultAsync(() => profiles.listRunNetworkUsage(runId)));
@@ -492,4 +550,4 @@ app.whenReady().then(async () => {
   orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
-app.on("before-quit", (event) => { if (!orchestrator) return; event.preventDefault(); clipboardCoordinator?.cancelAll(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });
+app.on("before-quit", (event) => { flushPlacement(); if (!orchestrator) return; event.preventDefault(); clipboardCoordinator?.cancelAll(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });

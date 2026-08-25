@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store, type WarmDestination } from "@copify/shared";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
+import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 
 const STOPPED_SESSION = (profileId: string): SessionSnapshot => ({
   profileId,
@@ -98,6 +99,8 @@ export function Browsers({
   const [warmState, setWarmState] = useState<ProfileWarmState | null>(null);
   const [warmBusy, setWarmBusy] = useState(false);
   const [warmError, setWarmError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const nameInput = useRef<HTMLInputElement>(null);
   const showHealth = async (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string, title: string) => {
     const result = await window.copify.health.get(subjectKind, subjectId); if (result.ok) { setHealthTitle(title); setHealthDetail(result.value); }
   };
@@ -105,6 +108,7 @@ export function Browsers({
   // adapter can actually read one.
   const showCart = stores.some((store) => store.enabled && store.capabilities.cartInspection);
   const watcherStores = stores.filter((store) => store.enabled && store.capabilities.monitor === "shared");
+  const visible = profiles.filter((profile) => matchesQuery(query, profile.name, proxies.find((proxy) => proxy.id === profile.proxyProfileId)?.name ?? "Direct", profile.driver.kind));
   const warmingStore = stores.find((store) => store.enabled && store.warming);
   const beginWarming = async (profile: BrowserProfile) => {
     if (!warmingStore) return; setWarmBusy(true); setWarmError(null);
@@ -137,6 +141,7 @@ export function Browsers({
               onSubmit={(event) => { event.preventDefault(); onCreate(); }}
             >
               <input
+                ref={nameInput}
                 value={profileName}
                 onChange={(event) => setProfileName(event.target.value)}
                 maxLength={80}
@@ -153,11 +158,17 @@ export function Browsers({
             </button>
             <button disabled={busy || activeCount === 0} onClick={onCloseAll}>Close all</button>
             {showCart && <button disabled={busy || !profiles.some((profile) => profile.enabled)} onClick={onEmptyCarts}>Empty carts</button>}
+            <ListFilter value={query} onChange={setQuery} label="browsers" hidden={profiles.length < FILTER_THRESHOLD} />
           </div>
         </div>
 
         {profiles.length === 0 && watcherStores.length === 0 ? (
-          <div className="empty">No browsers yet.</div>
+          <div className="empty">
+            No browsers yet.
+            <button disabled={busy} onClick={() => nameInput.current?.focus()}>Add a browser</button>
+          </div>
+        ) : visible.length === 0 && watcherStores.length === 0 ? (
+          <NoMatches label="browsers" onClear={() => setQuery("")} />
         ) : (
           <div className={`rows browser-rows ${showCart ? "has-cart" : ""}`}>
             <div className="row row-head">
@@ -180,7 +191,7 @@ export function Browsers({
               </div>
             ))}
 
-            {profiles.map((profile) => {
+            {visible.map((profile) => {
               const session = sessions[profile.id] ?? STOPPED_SESSION(profile.id);
               const cart = cartStatuses[profile.id] ?? EMPTY_CART(profile.id);
               const active = ["STARTING", "READY", "STOPPING"].includes(session.state);

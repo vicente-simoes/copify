@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
-  type ApiResult, type AppInfo, type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -48,6 +48,9 @@ const api = {
     updateNetworkProbe: (input: NetworkProbeSettings): Promise<ApiResult<NetworkProbeSettings>> => ipcRenderer.invoke(settingsIpc.updateNetworkProbe, input),
     getMonitor: (): Promise<ApiResult<MonitorSettings>> => ipcRenderer.invoke(settingsIpc.getMonitor),
     updateMonitor: (input: MonitorSettings): Promise<ApiResult<MonitorSettings>> => ipcRenderer.invoke(settingsIpc.updateMonitor, input),
+    getAppearance: (): Promise<ApiResult<AppearanceSettings>> => ipcRenderer.invoke(settingsIpc.getAppearance),
+    updateAppearance: (input: AppearanceSettings): Promise<ApiResult<AppearanceSettings>> => ipcRenderer.invoke(settingsIpc.updateAppearance, input),
+    applyChrome: (colors: ChromeColors): Promise<ApiResult<boolean>> => ipcRenderer.invoke(settingsIpc.applyChrome, colors),
     appInfo: (): Promise<ApiResult<AppInfo>> => ipcRenderer.invoke(settingsIpc.appInfo)
   },
   sessions: {

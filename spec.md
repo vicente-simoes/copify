@@ -1334,9 +1334,10 @@ copify/
 │           ├── preflight.ts    pre-run checks (section 39)
 │           ├── types.ts        renderer draft shapes and helpers
 │           ├── pages/          Run, Browsers, Targets, Shipping, Settings,
-│           │                   RunInspector, Proxies, LaunchModes
+│           │                   RunInspector, Proxies, LaunchModes, Appearance
 │           ├── ui/             TitleBar, Sidebar, Menu, Drawer, Toast,
-│           │                   StoreMark, primitives, icons
+│           │                   StoreMark, primitives, icons,
+│           │                   theme, ThemeProvider
 │           └── styles/         tokens, base, shell, components
 │
 ├── packages/
@@ -1440,7 +1441,7 @@ Run        the drop console and landing page
 Browsers   browser profiles, routes, cart state
 Targets    what to watch for and which variants are acceptable
 Shipping   addresses and which browser uses which
-Settings   Routes · Stores · Advanced · About
+Settings   Routes · Monitor · Stores · Advanced · Appearance · About
 ```
 
 There is no separate dashboard. A dashboard that only summarises other pages adds
@@ -1482,14 +1483,19 @@ carries an amber edge and its resume action inline.
 - **Chrome and content are two surfaces.** A frameless window draws its own 40px
   titlebar sharing one background with the sidebar and no divider between them, so
   the chrome reads as a single L-shaped surface with the content in a well.
-  Window controls are OS-drawn in the app palette via `titleBarOverlay`.
+  Window controls are OS-drawn in the app palette via `titleBarOverlay`, which
+  the renderer refreshes from the resolved theme (section 33.6).
+- **A page that throws does not take the window.** Each page renders inside an
+  error boundary, so the chrome, the sidebar and a run in progress survive one
+  broken screen; the shell has its own boundary above them.
 - **The titlebar carries identity and state**, not the page name: the mark, the
   wordmark, and a live status chip (ready count, or `REC` with a running clock).
   Page identity comes from the sidebar's active item. The sidebar collapses to a
   52px icon rail.
-- **One accent, semantic only.** Primary actions are near-white. Colour means
-  state: green for ready and pass, amber for warnings and human handoff, red for
-  failure. Never decoration.
+- **One accent, semantic only.** Primary actions are drawn from the foreground
+  rather than tinted, so colour is never spent on "this is a button". Colour
+  means state: green for ready and pass, amber for warnings and human handoff,
+  red for failure. Never decoration.
 - **Rows, not cards.** Tables share one grid between header and rows via subgrid,
   so columns cannot drift. Machine values — IPs, latencies, timings, event names,
   scores — render monospaced with tabular numerals.
@@ -1510,13 +1516,68 @@ architecture, restate the heading above it, or narrate what the user just did.
   reason — not as a paragraph. Prose does not scale across a dozen adapters.
 - Confirmations only for what leaves no trace. A visible change is its own
   confirmation, so successful edits stay silent; failures and results with no
-  on-screen effect appear as a transient toast.
-- Empty states are one line and an action.
+  on-screen effect appear as a transient toast. Toasts stack rather than
+  replace one another, so a burst of failures is still readable.
+- Confirmations are drawn in-app, never by the platform. A native dialog
+  ignores the palette, the theme and the frameless chrome. The title states
+  what will happen, the button is the verb, and Cancel holds focus.
+- Empty states are one line and an action. Where there is no action to offer,
+  the line says what will fill the list instead of naming the absence.
+- Lists gain a filter only once they are long enough to stop being scannable;
+  below that it is one more control between the operator and the rows.
 
 ### 33.5 Visual priorities
 
 The UI emphasises state, timing, failure, action required, target rules, and
 network health — in that order.
+
+### 33.6 Theming
+
+Dark is the default and the console's native register. Light and System exist
+because the machine running a drop is not always in a dark room, and System
+follows the OS.
+
+A theme is not a palette to be maintained twice. It declares four bases —
+background, foreground, accent, and a contrast multiplier — and `tokens.css`
+derives every surface and text step from them with `color-mix(in oklab, …)`:
+
+```text
+--surface … --border-strong   background → foreground, at fixed steps × contrast
+--fg-muted, --fg-dim          foreground → background, at fixed fades ÷ contrast
+--primary-bg                  foreground pushed past itself, never tinted
+```
+
+Consequences worth keeping:
+
+- **No stylesheet outside `tokens.css` names a colour.** Everything reads a
+  token, so a new theme costs four values rather than an audit.
+- **The mixes resolve at used-value time**, so the contrast slider and the
+  colour pickers apply with no JavaScript recomputation.
+- **Themes are attribute-scoped** (`[data-theme="dark"|"light"]`), not
+  `prefers-color-scheme`. System is resolved in JS to a concrete attribute. A
+  media query is document-global and could not let the Appearance preview cards
+  render a theme other than the active one — and they reuse the same ramp, so a
+  preview cannot drift from what the app will paint.
+- **Overrides are nullable.** Unset follows the shipped token rather than
+  freezing today's hex into the database, so palette changes still reach anyone
+  who never customised.
+- **The frame is painted before the renderer exists.** The resolved chrome
+  colours are cached in `app_settings` so the next launch opens the window in
+  the right theme instead of flashing the default one.
+- **Nothing stops the operator picking an unreadable pair**, so Appearance
+  measures instead: body, muted, primary and accent are checked against WCAG AA
+  (4.5:1, or 3:1 for the accent, which is only ever a dot or a 2px rule) and
+  reported as data. A failing pair is a warning, never a block.
+- **Density is spacing, not type.** Control heights, row heights and padding
+  scale between Comfortable and Compact; the type scale does not, because 33.3
+  caps it and the layouts are designed against that cap.
+- **Motion is decoration.** Under `prefers-reduced-motion` transitions and
+  animations collapse. The recording dot stops pulsing but stays red — no state
+  is carried by movement alone.
+
+Appearance applies as you change it. Settings that a run snapshots — monitor
+behaviour — stage behind a Save button; a theme has no such moment, and the app
+itself is the preview.
 
 ---
 
@@ -1597,6 +1658,10 @@ target_templates
 ```text
 network_probe_url   HTTPS endpoint used by route benchmarks
 store_settings      JSON map of storeId -> enabled, merged over the manifests
+monitor_settings    JSON monitor behaviour: defaults, per-store overrides, routes
+appearance_settings JSON theme mode, per-theme colour overrides, density
+appearance_chrome   resolved titlebar colours, read by main before first paint
+window_bounds       restore size, position and maximised state of the window
 ```
 
 Large binary artifacts such as screenshots and traces should remain on disk, with paths referenced from SQLite.
@@ -1894,6 +1959,184 @@ Success criteria:
 
 ---
 
+### v0.12 — Cost Accounting, Budgets & Provider Reconciliation
+
+Copify must make proxy cost visible without presenting locally measured bytes as an
+invoice. The product distinguishes **Copify estimates** from **provider-confirmed
+billing** at every layer of the UI and API.
+
+#### Goals
+
+- Show live and historical proxy traffic and estimated cost for the current day,
+  rolling 7 days, calendar month, and a custom date range.
+- Give the operator a practical answer to: "How much did this run, store, monitor,
+  browser profile, or proxy cost?"
+- Track a chosen spending budget and warn before it is consumed.
+- Reconcile Copify's partial measurement with the provider's authoritative usage,
+  balance, and billed-cost data where the provider supports it.
+- Keep all proxy and account credentials protected by `safeStorage`; never expose
+  credentials, provider tokens, request URLs, headers, cookies, or checkout data
+  through cost records.
+
+#### Accounting model
+
+Copify already records cumulative run network usage for monitors and browser
+sessions. v0.12 turns that data into a durable cost ledger, using decimal billing
+units (`1 GB = 1,000,000,000 bytes`) and integer micro-USD arithmetic.
+
+Each usage aggregate must include:
+
+- `runId`, time bucket, usage source (`MONITOR` or `BROWSER`), store, browser
+  profile/session where applicable, and proxy profile where applicable.
+- received bytes, known sent bytes, request count, and a measurement-completeness
+  value (`PARTIAL`, `COMPLETE`, or `UNAVAILABLE`).
+- the proxy's snapshotted `costPerGbMicrosUsd`, estimated cost in micro-USD, and
+  update timestamp.
+- no URL, request/response header, cookie, request body, payment data, address, or
+  proxy credential.
+
+The local estimate is calculated only for non-direct traffic with a configured
+rate:
+
+```text
+measured_bytes = received_bytes + known_sent_bytes
+estimated_cost_micro_usd =
+  floor(measured_bytes * cost_per_gb_micro_usd / 1,000,000,000)
+```
+
+Direct traffic has no proxy-cost estimate. Monitor usage includes successful,
+protected, cached, and failed responses when their body/request size is known.
+Browser usage uses Chromium encoded-byte events where available and known upload
+sizes; it falls back to `Content-Length` and known payload size. Headers, TLS,
+proxy-tunnel overhead, unknown uploads, and unsupported External CDP sessions must
+make the measurement `PARTIAL` or `UNAVAILABLE`, never silently exact.
+
+#### Provider-confirmed billing
+
+Provider-confirmed data is the source of truth for actual spend and remaining
+credit. It must remain separate from local estimates because a proxy provider may
+bill traffic that the browser/network observer cannot fully measure.
+
+Implement provider reconciliation in progressive layers:
+
+1. **Manual snapshot** — the operator may enter a provider-reported remaining
+   credit, used traffic, or billed spend and timestamp.
+2. **CSV import** — accept an exported provider usage report, show a preview and
+   field mapping, then retain only normalized aggregate rows. Do not retain the
+   original CSV or any unnecessary provider identifiers.
+3. **Optional read-only connector** — for providers with a documented account
+   usage API, store a separate API token using `safeStorage`, perform an explicit
+   user-requested refresh or low-frequency background refresh, and persist only
+   normalized usage/balance/billed-cost results. The proxy username and password
+   must never be repurposed as an API credential.
+
+DataImpulse is the first reconciliation target. Its dashboard/reporting remains
+the fallback if the installed account/API scope cannot return plan balance and
+usage details. The connector must be read-only: it cannot purchase traffic,
+top-up an account, change provider targeting, generate proxies, alter provider
+settings, or manage sub-users. A failed sync preserves prior confirmed data,
+labels its age, and never blocks a run.
+
+Provider data is represented with an explicit authority value:
+
+- `COPIFY_ESTIMATED` — calculated from Copify's local measurements.
+- `PROVIDER_CONFIRMED` — imported or synchronised from a provider report/API.
+- `MANUAL_CONFIRMED` — operator-entered snapshot, including its entered time.
+
+The UI must never add estimated and provider-confirmed spend together. It should
+instead show the latest confirmed value alongside the comparable Copify estimate
+and their difference, with measurement completeness and data age.
+
+#### Settings → Costs & budgets
+
+Add a dedicated Settings tab named **Costs & budgets** with:
+
+- headline cards for estimated and confirmed spend, proxy traffic, remaining
+  provider credit where known, and estimation coverage for the selected period.
+- period selector: Today, last 24 hours, rolling 7 days, calendar month, and
+  custom range; all period labels state their timezone.
+- breakdowns by provider, proxy profile, store, monitor versus browser, browser
+  profile, and run. Rows show bytes, requests, estimated cost, confirmed cost when
+  attributable, completeness, and most recent activity.
+- a reconciliation panel: provider connection/snapshot status, last successful
+  refresh/import time, current balance/credit, imported report history, data age,
+  and a clearly labelled refresh/import action.
+- a budget panel supporting daily, weekly, and monthly budgets in USD (stored as
+  integer micro-USD), with configurable warning thresholds and an optional
+  starting-provider-credit figure.
+- budget progress based on provider-confirmed spend when it exists for the period;
+  otherwise it uses Copify's estimate and displays that limitation prominently.
+
+Default threshold notifications are 50%, 80%, and 100%. Notifications are local
+Windows/app alerts and are de-duplicated once per budget period and threshold.
+They are informational by default. An operator may separately enable a
+monitor-only hard cap: when the selected budget threshold is reached, Copify stops
+new monitor requests and displays an operator alert. A hard cap must never close,
+alter, or interrupt an already-running checkout browser, cart, or payment handoff.
+
+Budgets apply prospectively to traffic observed after the budget is enabled; the
+UI may include prior usage in its chart but must label it as pre-budget.
+
+#### Data model and public interfaces
+
+Add persistence for:
+
+- normalized provider usage snapshots and balance snapshots, including provider,
+  authority, time range, aggregate bytes/cost/credit, sync time, and data age.
+- budget definitions, active period state, fired threshold markers, and
+  monitor-only hard-cap state.
+- historical, queryable cost aggregates indexed by period, provider, proxy,
+  source, store, browser profile, and run.
+
+Use schema migrations that preserve existing proxy profiles, encrypted secrets,
+browser profiles/directories, monitors, runs, benchmarks, network-usage rows, and
+warming/coherence data. Provider tokens are encrypted via `safeStorage` and must
+not be part of database exports, telemetry, renderer logs, or error messages.
+
+Add typed IPC APIs/events for reading period summaries and breakdowns, updating
+budgets, creating/removing a provider connection, importing a report, requesting a
+refresh, and publishing budget/reconciliation status. Renderer payloads contain
+only redacted provider-connection metadata and normalized monetary/usage results.
+
+#### Testing and acceptance criteria
+
+Test all arithmetic using integer boundaries, decimal GB conversion, zero/unknown
+rates, partial measurements, direct traffic, and large cumulative totals. Verify:
+
+- monitor and browser totals equal their route/session/store/run breakdowns.
+- estimates use the cost rate snapshotted with each usage record, even if a proxy's
+  price changes later.
+- CSV malformed rows are previewed/rejected without persisting partial imports;
+  duplicate imports are idempotent.
+- provider/API failures, stale snapshots, and missing permissions remain visible
+  but do not stop runs.
+- confirmed values never combine with estimates, and the UI labels authority,
+  completeness, data age, and timezone correctly.
+- budgets reset deterministically at their defined local period boundary, fire each
+  threshold once, and a monitor-only hard cap never sends a checkout-runner pause,
+  stop, or browser-close command.
+- proxy passwords, API tokens, URLs, headers, cookies, addresses, payment data,
+  and raw imported reports never appear in renderer payloads, cost tables, events,
+  diagnostics, telemetry, or logs.
+
+Manual validation uses a DataImpulse plan with a configured rate (for example,
+`$1.00/GB`): run a monitor and a sticky-browser checkout rehearsal without
+submitting an order; verify live estimate growth, source breakdowns, budget alert
+deduplication, and a dashboard/CSV or authorized API reconciliation. The final
+screen must make it clear whether a displayed number is Copify-estimated,
+provider-confirmed, or manually confirmed.
+
+Success criteria:
+
+- An operator can understand current spend, estimated remaining credit, budget
+  status, and which routes/runs generated traffic without revealing secrets.
+- DataImpulse-reported usage can reconcile with Copify's estimate, while any
+  unmeasured difference is explained rather than hidden.
+- Cost controls preserve the product's checkout-safety rule: no automatic payment
+  action and no interruption of an active checkout browser.
+
+---
+
 ### v1.0 — Stable Windows Release
 
 Requirements:
@@ -2074,7 +2317,8 @@ Next implementation steps (starting from current v0.7 state):
 5. v0.10: Automated GeoIP to Timezone/Locale/Geolocation coherence
 6. v0.10: WebRTC leak prevention & Profile Warmup workflow (Google / Shop Pay)
 7. v0.11: Historical drop metrics & post-run analytics
-8. v1.0: Windows production release & installer
+8. v0.12: Cost accounting, budgets & provider reconciliation
+9. v1.0: Windows production release & installer
 ```
 
 ---
@@ -2119,4 +2363,5 @@ The following decisions are considered **locked unless new evidence justifies ch
 - European PSD2 / 3DS banking approvals and security challenges trigger **human handoff**.
 - Every drop attempt is modeled as a `Run` with monotonic nanosecond precision.
 - UI is an operations console: near-monochrome, rows over cards, drawers for forms, frameless window with app-drawn titlebar.
+- Themes derive every token from four bases in `tokens.css`; no other stylesheet names a colour. Dark is the default, with Light and System alongside it.
 - Capability-driven store architecture: stores declare manifests in `packages/shared`, UI renders from capabilities rather than store branches.

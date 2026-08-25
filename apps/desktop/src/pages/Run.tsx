@@ -307,7 +307,7 @@ export function Run({
           <h2>Recent runs</h2>
         </div>
         {runs.length === 0 ? (
-          <div className="empty">No runs yet.</div>
+          <div className="empty">Runs appear here once you start one above.</div>
         ) : (
           <div className="run-list">
             {runs.map((run) => (

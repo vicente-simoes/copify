@@ -4,15 +4,17 @@ import type { ProxyDraft } from "../types";
 import { Field, Benchmark } from "../ui/primitives";
 import { Proxies } from "./Proxies";
 import { BrowserDrivers } from "./LaunchModes";
+import { Appearance } from "./Appearance";
+import { StoreMark, hasStoreMark } from "../ui/StoreMark";
 
-type Tab = "routes" | "monitor" | "stores" | "advanced" | "validation" | "about";
+type Tab = "routes" | "monitor" | "stores" | "advanced" | "appearance" | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "routes", label: "Routes" },
   { id: "monitor", label: "Monitor" },
   { id: "stores", label: "Stores" },
   { id: "advanced", label: "Advanced" },
-  { id: "validation", label: "Validation" },
+  { id: "appearance", label: "Appearance" },
   { id: "about", label: "About" },
 ];
 
@@ -173,6 +175,7 @@ export function Settings(props: {
           <div className="rows">
             {props.stores.map((store) => (
               <div className="row" key={store.id}>
+                <span className="store-row-mark">{hasStoreMark(store.id) ? <StoreMark storeId={store.id} /> : null}</span>
                 <div className="row-main">
                   <span className="row-name">
                     {store.name}
@@ -210,48 +213,7 @@ export function Settings(props: {
         />
       )}
 
-      {tab === "validation" && (
-        <>
-          <section className="panel">
-            <div className="section-title">
-              <div>
-                <h2>FAST_DROP input fixture</h2>
-                <p className="muted">A local, network-independent check for the v0.8 cursor, typing, and safe paste behavior.</p>
-              </div>
-            </div>
-            <div className="rows">
-              <div className="row">
-                <div className="row-main">
-                  <span className="row-name">Run from PowerShell</span>
-                  <span className="row-meta">Close Copify, then run <code>pnpm test:input</code> in the Copify folder.</span>
-                </div>
-              </div>
-              <div className="row">
-                <div className="row-main">
-                  <span className="row-name">What a pass proves</span>
-                  <span className="row-meta">Trusted browser mouse, wheel, keyboard and input events; curved movement; click dwell; text insertion fallback; and External CDP detaching without closing Chrome.</span>
-                </div>
-              </div>
-              <div className="row">
-                <div className="row-main">
-                  <span className="row-name">Clipboard safety</span>
-                  <span className="row-meta">The fixture never reads or overwrites a nonempty Windows clipboard. A denied clipboard lease uses browser text insertion instead.</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="section-title">
-              <div>
-                <h2>Live-store note</h2>
-                <p className="muted">A target test can be blocked by the store before Copify reaches product matching.</p>
-              </div>
-            </div>
-            <p className="field-note">If Targets reports “Storefront access challenge detected,” wait before retrying. That is a storefront access result for the separate monitor browser, not a FAST_DROP input failure or proof that the product is unavailable.</p>
-          </section>
-        </>
-      )}
+      {tab === "appearance" && <Appearance />}
 
       {tab === "about" && (
         <section className="panel">

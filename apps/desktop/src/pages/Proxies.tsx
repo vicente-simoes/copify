@@ -5,6 +5,7 @@ import { parseProxyUrl } from "../proxy-url";
 import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
+import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 import { SensitiveValue } from "../ui/SensitiveValue";
 
 function score(benchmark?: ProxyBenchmark): string {
@@ -50,6 +51,8 @@ export function Proxies({
   const [proxyUrlMessage, setProxyUrlMessage] = useState("");
   const [reveal, setReveal] = useState<ProxySecretReveal | null>(null);
   const [revealError, setRevealError] = useState("");
+  const [query, setQuery] = useState("");
+  const visible = proxies.filter((proxy) => matchesQuery(query, proxy.name, proxy.provider, proxy.host, proxy.type, `${proxy.host}:${proxy.port}`));
 
   useEffect(() => { if (!drawerOpen) { setProxyUrl(""); setProxyUrlMessage(""); } }, [drawerOpen]);
   useEffect(() => {
@@ -82,7 +85,10 @@ export function Proxies({
             <h2>Proxies</h2>
             <p className="muted">A browser uses your own connection unless you assign one.</p>
           </div>
-          <button disabled={busy} onClick={onNew}>New proxy</button>
+          <div className="header-actions">
+            <ListFilter value={query} onChange={setQuery} label="proxies" hidden={proxies.length < FILTER_THRESHOLD} />
+            <button disabled={busy} onClick={onNew}>New proxy</button>
+          </div>
         </div>
 
         {proxies.length === 0 ? (
@@ -90,6 +96,8 @@ export function Proxies({
             No proxies.
             <button disabled={busy} onClick={onNew}>New proxy</button>
           </div>
+        ) : visible.length === 0 ? (
+          <NoMatches label="proxies" onClear={() => setQuery("")} />
         ) : (
           <div className="rows proxy-rows">
             <div className="row row-head">
@@ -100,7 +108,7 @@ export function Proxies({
               <span>Score</span>
               <span />
             </div>
-            {proxies.map((proxy) => {
+            {visible.map((proxy) => {
               const benchmark = latest(proxy.id);
               const credentials = proxy.usernameConfigured || proxy.passwordConfigured;
               const entries: MenuEntry[] = [

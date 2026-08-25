@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IPC_VERSION, SCHEMA_VERSION, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, shippingSecretRevealSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, SCHEMA_VERSION, appearanceSettingsSchema, defaultAppearanceSettings, defaultThemeOverrides, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, shippingSecretRevealSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -108,5 +108,16 @@ describe("shared contracts", () => {
     const handoff = { type: "PAYMENT_HANDOFF", version: IPC_VERSION, profileId, runId, runSessionId, phase: "DETECTED", category: "PSD2_3DS" };
     expect(runnerEventSchema.safeParse(handoff).success).toBe(true);
     expect(JSON.stringify(handoff)).not.toMatch(/url|token|payment details/i);
+  });
+
+  it("keeps an appearance row written before density existed", () => {
+    const legacy = { mode: "light", themes: { dark: defaultThemeOverrides(), light: { accent: "#ff0000", background: null, foreground: null, contrast: 1.2 } } };
+    const parsed = appearanceSettingsSchema.parse(legacy);
+    // The chosen mode and colours must survive; only the new field is filled in.
+    expect(parsed.mode).toBe("light");
+    expect(parsed.themes.light.accent).toBe("#ff0000");
+    expect(parsed.density).toBe("comfortable");
+    expect(defaultAppearanceSettings().density).toBe("comfortable");
+    expect(appearanceSettingsSchema.safeParse({ ...legacy, density: "cosy" }).success).toBe(false);
   });
 });

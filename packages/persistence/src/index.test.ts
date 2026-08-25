@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -192,6 +193,33 @@ describe("ProfileRepository", () => {
     const detail = await repo.createRun({ name: "Target run", diagnosticLevel: "NORMAL", profileIds: [profile.id], targetId: target.id }, { appVersion: "0.4.0", schemaVersion: 4, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "STARTING", startedAt, endedAt: null, finalError: null }], snapshot);
     await repo.updateTarget(target.id, { name: "Changed" }); await repo.removeTarget(target.id);
     expect((await repo.getRun(detail.run.id))?.run.targetSnapshot?.name).toBe("Jacket");
+  });
+
+  it("persists window placement and refuses a corrupt or undersized row", () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-persistence-"));
+    roots.push(root);
+    const file = join(root, "copify.sqlite");
+    const repo = openProfileRepository(file, join(root, "browser-profiles"));
+    repositories.push(repo);
+
+    expect(repo.getWindowBounds()).toBeNull();
+    const bounds = { x: 120, y: 80, width: 1400, height: 900, maximized: false };
+    expect(repo.setWindowBounds(bounds)).toEqual(bounds);
+    expect(repo.getWindowBounds()).toEqual(bounds);
+    // A window that has never been placed keeps its size but no position.
+    repo.setWindowBounds({ ...bounds, x: null, y: null, maximized: true });
+    expect(repo.getWindowBounds()).toMatchObject({ x: null, y: null, maximized: true });
+    expect(() => repo.setWindowBounds({ ...bounds, width: 100 })).toThrow();
+
+    // A row hand-edited below the window minimum must read back as "no saved
+    // placement" rather than open an unusably small window.
+    repo.close(); repositories.pop();
+    const raw = new DatabaseSync(file);
+    raw.prepare("UPDATE app_settings SET value = ? WHERE key = 'window_bounds'").run(JSON.stringify({ x: 0, y: 0, width: 100, height: 100, maximized: false }));
+    raw.close();
+    const reopened = openProfileRepository(file, join(root, "browser-profiles"));
+    repositories.push(reopened);
+    expect(reopened.getWindowBounds()).toBeNull();
   });
 });
 

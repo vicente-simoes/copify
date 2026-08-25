@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { getStoreManifest, isMonitorable, type StoreManifest, type Store, type Target } from "@copify/shared";
 import { list, fromMinor, type TargetDraft } from "../types";
 import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
 import { StoreMark } from "../ui/StoreMark";
+import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 
 const FREEFORM: StoreManifest["variants"]["sizes"] = { kind: "freeform" };
 
@@ -89,6 +91,8 @@ export function Targets({
   onToggle: (target: Target) => void;
   onRemove: (target: Target) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const visible = targets.filter((target) => matchesQuery(query, target.name, target.storeId, ...target.productKeywords));
   const manifest = getStoreManifest(draft.storeId);
   const sizes = manifest?.variants.sizes ?? FREEFORM;
   const selectableStores = stores.filter((store) => store.enabled);
@@ -101,7 +105,10 @@ export function Targets({
             <h2>Targets</h2>
             <p className="muted">What Copify watches for, and which variants it will accept.</p>
           </div>
-          <button className="primary" disabled={busy || activeRun} onClick={onNew}>New target</button>
+          <div className="header-actions">
+            <ListFilter value={query} onChange={setQuery} label="targets" hidden={targets.length < FILTER_THRESHOLD} />
+            <button className="primary" disabled={busy || activeRun} onClick={onNew}>New target</button>
+          </div>
         </div>
 
         {targets.length === 0 ? (
@@ -109,9 +116,11 @@ export function Targets({
             No targets yet.
             <button disabled={busy || activeRun} onClick={onNew}>New target</button>
           </div>
+        ) : visible.length === 0 ? (
+          <NoMatches label="targets" onClear={() => setQuery("")} />
         ) : (
           <div className="rows target-rows">
-            {targets.map((target) => {
+            {visible.map((target) => {
               const monitorable = isMonitorable(target.storeId);
               const check = target.latestCheck;
               const entries: MenuEntry[] = [

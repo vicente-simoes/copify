@@ -1,12 +1,12 @@
 /* ---- page scaffolding ---- */
 
-.page-stack { display: flex; flex-direction: column; gap: 14px; }
+.page-stack { display: flex; flex-direction: column; gap: var(--stack-gap); }
 
 .page-lead { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 4px; }
 .page-lead p { color: var(--fg-muted); max-width: 68ch; }
 
 .panel {
-  padding: 16px;
+  padding: var(--panel-pad);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-raised);
@@ -35,12 +35,30 @@
   color: var(--fg-muted);
 }
 
+/* ---- render failures ---- */
+
+/* The message is a machine value, not prose: it is copied into a bug report,
+   so it wraps rather than truncates and keeps its own line breaks. It stays
+   muted because the heading above it already carries the failure state —
+   .error-detail is the inline red variant used inside rows. */
+.crash-detail {
+  margin-top: 14px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg-muted); font-size: var(--text-sm);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* The app-scope fallback renders with no shell around it, so it carries the
+   page padding the workspace would normally have provided. */
+.app-error { margin: 24px; }
+
 /* ---- rows ---- */
 
 .rows { display: flex; flex-direction: column; }
 .row {
   display: flex; align-items: center; gap: 14px;
-  min-height: var(--row-height); padding: 8px 12px;
+  min-height: var(--row-height); padding: var(--row-pad-y) 12px;
   border-bottom: 1px solid var(--border);
 }
 .rows > .row:last-child { border-bottom: 0; }
@@ -114,7 +132,7 @@
 }
 .form-card .section-title { grid-column: 1 / -1; }
 .form-card > button[type="submit"] { grid-column: 1 / -1; justify-self: start; }
-.form-check { align-self: end; min-height: 30px; }
+.form-check { align-self: end; min-height: var(--control-height); }
 
 .check { display: inline-flex; align-items: center; gap: 7px; color: var(--fg-muted); font-size: var(--text-base); }
 .check input { width: auto; }
@@ -202,7 +220,7 @@
 .run-list { display: flex; flex-direction: column; margin-top: 12px; }
 .run-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px;
-  height: auto; min-height: var(--row-height); padding: 8px 12px;
+  height: auto; min-height: var(--row-height); padding: var(--row-pad-y) 12px;
   border: 0; border-bottom: 1px solid var(--border); border-radius: 0;
   background: transparent; text-align: left; font-weight: 400;
 }
@@ -251,9 +269,13 @@
 
 /* ---- settings tabs ---- */
 
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
+/* The strip scrolls rather than squashing its labels: tabs are added over time
+   and the window has a narrow minimum. */
+.tabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border); }
+.tabs::-webkit-scrollbar { height: 6px; }
 .tab {
-  height: 30px; padding: 0 12px;
+  flex: 0 0 auto;
+  height: var(--control-height); padding: 0 12px;
   border: 0; border-radius: 0; background: transparent; color: var(--fg-muted);
   font-weight: 500;
 }
@@ -309,21 +331,25 @@
   background: var(--surface-hover); border-color: transparent; color: var(--fg);
 }
 
+/* Fixed and portalled to the body: the workspace is a scroll container, so an
+   absolutely positioned menu was clipped by it before it ever reached the
+   window edge. Position and max-height are set by the component from the space
+   actually available, so a long route list scrolls instead of being cut off.
+   Above the drawer scrim, below the confirm dialog and toasts. */
 .menu-list {
-  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  position: fixed; z-index: 45;
   display: flex; flex-direction: column;
-  min-width: 190px; max-height: 60vh; overflow-y: auto;
+  min-width: 190px; overflow-y: auto;
   padding: 4px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
   background: var(--surface-raised);
-  box-shadow: 0 12px 28px rgb(0 0 0 / 0.5);
+  box-shadow: 0 12px 28px var(--shadow-color);
 }
-.menu-list.drop-up { top: auto; bottom: calc(100% + 4px); }
 
 .menu-item {
   display: flex; align-items: center; gap: 8px;
   justify-content: flex-start;
-  height: 30px; width: 100%; padding: 0 8px;
+  height: var(--control-height); width: 100%; padding: 0 8px;
   border: 0; border-radius: var(--radius);
   background: transparent; color: var(--fg);
   font-weight: 400; text-align: left;
@@ -375,7 +401,7 @@
 }
 
 .row-head {
-  min-height: 30px; padding-top: 0; padding-bottom: 6px;
+  min-height: var(--control-height); padding-top: 0; padding-bottom: 6px;
   color: var(--fg-dim); font-size: var(--text-xs);
   text-transform: uppercase; letter-spacing: 0.06em;
 }
@@ -386,12 +412,36 @@
 .browser-row .col-actions { justify-content: flex-end; }
 .browser-row .row-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ---- confirm dialog ---- */
+
+/* Centred rather than a sheet: this interrupts, where the drawer accompanies. */
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: var(--scrim);
+}
+
+.modal {
+  display: flex; flex-direction: column; gap: 6px;
+  width: min(420px, 100%);
+  /* Bounded by the window, not by its content: a centred box with no ceiling
+     overflows a short window in both directions and cannot be scrolled to. */
+  max-height: 100%; overflow-y: auto;
+  padding: 18px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: 0 12px 28px var(--shadow-color);
+}
+.modal p { max-width: 52ch; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
 /* ---- drawer ---- */
 
 .drawer-scrim {
   position: fixed; inset: 0; z-index: 40;
   display: flex; justify-content: flex-end;
-  background: rgb(0 0 0 / 0.45);
+  background: var(--scrim);
 }
 
 .drawer {
@@ -399,8 +449,14 @@
   width: min(440px, 100%); height: 100%;
   border-left: 1px solid var(--border);
   background: var(--surface);
-  box-shadow: -16px 0 40px rgb(0 0 0 / 0.4);
+  box-shadow: -16px 0 40px var(--shadow-color-strong);
 }
+
+/* Head and foot are pinned. Without this a form taller than the drawer makes
+   flexbox shrink every child, squashing the title and the Save row along with
+   the body — the two things that must stay reachable. min-height: 0 lets the
+   body shrink below its content so its own scrollbar is what absorbs it. */
+.drawer-head, .drawer-foot { flex: 0 0 auto; }
 
 .drawer-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -408,7 +464,7 @@
   border-bottom: 1px solid var(--border);
 }
 
-.drawer-body { flex: 1 1 auto; overflow-y: auto; padding: 16px; }
+.drawer-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--panel-pad); }
 
 .drawer-foot {
   display: flex; gap: 8px;
@@ -442,6 +498,11 @@
   display: inline-flex; align-items: center;
   color: var(--fg-muted); font-size: var(--text-sm); font-weight: 600;
 }
+
+/* In a settings row the mark sits ahead of the name rather than replacing it.
+   The slot is always present, marked or not, so the names stay on one edge. */
+.store-row-mark { display: flex; align-items: center; flex: 0 0 auto; width: 58px; }
+.store-row-mark .store-mark { border-radius: 2px; }
 
 /* ---- shipping ---- */
 
@@ -504,14 +565,16 @@
 
 /* ---- toasts ---- */
 
-.toast-layer { position: fixed; left: 16px; bottom: 16px; z-index: 60; }
+/* Column-reverse so a new notice pushes the stack up from the corner rather
+   than shifting the ones already being read. */
+.toast-layer { position: fixed; left: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column-reverse; gap: 8px; }
 
 .toast {
   display: flex; align-items: center; gap: 12px;
   max-width: 460px; padding: 10px 10px 10px 14px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
   background: var(--surface-raised); color: var(--fg);
-  box-shadow: 0 12px 28px rgb(0 0 0 / 0.5);
+  box-shadow: 0 12px 28px var(--shadow-color);
 }
 .toast.error { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); color: var(--danger); }
 
@@ -530,3 +593,77 @@
 .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 .benchmark-empty { margin-top: 12px; }
+
+/* ---- appearance ---- */
+
+/* Each card scopes its own theme and reuses the ramp from tokens.css, so a
+   preview cannot drift from what the app will actually paint. */
+.theme-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+
+.theme-card-slot { display: flex; flex-direction: column; gap: 7px; }
+
+.theme-card {
+  display: block; height: auto; width: 100%; padding: 0;
+  aspect-ratio: 5 / 3;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg);
+  overflow: hidden;
+}
+.theme-card:hover:not(:disabled) { background: var(--bg); border-color: var(--border-strong); }
+/* The ring is drawn by the slot, in the surrounding theme: a light card
+   selected in dark mode would otherwise outline itself into invisibility. */
+.theme-card-slot:has(.theme-card.active) .theme-card { box-shadow: 0 0 0 2px var(--primary-bg); border-color: transparent; }
+
+.theme-card-titlebar { display: flex; align-items: center; justify-content: flex-end; gap: 3px; height: 15%; padding: 0 6px; }
+.theme-card-titlebar i { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-dim); }
+
+.theme-card-body { display: flex; height: 85%; }
+
+.theme-card-sidebar { display: flex; flex-direction: column; gap: 4px; width: 28%; padding: 0 6px; }
+.theme-card-sidebar i { position: relative; height: 5px; border-radius: 2px; background: var(--surface-hover); }
+.theme-card-sidebar i.on { background: var(--surface-raised); }
+.theme-card-sidebar i.on::before { content: ""; position: absolute; left: 0; top: 1px; bottom: 1px; width: 1.5px; border-radius: 1px; background: var(--accent); }
+
+.theme-card-well {
+  display: flex; flex-direction: column; gap: 5px;
+  flex: 1 1 auto; padding: 7px;
+  background: var(--surface);
+  border-top: 1px solid var(--border); border-left: 1px solid var(--border);
+  border-top-left-radius: var(--radius);
+}
+.theme-card-well i { height: 6px; border-radius: 2px; background: var(--surface-raised); border: 1px solid var(--border); }
+
+.theme-card-label { color: var(--fg-muted); font-size: var(--text-sm); text-align: center; }
+.theme-card-slot:has(.theme-card.active) .theme-card-label { color: var(--fg); font-weight: 600; }
+
+/* ---- colour + slider + switch controls ---- */
+
+/* Controls default to full width; inside a row they size to their content. */
+.row-select { width: auto; min-width: 150px; flex: 0 0 auto; }
+
+/* Sits among the header actions, so it must not take the whole title bar. */
+.list-filter { width: auto; min-width: 160px; max-width: 240px; flex: 0 1 auto; }
+.list-filter::-webkit-search-cancel-button { appearance: none; }
+
+.color-swatch {
+  position: relative; flex: 0 0 auto;
+  width: 28px; height: 28px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  cursor: pointer;
+}
+.color-swatch input[type="color"] { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; opacity: 0; border: 0; cursor: pointer; }
+.color-swatch:has(:focus-visible) { outline: 2px solid var(--primary-bg); outline-offset: 1px; }
+
+.slider {
+  width: 140px; height: 4px; padding: 0; flex: 0 0 auto;
+  appearance: none;
+  border: 0; border-radius: 2px;
+  background: var(--border-strong);
+}
+.slider:hover { border-color: transparent; }
+.slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--primary-bg);
+  cursor: pointer;
+}

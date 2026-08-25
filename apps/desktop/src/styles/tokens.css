@@ -1,29 +1,13 @@
 /* Copify design tokens.
    Chrome (titlebar + sidebar) and the content well are deliberately different
    surfaces; everything else is a hairline on top of one of them. The steps
-   between them are wide enough to read as separate frames at a glance. */
+   between them are wide enough to read as separate frames at a glance.
+
+   A theme declares four bases — background, foreground, accent, contrast — and
+   the ramp below derives every surface and text step from them. Appearance
+   overrides those four as inline properties on <html>; nothing else changes.
+   The selectors carry no :root so a preview card can scope its own theme. */
 :root {
-  --bg: #0a0a0b;
-  --surface: #141417;
-  --surface-raised: #1c1c20;
-  --surface-hover: #24242a;
-  --border: #2e2e35;
-  --border-strong: #3d3d46;
-
-  --fg: #e8e8ea;
-  --fg-muted: #9a9aa4;
-  --fg-dim: #66666f;
-
-  /* One primary. Near-white, so colour is never spent on "this is a button". */
-  --primary-bg: #f2f2f3;
-  --primary-fg: #0a0a0b;
-  --primary-bg-hover: #ffffff;
-
-  /* Semantic only. Never decoration. */
-  --accent: #3ecf8e;
-  --warn: #e3b341;
-  --danger: #f0656b;
-
   --font-ui: "Segoe UI Variable Text", "Segoe UI", Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
@@ -39,7 +23,99 @@
   --titlebar-height: 40px;
   --sidebar-width: 220px;
   --sidebar-width-collapsed: 52px;
-  --row-height: 44px;
 
   --speed: 120ms;
+
+  /* Density: spacing only, never type. The titlebar keeps its fixed height so
+     the OS-drawn window controls stay where the overlay put them. */
+  --control-height: 30px;
+  --control-height-sm: 28px;
+  --row-height: 44px;
+  --row-pad-y: 8px;
+  --panel-pad: 16px;
+  --nav-item-height: 34px;
+  --stack-gap: 14px;
+
+  /* The shape of the ramp: how far each surface travels from the background
+     toward the foreground, and how far muted text falls back toward it.
+     Identical in both themes — only the endpoints and the contrast knob move. */
+  --step-surface: 6%;
+  --step-raised: 10%;
+  --step-hover: 15%;
+  --step-border: 20%;
+  --step-border-strong: 28%;
+  --fade-muted: 31%;
+  --fade-dim: 53%;
+}
+
+[data-density="compact"] {
+  --control-height: 26px;
+  --control-height-sm: 24px;
+  --row-height: 36px;
+  --row-pad-y: 5px;
+  --panel-pad: 12px;
+  --nav-item-height: 30px;
+  --stack-gap: 10px;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --theme-bg: #0a0a0b;
+  --theme-fg: #e8e8ea;
+  --contrast: 1;
+
+  /* Semantic only. Never decoration. */
+  --accent: #3ecf8e;
+  --warn: #e3b341;
+  --danger: #f0656b;
+
+  /* Where the primary action travels past the foreground. */
+  --extreme: #ffffff;
+
+  --shadow-color: rgb(0 0 0 / 0.5);
+  --shadow-color-strong: rgb(0 0 0 / 0.4);
+  --scrim: rgb(0 0 0 / 0.45);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --theme-bg: #f7f7f8;
+  --theme-fg: #16161a;
+  --contrast: 1;
+
+  /* The dark accent and danger do not carry on a white ground. */
+  --accent: #16a06a;
+  --warn: #9a6a00;
+  --danger: #c02a35;
+
+  --extreme: #000000;
+
+  --shadow-color: rgb(16 16 20 / 0.14);
+  --shadow-color-strong: rgb(16 16 20 / 0.12);
+  --scrim: rgb(16 16 20 / 0.28);
+}
+
+/* The ramp. One definition, shared by <html> and by the Appearance preview
+   cards, so a preview cannot drift from what the app will actually paint.
+   oklab keeps the mid-steps from going muddy on a light ground; the mixes are
+   resolved at used-value time, so contrast and colour overrides are live. */
+.theme-scope {
+  --bg: var(--theme-bg);
+  --surface: color-mix(in oklab, var(--theme-bg), var(--theme-fg) calc(var(--step-surface) * var(--contrast)));
+  --surface-raised: color-mix(in oklab, var(--theme-bg), var(--theme-fg) calc(var(--step-raised) * var(--contrast)));
+  --surface-hover: color-mix(in oklab, var(--theme-bg), var(--theme-fg) calc(var(--step-hover) * var(--contrast)));
+  --border: color-mix(in oklab, var(--theme-bg), var(--theme-fg) calc(var(--step-border) * var(--contrast)));
+  --border-strong: color-mix(in oklab, var(--theme-bg), var(--theme-fg) calc(var(--step-border-strong) * var(--contrast)));
+
+  --fg: var(--theme-fg);
+  --fg-muted: color-mix(in oklab, var(--theme-fg), var(--theme-bg) calc(var(--fade-muted) / var(--contrast)));
+  --fg-dim: color-mix(in oklab, var(--theme-fg), var(--theme-bg) calc(var(--fade-dim) / var(--contrast)));
+
+  /* One primary, pushed past the foreground rather than tinted, so colour is
+     never spent on "this is a button". */
+  --primary-bg: color-mix(in oklab, var(--theme-fg), var(--extreme) 30%);
+  --primary-fg: var(--theme-bg);
+  --primary-bg-hover: color-mix(in oklab, var(--theme-fg), var(--extreme) 70%);
 }

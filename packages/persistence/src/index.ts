@@ -3,9 +3,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, runArtifactSchema, runDetailSchema, runEventSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
-  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, appearanceSettingsSchema, chromeColorsSchema, defaultAppearanceSettings, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
+  proxyProfileSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type AppearanceSettings, type ChromeColors, type WindowBounds, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
   type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
@@ -388,6 +388,49 @@ export class ProfileRepository {
     const filtered = { ...value, proxyProfileIds: value.proxyProfileIds.filter((id) => existing.has(id)) };
     this.setJsonSetting("monitor_settings", filtered);
     return filtered;
+  }
+
+  async getAppearanceSettings(): Promise<AppearanceSettings> {
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'appearance_settings'");
+    if (!row) return defaultAppearanceSettings();
+    try { return appearanceSettingsSchema.parse(JSON.parse(String(row.value))); }
+    catch { return defaultAppearanceSettings(); }
+  }
+
+  async setAppearanceSettings(input: AppearanceSettings): Promise<AppearanceSettings> {
+    const value = appearanceSettingsSchema.parse(input);
+    this.setJsonSetting("appearance_settings", value);
+    return value;
+  }
+
+  /* The window frame is drawn by the OS before the renderer exists, so the
+     resolved chrome colours are cached here for the next launch. */
+  getChromeColors(): ChromeColors | null {
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'appearance_chrome'");
+    if (!row) return null;
+    try { return chromeColorsSchema.parse(JSON.parse(String(row.value))); }
+    catch { return null; }
+  }
+
+  setChromeColors(input: ChromeColors): ChromeColors {
+    const value = chromeColorsSchema.parse(input);
+    this.setJsonSetting("appearance_chrome", value);
+    return value;
+  }
+
+  /* Synchronous, like the chrome colours: both are read while the window is
+     being constructed, before any IPC exists to ask the renderer. */
+  getWindowBounds(): WindowBounds | null {
+    const row = this.getRow("SELECT value FROM app_settings WHERE key = 'window_bounds'");
+    if (!row) return null;
+    try { return windowBoundsSchema.parse(JSON.parse(String(row.value))); }
+    catch { return null; }
+  }
+
+  setWindowBounds(input: WindowBounds): WindowBounds {
+    const value = windowBoundsSchema.parse(input);
+    this.setJsonSetting("window_bounds", value);
+    return value;
   }
 
   async listRunSetups(): Promise<RunSetup[]> {

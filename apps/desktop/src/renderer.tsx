@@ -17,7 +17,14 @@ import type {
 import { Sidebar, type Workspace } from "./ui/Sidebar";
 import { TitleBar } from "./ui/TitleBar";
 import { Toast, type Notice } from "./ui/Toast";
+import { ConfirmProvider, useConfirm } from "./ui/Confirm";
+import { ErrorBoundary } from "./ui/ErrorBoundary";
+import { ThemeProvider } from "./ui/ThemeProvider";
+import { bootTheme } from "./ui/theme";
 import "./styles/index.css";
+
+/* Applied before the first render so a light theme never opens on a dark frame. */
+const bootedAppearance = bootTheme();
 
 import { blankProxy, blankShipping, blankTarget, fromMinor, list, toMinor, type ProxyDraft, type ShippingDraft, type TargetDraft } from "./types";
 import { Run } from "./pages/Run";
@@ -29,6 +36,7 @@ import { Settings } from "./pages/Settings";
 
 
 function App() {
+  const confirm = useConfirm();
   const [workspace, setWorkspace] = useState<Workspace>("run");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => window.localStorage.getItem("copify.sidebarCollapsed") === "1",
@@ -260,11 +268,11 @@ function App() {
       enabled: proxy.enabled,
     });
   };
-  const clearCredential = (
+  const clearCredential = async (
     proxy: ProxyProfile,
     field: "username" | "password",
   ) => {
-    if (window.confirm(`Clear the saved proxy ${field}?`))
+    if (await confirm({ title: `Clear the saved proxy ${field}?`, body: `"${proxy.name}" will need the ${field} again before it can be used.`, confirmLabel: "Clear", danger: true }))
       void execute(
         () => window.copify.proxies.update(proxy.id, { [field]: null }),
         `Proxy ${field} cleared.`,
@@ -421,13 +429,14 @@ function App() {
       <Sidebar workspace={workspace} collapsed={sidebarCollapsed} onNavigate={setWorkspace} />
       <main className="workspace">
         <div className="workspace-inner page-stack">
+        <ErrorBoundary page={workspace} key={workspace}>
         {workspace === "run" && (
           selectedRun && !activeRunId ? (
             <RunInspector
               detail={selectedRun}
               onBack={() => setSelectedRun(null)}
-              onDelete={() => {
-                if (window.confirm(`Delete "${selectedRun.run.name}" and its local artifacts?`))
+              onDelete={async () => {
+                if (await confirm({ title: `Delete "${selectedRun.run.name}"?`, body: "Its traces, screenshots and recordings are removed from this machine.", confirmLabel: "Delete", danger: true }))
                   void execute(async () => {
                     const response = await window.copify.runs.remove(selectedRun.run.id);
                     if (response.ok) setSelectedRun(null);
@@ -479,8 +488,8 @@ function App() {
               onShow={(id) => void showRun(id)}
               onSaveSetup={() => void saveRunSetup()}
               onLoadSetup={loadRunSetup}
-              onRemoveSetup={(setup) => {
-                if (window.confirm(`Remove saved setup “${setup.name}”?`)) void execute(() => window.copify.runSetups.remove(setup.id));
+              onRemoveSetup={async (setup) => {
+                if (await confirm({ title: `Remove saved setup "${setup.name}"?`, confirmLabel: "Remove", danger: true })) void execute(() => window.copify.runSetups.remove(setup.id));
               }}
             />
           )
@@ -509,17 +518,17 @@ function App() {
             onUpdate={(id, input, success) =>
               void execute(() => window.copify.profiles.update(id, input), success)
             }
-            onRemoveProfile={(profile) => {
-              if (window.confirm(`Remove "${profile.name}"? Its Chrome data stays on disk.`))
+            onRemoveProfile={async (profile) => {
+              if (await confirm({ title: `Remove "${profile.name}"?`, body: "Its Chrome data stays on disk.", confirmLabel: "Remove", danger: true }))
                 void execute(() => window.copify.profiles.remove(profile.id));
             }}
             onCheckCart={(id) => void execute(() => window.copify.sessions.checkCart(id))}
-            onEmptyCart={(id) => {
-              if (window.confirm("Remove every item from this cart?"))
+            onEmptyCart={async (id) => {
+              if (await confirm({ title: "Remove every item from this cart?", confirmLabel: "Empty cart", danger: true }))
                 void execute(() => window.copify.sessions.emptyCart(id));
             }}
-            onEmptyCarts={() => {
-              if (window.confirm("Check every enabled browser and remove all cart items? Browsers opened only for this task will close automatically."))
+            onEmptyCarts={async () => {
+              if (await confirm({ title: "Empty every enabled browser's cart?", body: "Browsers opened only for this task will close again automatically.", confirmLabel: "Empty carts", danger: true }))
                 void execute(() => window.copify.sessions.emptyCarts());
             }}
             onOpenAll={() => void execute(() => window.copify.sessions.openAll())}
@@ -561,8 +570,8 @@ function App() {
             onToggleProxy={(proxy) =>
               void execute(() => window.copify.proxies.update(proxy.id, { enabled: !proxy.enabled }))
             }
-            onRemoveProxy={(proxy) => {
-              if (window.confirm(`Remove "${proxy.name}"? Browsers using it return to direct.`))
+            onRemoveProxy={async (proxy) => {
+              if (await confirm({ title: `Remove "${proxy.name}"?`, body: "Browsers using it return to the direct connection.", confirmLabel: "Remove", danger: true }))
                 void execute(() => window.copify.proxies.remove(proxy.id));
             }}
             setDraft={setProxyDraft}
@@ -613,11 +622,9 @@ function App() {
                 }),
               )
             }
-            onRemove={(target) => {
+            onRemove={async (target) => {
               if (
-                window.confirm(
-                  `Remove “${target.name}”? Completed runs keep their snapshots.`,
-                )
+                await confirm({ title: `Remove "${target.name}"?`, body: "Completed runs keep their snapshots.", confirmLabel: "Remove", danger: true })
               )
                 void execute(() => window.copify.targets.remove(target.id));
             }}
@@ -662,11 +669,9 @@ function App() {
                 }),
               )
             }
-            onRemove={(profile) => {
+            onRemove={async (profile) => {
               if (
-                window.confirm(
-                  `Remove “${profile.name}”? Assigned browsers will become observation-only.`,
-                )
+                await confirm({ title: `Remove "${profile.name}"?`, body: "Assigned browsers become observation-only.", confirmLabel: "Remove", danger: true })
               )
                 void execute(() => window.copify.shipping.remove(profile.id));
             }}
@@ -680,6 +685,7 @@ function App() {
             }
           />
         )}
+        </ErrorBoundary>
         </div>
       </main>
       </div>
@@ -689,4 +695,12 @@ function App() {
 }
 
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <ThemeProvider initial={bootedAppearance}>
+    <ErrorBoundary page="Copify" scope="app" className="app-error">
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>
+    </ErrorBoundary>
+  </ThemeProvider>,
+);

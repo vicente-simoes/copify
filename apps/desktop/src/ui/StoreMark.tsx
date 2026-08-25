@@ -13,6 +13,8 @@ const byStoreId = new Map(
   Object.entries(marks).map(([path, url]) => [path.split("/").pop()!.replace(/\.svg$/, ""), url]),
 );
 
+export function hasStoreMark(storeId: string): boolean { return byStoreId.has(storeId); }
+
 export function StoreMark({ storeId, className }: { storeId: string; className?: string }) {
   const name = getStoreManifest(storeId)?.name ?? storeId;
   const source = byStoreId.get(storeId);
