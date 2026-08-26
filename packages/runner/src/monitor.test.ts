@@ -78,6 +78,6 @@ describe("HTTP monitor domain", () => {
       { kind: "PROXY", id: "00000000-0000-4000-8000-000000000003", proxyType: "residential-sticky", protocol: "http", host: "127.0.0.1", port: 8002 }
     ]);
     await expect(monitor.poll(target, policy(), pool)).rejects.toMatchObject({ route: { port: 8001 }, reason: { code: "STOREFRONT_PROTECTION", status: 429 } });
-    expect(calls).toBe(1);
+    expect(calls).toBe(3);
   });
 });

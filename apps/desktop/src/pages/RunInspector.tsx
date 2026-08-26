@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { type RunDetail, type RunEvent, type RunNetworkUsage, type RunSession } from "@copify/shared";
+import { type RunAnnotation, type RunDetail, type RunEvent, type RunMetrics, type RunNetworkUsage, type RunSession, type SessionMetrics } from "@copify/shared";
 import { fromMinor } from "../types";
 import { Route } from "../ui/primitives";
 import { BackIcon } from "../ui/icons";
@@ -76,7 +76,9 @@ function Gantt({ detail }: { detail: RunDetail }) {
 
 export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; onBack: () => void; onDelete: () => void }) {
   const [usage, setUsage] = useState<RunNetworkUsage[]>([]);
-  useEffect(() => { void window.copify.usage.run(detail.run.id).then((result) => { if (result.ok) setUsage(result.value); }); }, [detail.run.id]);
+  const [runMetric, setRunMetric] = useState<RunMetrics | null>(null); const [sessionMetrics, setSessionMetrics] = useState<SessionMetrics[]>([]); const [annotations, setAnnotations] = useState<RunAnnotation[]>([]); const [note, setNote] = useState("");
+  const refreshAnnotations = () => void window.copify.analytics.annotations(detail.run.id).then((result) => { if (result.ok) setAnnotations(result.value); });
+  useEffect(() => { void window.copify.usage.run(detail.run.id).then((result) => { if (result.ok) setUsage(result.value); }); void window.copify.analytics.query({ targetId: detail.run.targetSnapshot?.targetId ?? null, storeId: null, profileId: null, proxyProfileId: null, appVersions: [], range: "ALL" }).then((result) => { if (result.ok) { setRunMetric(result.value.runMetrics.find((metric) => metric.runId === detail.run.id) ?? null); setSessionMetrics(result.value.sessionMetrics.filter((metric) => metric.runId === detail.run.id)); } }); refreshAnnotations(); }, [detail.run.id]);
   const target = detail.run.targetSnapshot;
   const duration = detail.run.endedAt ? detail.run.endedAt - detail.run.startedAt : null;
   const recording = detail.run.status === "STARTING" || detail.run.status === "RECORDING";
@@ -115,6 +117,10 @@ export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; 
         <Gantt detail={detail} />
       </section>
 
+      {runMetric && <section className="panel"><div className="section-title"><div><h2>Latency breakdown</h2><p className="muted">Derived from monotonic event timestamps.</p></div></div><div className="rows"><div className="row"><span className="row-name">Monitor to verified detection</span><span className="row-cell mono">{runMetric.monitorToDetectMs === null ? "—" : formatDuration(runMetric.monitorToDetectMs)}</span><span className="row-cell">{runMetric.discoveryWinner ?? "No winner"}</span></div>{sessionMetrics.map((metric) => <div className="row" key={metric.runSessionId}><span className="row-main"><span className="row-name">{metric.browserProfileName}</span><span className="row-meta">{metric.observedOutcome.toLowerCase().replaceAll("_", " ")} · checkpoint {metric.checkpointCount} · Turnstile {metric.turnstileCount}</span></span><span className="row-cell mono">detect → cart {metric.detectToCartMs === null ? "—" : formatDuration(metric.detectToCartMs)}</span><span className="row-cell mono">cart → checkout {metric.cartToCheckoutMs === null ? "—" : formatDuration(metric.cartToCheckoutMs)}</span></div>)}</div></section>}
+
+      {detail.events.some((event) => event.type.startsWith("DISCOVERY_")) && <section className="panel"><div className="section-title"><h2>Discovery mesh</h2></div><div className="rows">{detail.events.filter((event) => event.type === "DISCOVERY_SOURCE_PROBED" || event.type === "DISCOVERY_SOURCE_UNAVAILABLE" || event.type === "DISCOVERY_MESH_WINNER").map((event) => <div className="row" key={event.id}><span className="row-main"><span className="row-name">{String(event.payload.source ?? "source")}</span><span className="row-meta">{readableEvent(event.type)} · route {String(event.payload.routeId ?? "—")}</span></span><span className="row-cell mono">{event.payload.durationMs === undefined ? "" : formatDuration(Number(event.payload.durationMs))}</span><span className="row-cell mono">{event.payload.responseBytes === undefined ? "" : `${Number(event.payload.responseBytes).toLocaleString()} B`}</span></div>)}</div></section>}
+
       {usage.length > 0 && <section className="panel">
         <div className="section-title"><div><h2>Network usage</h2><p className="muted">Application-observed bytes; tunnel overhead is excluded.</p></div></div>
         <div className="rows">
@@ -147,6 +153,7 @@ export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; 
       {detail.artifacts.length > 0 && (
         <section className="panel">
           <div className="section-title"><h2>Artifacts</h2></div>
+          {detail.artifacts.some((artifact) => artifact.kind === "SCREENSHOT") && <div className="screenshot-strip">{detail.artifacts.filter((artifact) => artifact.kind === "SCREENSHOT").map((artifact) => <img key={artifact.id} src={window.copify.analytics.artifactPreviewUrl(artifact.id)} alt={`Run screenshot ${artifact.relativePath}`} />)}</div>}
           <div className="rows">
             {detail.artifacts.map((artifact) => (
               <div className="row" key={artifact.id}>
@@ -154,12 +161,14 @@ export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; 
                   <span className="row-name">{artifact.kind.toLowerCase()}</span>
                   <span className="row-meta mono">{artifact.relativePath}</span>
                 </div>
-                {artifact.sensitive && <span className="badge">sensitive</span>}
+                <div className="row-actions">{artifact.sensitive && <span className="badge">sensitive</span>}<button className="text" onClick={() => void window.copify.analytics.revealArtifact(detail.run.id, artifact.id)}>Reveal</button></div>
               </div>
             ))}
           </div>
         </section>
       )}
+
+      <section className="panel"><div className="section-title"><div><h2>Annotations</h2><p className="muted">Manual outcomes never replace observed run states.</p></div></div><div className="actions"><input value={note} maxLength={2000} placeholder="Add a post-run note" onChange={(event) => setNote(event.target.value)} /><button disabled={!note.trim()} onClick={() => void window.copify.analytics.createAnnotation({ runId: detail.run.id, runSessionId: null, kind: "NOTE", text: note, failureCategory: null, manualOutcome: null }).then((result) => { if (result.ok) { setNote(""); refreshAnnotations(); } })}>Add note</button><select defaultValue="" onChange={(event) => { if (!event.target.value) return; void window.copify.analytics.createAnnotation({ runId: detail.run.id, runSessionId: null, kind: "FAILURE_CLASSIFICATION", text: null, failureCategory: event.target.value as any, manualOutcome: null }).then(refreshAnnotations); }}><option value="">Failure category…</option>{["NETWORK_PROXY","STOREFRONT_PROTECTION","PRODUCT_VARIANT","CART","CHECKOUT","CAPTCHA","PAYMENT_HANDOFF","BROWSER_RUNNER","USER_ABORTED","UNKNOWN"].map((value) => <option key={value} value={value}>{value.toLowerCase().replaceAll("_", " ")}</option>)}</select><select defaultValue="" onChange={(event) => { if (!event.target.value) return; void window.copify.analytics.createAnnotation({ runId: detail.run.id, runSessionId: null, kind: "MANUAL_OUTCOME", text: null, failureCategory: null, manualOutcome: event.target.value as "ORDER_CONFIRMED" | "ORDER_NOT_CONFIRMED" | "UNKNOWN" }).then(refreshAnnotations); }}><option value="">Operator outcome…</option><option value="ORDER_CONFIRMED">Order confirmed</option><option value="ORDER_NOT_CONFIRMED">Order not confirmed</option><option value="UNKNOWN">Unknown</option></select></div><div className="rows">{annotations.map((annotation) => <div className="row" key={annotation.id}><span className="row-main"><span className="row-name">{annotation.kind.toLowerCase().replaceAll("_", " ")}</span><span className="row-meta">{annotation.text ?? annotation.failureCategory ?? annotation.manualOutcome}</span></span><button className="text danger" onClick={() => void window.copify.analytics.removeAnnotation(annotation.id).then(refreshAnnotations)}>Remove</button></div>)}</div></section>
 
       <details className="panel event-log-panel">
         <summary>Event log · {detail.events.length}</summary>

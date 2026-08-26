@@ -17,6 +17,7 @@ let pool: MonitorConnectionPool | null = null;
 let turbo = false;
 let fastEndsAt: number | null = null;
 let startedAt = 0;
+let startedMono = process.hrtime.bigint();
 let requestCount = 0;
 let forbiddenCount = 0;
 let rateLimitedCount = 0;
@@ -36,13 +37,13 @@ function sanitize(value: string): string { return value.replace(/https?:\/\/[^\s
 function activeInterval(policy: MonitorPolicy): number { return turbo ? policy.fastPollIntervalMs : policy.pollIntervalMs; }
 function runtimeState(): MonitorRuntimeState { return stopping || !activeRunId ? "STOPPED" : pausedState ?? (turbo ? "TURBO" : "STANDBY"); }
 function emitRuntime(): void {
-  send({ type: "MONITOR_RUNTIME", version: IPC_VERSION, status: { runId: activeRunId, storeId: activeTarget?.storeId ?? null, state: runtimeState(), activeIntervalMs: activePolicy ? activeInterval(activePolicy) : null, fastEndsAt, nextPollAt, configuredRouteCount: pool?.routes.length ?? 0, healthyRouteCount: pool?.healthyCount() ?? 0, lastErrorCode, updatedAt: Date.now() } });
+  send({ type: "MONITOR_RUNTIME", version: IPC_VERSION, status: { runId: activeRunId, storeId: activeTarget?.storeId ?? null, state: runtimeState(), activeIntervalMs: activePolicy ? activeInterval(activePolicy) : null, fastEndsAt, nextPollAt, configuredRouteCount: pool?.routes.length ?? 0, healthyRouteCount: pool?.healthyCount() ?? 0, lastErrorCode, sources: [], updatedAt: Date.now() } });
 }
-function recordUsage(route: MonitorRoute, received: number, sent: number, requests: number): void {
-  const current = routeUsage.get(route.id) ?? { receivedBytes: 0, sentBytes: 0, requestCount: 0, completeness: "PARTIAL" as const };
+function recordUsage(route: MonitorRoute, received: number, sent: number, requests: number, discoverySource: import("@copify/shared").DiscoverySource | null = null): void {
+  const key = `${discoverySource ?? "all"}:${route.id}`; const current = routeUsage.get(key) ?? { receivedBytes: 0, sentBytes: 0, requestCount: 0, completeness: "PARTIAL" as const };
   const next = { ...current, receivedBytes: current.receivedBytes + received, sentBytes: current.sentBytes + sent, requestCount: current.requestCount + requests };
-  routeUsage.set(route.id, next); bytesReceived += received; bytesSent += sent;
-  if (activeRunId) send({ type: "MONITOR_USAGE", version: IPC_VERSION, runId: activeRunId, routeId: route.id, usage: next });
+  routeUsage.set(key, next); bytesReceived += received; bytesSent += sent;
+  if (activeRunId) send({ type: "MONITOR_USAGE", version: IPC_VERSION, runId: activeRunId, routeId: route.id, discoverySource, usage: next });
 }
 function failureCode(error: MonitorRequestError | null, reason: unknown): MonitorFailureCode {
   if (error?.code === "PROXY_AUTH_FAILED" || error?.status === 407) return "PROXY_AUTH_FAILED";
@@ -55,13 +56,13 @@ function failureCode(error: MonitorRequestError | null, reason: unknown): Monito
   if (error?.code === "MONITOR_CONNECTION_FAILED" || /ETIMEDOUT|ECONNREFUSED|ENOTFOUND|fetch failed|aborted/i.test(reason instanceof Error ? reason.message : "")) return "PROXY_TRANSPORT_FAILED";
   return "UNKNOWN";
 }
-type CheckResult = { check: TargetCheck; retryNow: boolean; cooldownMs: number | null };
+type CheckResult = { check: TargetCheck; retryNow: boolean; cooldownMs: number | null; diagnostics: import("./http-monitor").DiscoveryDiagnostic[] };
 async function check(target: TargetSnapshot, policy: MonitorPolicy, routes: MonitorConnectionPool): Promise<CheckResult> {
   let route: MonitorRoute | undefined;
   try {
-    assertMonitorPolicy(target, policy); const result = await httpMonitor.poll(target, policy, routes); route = result.route;
-    const { candidates, response, decision } = result; requestCount += response.requestCount; recordUsage(route, response.bytes, response.sentBytes, response.requestCount); lastStatus = response.status; lastLatency = response.latencyMs; lastErrorCode = null;
-    return { check: { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: decision.kind === "ERROR" ? "ERROR" : "SUCCESS", decision, candidateCount: candidates.length, errorMessage: decision.kind === "ERROR" ? decision.message : null, errorCode: null, routeId: route.id, routeAction: "NONE" }, retryNow: false, cooldownMs: null };
+    assertMonitorPolicy(target, policy); const result = await httpMonitor.poll(target, policy, routes, turbo); route = result.route;
+    const { candidates, response, decision, diagnostics } = result; requestCount += response.requestCount; recordUsage(route, response.bytes, response.sentBytes, response.requestCount, diagnostics.find((item) => item.type === "DISCOVERY_MESH_WINNER")?.source ?? null); lastStatus = response.status; lastLatency = response.latencyMs; lastErrorCode = null;
+    return { check: { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: decision.kind === "ERROR" ? "ERROR" : "SUCCESS", decision, candidateCount: candidates.length, errorMessage: decision.kind === "ERROR" ? decision.message : null, errorCode: null, routeId: route.id, routeAction: "NONE" }, retryNow: false, cooldownMs: null, diagnostics };
   } catch (caught) {
     if (caught instanceof MonitorPollError) route = caught.route;
     const reason = caught instanceof MonitorPollError ? caught.reason : caught;
@@ -87,7 +88,7 @@ async function check(target: TargetSnapshot, policy: MonitorPolicy, routes: Moni
     let effectiveCode = code;
     if (route && routes.healthyCount() === 0 && action === "POOL_EXHAUSTED") effectiveCode = "NO_HEALTHY_ROUTES";
     const errorMessage = sanitize(reason instanceof Error ? reason.message : "The HTTP monitor failed.");
-    return { check: { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "The storefront catalog could not be checked.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage, retryAfterMs: requestError?.retryAfterMs ?? null, errorCode: effectiveCode, routeId: route?.id ?? null, routeAction: action }, retryNow, cooldownMs };
+    return { check: { id: randomUUID(), targetId: target.targetId, checkedAt: Date.now(), status: "ERROR", decision: { kind: "ERROR", message: "The storefront catalog could not be checked.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage, retryAfterMs: requestError?.retryAfterMs ?? null, errorCode: effectiveCode, routeId: route?.id ?? null, routeAction: action }, retryNow, cooldownMs, diagnostics: [] };
   }
 }
 function eventType(check: TargetCheck): string { return check.status === "ERROR" ? check.errorCode === "NO_HEALTHY_ROUTES" ? "NO_HEALTHY_ROUTES" : "TARGET_MONITOR_FAILED" : check.decision.kind === "VARIANT_SELECTED" ? "TARGET_VARIANT_SELECTED" : check.decision.kind === "PRICE_LIMIT_EXCEEDED" ? "PRICE_LIMIT_EXCEEDED" : check.decision.kind === "CURRENCY_MISMATCH" ? "CURRENCY_MISMATCH" : "TARGET_POLLED"; }
@@ -96,6 +97,7 @@ async function poll(runId: string, target: TargetSnapshot, policy: MonitorPolicy
   try {
     const limit = Math.max(1, routes.routes.length); for (let attempt = 0; attempt < limit; attempt += 1) {
       const result = await check(target, policy, routes); latest = result.check; send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId, eventType: eventType(result.check), check: result.check });
+      for (const diagnostic of result.diagnostics) send({ type: "MONITOR_DISCOVERY_EVENT", version: IPC_VERSION, runId, event: { ...diagnostic, elapsedNs: (process.hrtime.bigint() - startedMono).toString() } });
       if (result.check.errorCode === "NO_HEALTHY_ROUTES") { enterCooldown("POOL_EXHAUSTED", Math.max(1_000, (routes.nextHealthyAt() ?? Date.now() + policy.routeUnhealthyMs) - Date.now())); break; }
       if (result.cooldownMs) { enterCooldown("SERVICE_COOLDOWN", result.cooldownMs); break; }
       if (!result.retryNow) break;
@@ -128,11 +130,11 @@ function stop(): void {
 process.on("message", async (value: unknown) => {
   const parsed = monitorCommandSchema.safeParse(value); if (!parsed.success) return; const command = parsed.data;
   if (command.type === "TEST_TARGET") { startedAt = Date.now(); const routes = new MonitorConnectionPool(command.routes); const result = await check(command.target, command.policy, routes); emitHealth(null, command.policy, routes); send({ type: "MONITOR_TEST_RESULT", version: IPC_VERSION, check: result.check }); return; }
-  if (command.type === "START_MONITOR") { if (timer || running || activeRunId) return; assertMonitorPolicy(command.target, command.policy); activeRunId = command.runId; activeTarget = command.target; activePolicy = command.policy; pool = new MonitorConnectionPool(command.routes); stopping = false; pausedState = null; turbo = false; fastEndsAt = null; startedAt = Date.now(); requestCount = forbiddenCount = rateLimitedCount = challengeCount = bytesReceived = bytesSent = 0; routeUsage.clear(); send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId: command.runId, eventType: "TARGET_MONITOR_STARTED", check: null }); emitRuntime(); schedule(command.runId, command.target, command.policy, pool, command.policy.immediateFirstPoll ? 0 : command.policy.pollIntervalMs); return; }
+  if (command.type === "START_MONITOR") { if (timer || running || activeRunId) return; assertMonitorPolicy(command.target, command.policy); activeRunId = command.runId; activeTarget = command.target; activePolicy = command.policy; pool = new MonitorConnectionPool(command.routes); stopping = false; pausedState = null; turbo = false; fastEndsAt = null; startedAt = Date.now(); startedMono = process.hrtime.bigint(); requestCount = forbiddenCount = rateLimitedCount = challengeCount = bytesReceived = bytesSent = 0; routeUsage.clear(); send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId: command.runId, eventType: "TARGET_MONITOR_STARTED", check: null }); emitRuntime(); schedule(command.runId, command.target, command.policy, pool, command.policy.immediateFirstPoll ? 0 : command.policy.pollIntervalMs); return; }
   if (command.type === "SET_MONITOR_TURBO") { setTurbo(command.enabled); return; }
   if (command.type === "PAUSE_MONITOR") { enterCooldown("SERVICE_COOLDOWN", Math.max(0, command.until - Date.now())); return; }
   if (command.type === "RESUME_MONITOR") { if (!activeRunId || !activeTarget || !activePolicy || !pool) return; pausedState = null; schedule(activeRunId, activeTarget, activePolicy, pool, 0); return; }
   if (command.type === "STOP_MONITOR") stop();
 });
 
-export { MonitorConnectionPool, assertMonitorPolicy, decideTarget, effectiveRouteCooldown, matchesTarget, normalizeMatch, parseRetryAfter, parseShopifyProducts, selectPreferredVariant, shouldCoolRouteForProtection } from "./http-monitor";
+export { MonitorConnectionPool, assertMonitorPolicy, canonicalProductUrl, decideTarget, effectiveRouteCooldown, matchesTarget, normalizeMatch, parsePredictiveProductUrls, parseRetryAfter, parseShopifyProducts, parseShopifySitemap, selectPreferredVariant, shouldCoolRouteForProtection, validateDiscoveryHandlers } from "./http-monitor";

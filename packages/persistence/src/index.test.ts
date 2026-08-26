@@ -167,7 +167,7 @@ describe("ProfileRepository", () => {
     const repo = openProfileRepository(databasePath, join(root, "browser-profiles")); repositories.push(repo);
     expect(await repo.list()).toMatchObject([{ id: idFor(11), name: "v0.9 profile", userDataDir: "C:/persistent-profile" }]);
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
-    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
+    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(16);
     expect(inspection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profile_warm_states'").get()).toBeTruthy(); inspection.close();
   });
 

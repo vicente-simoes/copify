@@ -33,7 +33,7 @@ describe("store registry", () => {
 
 describe("shared contracts", () => {
   it("publishes the current IPC and SQLite contract versions", () => {
-    expect(IPC_VERSION).toBe(16); expect(SCHEMA_VERSION).toBe(14);
+    expect(IPC_VERSION).toBe(17); expect(SCHEMA_VERSION).toBe(16);
   });
   it("validates profile input", () => {
     expect(createBrowserProfileSchema.safeParse({ name: "  " }).success).toBe(false);

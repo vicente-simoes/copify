@@ -506,9 +506,10 @@ async function firstVisible(candidates: Locator[], timeout: number): Promise<Loc
 
 async function checkpoint(page: Page, emit = true): Promise<boolean> {
   const text = (await page.locator("body").innerText().catch(() => "")).slice(0, 20_000).toLowerCase();
-  const reason = /captcha|recaptcha|hcaptcha/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
+  const reason = /turnstile|captcha|recaptcha|hcaptcha/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
   if (!reason) return false;
   challengeCount += 1;
+  if (reason === "CAPTCHA") emitRun("CAPTCHA_CHALLENGE_DETECTED", { captchaKind: /turnstile/.test(text) ? "turnstile" : /hcaptcha/.test(text) ? "hcaptcha" : /recaptcha/.test(text) ? "recaptcha_v2" : "unknown" });
   if (emit) transition("CHECKPOINT", "CHECKPOINT_DETECTED", { reason }); await page.bringToFront(); return true;
 }
 

@@ -706,3 +706,5 @@
   background: var(--primary-bg);
   cursor: pointer;
 }
+.screenshot-strip { display: flex; gap: 10px; overflow-x: auto; padding: 8px 0 12px; }
+.screenshot-strip img { width: 220px; height: 132px; object-fit: cover; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }

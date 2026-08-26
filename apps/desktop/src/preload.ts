@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
-  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  analyticsIpc, healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
+  type AnalyticsFilter, type AnalyticsResult, type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunAnnotation, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -87,6 +87,15 @@ const api = {
   usage: {
     run: (runId: string): Promise<ApiResult<RunNetworkUsage[]>> => ipcRenderer.invoke(usageIpc.run, runId),
     totals: (): Promise<ApiResult<RunNetworkUsage[]>> => ipcRenderer.invoke(usageIpc.totals),
+  },
+  analytics: {
+    query: (input: AnalyticsFilter): Promise<ApiResult<AnalyticsResult>> => ipcRenderer.invoke(analyticsIpc.query, input),
+    compare: (ids: string[]): Promise<ApiResult<AnalyticsResult>> => ipcRenderer.invoke(analyticsIpc.compare, ids),
+    annotations: (runId?: string): Promise<ApiResult<RunAnnotation[]>> => ipcRenderer.invoke(analyticsIpc.annotations, runId),
+    createAnnotation: (input: CreateRunAnnotationInput): Promise<ApiResult<RunAnnotation>> => ipcRenderer.invoke(analyticsIpc.createAnnotation, input),
+    removeAnnotation: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(analyticsIpc.removeAnnotation, id),
+    revealArtifact: (runId: string, artifactId: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(analyticsIpc.revealArtifact, runId, artifactId),
+    artifactPreviewUrl: (artifactId: string): string => `copify-artifact://preview/${encodeURIComponent(artifactId)}`,
   },
   runSetups: {
     list: (): Promise<ApiResult<RunSetup[]>> => ipcRenderer.invoke(runSetupIpc.list),

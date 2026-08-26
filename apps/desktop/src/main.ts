@@ -1,10 +1,11 @@
-import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, safeStorage, screen, type Rectangle } from "electron";
+import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net, protocol, safeStorage, screen, shell, type Rectangle } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
-  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, appearanceSettingsSchema, chromeColorsSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, analyticsFilterSchema, analyticsIpc, appearanceSettingsSchema, chromeColorsSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunAnnotationSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
   type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
@@ -22,7 +23,7 @@ let benchmarkRunning = false;
 let runsRoot = "";
 type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; monitorRouteProfiles: Map<string, ProxyProfile> };
 let activeRun: ActiveRun | undefined;
-let monitorStatus: MonitorRuntimeStatus = { runId: null, storeId: null, state: "STOPPED", activeIntervalMs: null, fastEndsAt: null, nextPollAt: null, configuredRouteCount: 0, healthyRouteCount: 0, lastErrorCode: null, updatedAt: Date.now() };
+let monitorStatus: MonitorRuntimeStatus = { runId: null, storeId: null, state: "STOPPED", activeIntervalMs: null, fastEndsAt: null, nextPollAt: null, configuredRouteCount: 0, healthyRouteCount: 0, lastErrorCode: null, sources: [], updatedAt: Date.now() };
 const cartStatuses = new Map<string, CartStatus>();
 const closeAfterCartCheck = new Set<string>();
 const intentionallyStoppedMonitors = new WeakSet<ChildProcess>();
@@ -32,6 +33,7 @@ type SensitiveRevealLease = ProxySecretReveal | ShippingSecretReveal;
 const sensitiveRevealLeases = new Map<string, SensitiveRevealLease>();
 
 const APP_USER_MODEL_ID = "com.copify.app";
+protocol.registerSchemesAsPrivileged([{ scheme: "copify-artifact", privileges: { secure: true, standard: true, supportFetchAPI: true } }]);
 
 if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
 
@@ -224,6 +226,12 @@ function registerIpc(): void {
   ipcMain.handle(runIpc.resume, (_event, profileId: string): Promise<ApiResult<boolean>> => resultAsync(() => resumeRunSession(profileId)));
   ipcMain.handle(runIpc.simulatePaymentHandoff, (_event, input: unknown): Promise<ApiResult<boolean>> => resultAsync(() => simulatePaymentHandoff(simulatePaymentHandoffSchema.parse(input))));
   ipcMain.handle(runIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(() => removeRun(id)));
+  ipcMain.handle(analyticsIpc.query, (_event, input: unknown) => resultAsync(() => profiles.queryAnalytics(analyticsFilterSchema.parse(input))));
+  ipcMain.handle(analyticsIpc.compare, (_event, ids: unknown) => resultAsync(async () => { if (!Array.isArray(ids) || ids.length < 2 || ids.length > 5 || ids.some((id) => typeof id !== "string")) throw new Error("Select between two and five runs."); const result = await profiles.queryAnalytics(analyticsFilterSchema.parse({ range: "ALL" })); const selected = new Set(ids); return { ...result, runs: result.runs.filter((run) => selected.has(run.id)), runMetrics: result.runMetrics.filter((metric) => selected.has(metric.runId)), sessionMetrics: result.sessionMetrics.filter((metric) => selected.has(metric.runId)), annotations: result.annotations.filter((annotation) => selected.has(annotation.runId)) }; }));
+  ipcMain.handle(analyticsIpc.annotations, (_event, runId?: string) => resultAsync(() => profiles.listRunAnnotations(runId)));
+  ipcMain.handle(analyticsIpc.createAnnotation, (_event, input: unknown) => resultAsync(() => profiles.createRunAnnotation(createRunAnnotationSchema.parse(input))));
+  ipcMain.handle(analyticsIpc.removeAnnotation, (_event, id: string) => resultAsync(() => profiles.removeRunAnnotation(id)));
+  ipcMain.handle(analyticsIpc.revealArtifact, (_event, runId: string, artifactId: string) => resultAsync(async () => { const detail = await profiles.getRun(runId); const artifact = detail?.artifacts.find((item) => item.id === artifactId); if (!artifact) throw new Error("Artifact not found."); const root = runDirectory(runId); const candidate = resolve(root, artifact.relativePath); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid artifact path."); shell.showItemInFolder(candidate); return true; }));
   ipcMain.handle(runSetupIpc.list, (): Promise<ApiResult<import("@copify/shared").RunSetup[]>> => resultAsync(() => profiles.listRunSetups()));
   ipcMain.handle(runSetupIpc.create, (_event, input: unknown): Promise<ApiResult<import("@copify/shared").RunSetup>> => resultAsync(async () => { const parsed = createRunSetupSchema.parse(input); await assertRunSetupReferences(parsed); const created = await profiles.createRunSetup(parsed); emitRunSetupsChanged(); return created; }));
   ipcMain.handle(runSetupIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { const removed = await profiles.removeRunSetup(id); emitRunSetupsChanged(); return removed; }));
@@ -264,6 +272,7 @@ async function assertRunSetupReferences(input: CreateRunSetupInput): Promise<voi
 
 async function endRun(): Promise<RunDetail> {
   const active = activeRun; if (!active) throw new Error("No run is currently recording."); active.ending = true;
+  if (active.detail.run.discoverySnapshot) { active.detail.run.discoverySnapshot = { ...active.detail.run.discoverySnapshot, sourceHealth: monitorStatus.sources }; await profiles.setRunDiscoverySnapshot(active.detail.run.id, active.detail.run.discoverySnapshot); }
   clipboardCoordinator.cancelAll();
   if (active.monitor) await appendMonitorEvent(active.detail.run.id, "TARGET_MONITOR_STOPPED", null, "The shared target monitor was stopped when the run ended.");
   stopMonitor(active);
@@ -273,7 +282,7 @@ async function endRun(): Promise<RunDetail> {
   if (active.pendingEnd.size === 0) active.resolveEnd?.();
   await Promise.race([wait, new Promise<void>((resolve) => setTimeout(resolve, 10_000))]);
   for (const session of active.profileSessions.values()) if (session.status !== "FAILED") { session.status = "ENDED"; await profiles.setRunSession(session.id, "ENDED"); }
-  await profiles.setRunStatus(active.detail.run.id, "COMPLETED", true); const completed = (await profiles.getRun(active.detail.run.id))!; activeRun = undefined; emitRunsChanged(); return completed;
+  await profiles.setRunStatus(active.detail.run.id, "COMPLETED", true); const completed = (await profiles.getRun(active.detail.run.id))!; await profiles.materializeRunMetrics(completed.run.id); activeRun = undefined; emitRunsChanged(); return completed;
 }
 
 async function removeRun(id: string): Promise<boolean> {
@@ -430,7 +439,7 @@ function runEnvironment(): RunEnvironment { return { appVersion: app.getVersion(
 function runDirectory(id: string): string { const root = resolve(runsRoot); const candidate = resolve(root, id); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid run artifact path."); return candidate; }
 function elapsedSince(active: ActiveRun): string { return (BigInt(Date.now() - active.detail.run.startedAt) * 1_000_000n).toString(); }
 
-async function monitorPolicy(target: TargetSnapshot): Promise<MonitorPolicy> { const manifest = getStoreManifest(target.storeId)?.monitorPolicy; if (!manifest) throw new Error("MONITOR_ENDPOINT_UNSUPPORTED"); const behavior = resolveMonitorBehavior(await profiles.getMonitorSettings(), target.storeId); return { ...behavior, access: manifest.access, endpoint: manifest.endpoint, recommendedPollIntervalMs: manifest.recommendedPollIntervalMs }; }
+async function monitorPolicy(target: TargetSnapshot): Promise<MonitorPolicy> { const monitoring = getStoreManifest(target.storeId)?.monitoring; if (!monitoring) throw new Error("MONITOR_ENDPOINT_UNSUPPORTED"); const behavior = resolveMonitorBehavior(await profiles.getMonitorSettings(), target.storeId); return { ...behavior, access: monitoring.access, endpoint: monitoring.endpoint, recommendedPollIntervalMs: monitoring.recommendedPollIntervalMs }; }
 async function monitorRoutes(active?: ActiveRun): Promise<MonitorRoute[]> {
   const settings = await profiles.getMonitorSettings(); const routes: MonitorRoute[] = []; active?.monitorRouteProfiles.clear();
   for (const id of settings.proxyProfileIds) { const stored = await profiles.getStoredProxy(id); if (!stored?.enabled) continue; active?.monitorRouteProfiles.set(id, stored); routes.push({ kind: "PROXY", id: stored.id, proxyType: stored.type, protocol: stored.protocol, host: stored.host, port: stored.port, ...(stored.usernameCiphertext ? { username: await decryptSecret(stored.usernameCiphertext) } : {}), ...(stored.passwordCiphertext ? { password: await decryptSecret(stored.passwordCiphertext) } : {}) }); }
@@ -438,6 +447,11 @@ async function monitorRoutes(active?: ActiveRun): Promise<MonitorRoute[]> {
 }
 async function startMonitor(runId: string, target: TargetSnapshot): Promise<ChildProcess> {
   const active = activeRun; const policy = await monitorPolicy(target); const routes = await monitorRoutes(active);
+  const monitoring = getStoreManifest(target.storeId)?.monitoring; if (!monitoring) throw new Error("MONITOR_ENDPOINT_UNSUPPORTED");
+  const sources = target.directProductUrl ? monitoring.sources.filter((source) => source.kind === "direct-product") : monitoring.sources.filter((source) => source.kind !== "direct-product");
+  const routeIds = (routes.length ? routes : [{ kind: "DIRECT" as const, id: "direct" as const }]).map((route) => route.id); const routeAllocation = Object.fromEntries(sources.map((source, index) => [source.kind, routeIds[index % routeIds.length]]));
+  const discoverySnapshot = { descriptorVersion: 1 as const, mode: target.directProductUrl ? "DIRECT" as const : "MESH" as const, sources, sitemapStandbyIntervalMs: 30_000 as const, sitemapTurboIntervalMs: 5_000 as const, routeAllocation, sourceHealth: [] };
+  await profiles.setRunDiscoverySnapshot(runId, discoverySnapshot); if (active?.detail.run.id === runId) active.detail.run.discoverySnapshot = discoverySnapshot;
   if (active?.detail.run.id === runId) await appendMonitorEvent(runId, "MONITOR_POLICY_APPLIED", null, JSON.stringify({ storeId: target.storeId, pollIntervalMs: policy.pollIntervalMs, fastPollIntervalMs: policy.fastPollIntervalMs, fastPollDurationMinutes: policy.fastPollDurationMinutes, requestTimeoutMs: policy.requestTimeoutMs, immediateFirstPoll: policy.immediateFirstPoll, routeUnhealthyMs: policy.routeUnhealthyMs, rotateOnProtection: policy.rotateOnProtection, serviceCooldownMs: policy.serviceCooldownMs, honorRetryAfter: policy.honorRetryAfter, configuredRouteCount: routes.length || 1 }));
   const worker = fork(join(__dirname, "monitor.js"), [], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
   worker.on("message", (value) => { void onMonitorEvent(value); }); worker.once("exit", () => {
@@ -488,12 +502,21 @@ async function onMonitorEvent(value: unknown): Promise<void> {
   if (event.type === "MONITOR_RUNTIME") { monitorStatus = event.status; emitMonitorChanged(); return; }
   if (event.type === "MONITOR_USAGE") {
     if (!active || event.runId !== active.detail.run.id) return; const proxy = active.monitorRouteProfiles.get(event.routeId); const costRate = proxy?.costPerGbMicrosUsd ?? null;
-    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `monitor:${event.routeId}`, source: "MONITOR", runSessionId: null, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (event.routeId === "direct" ? "Direct" : null), ...event.usage, costPerGbMicrosUsd: costRate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, costRate), updatedAt: Date.now() }); emitMonitorChanged(); return;
+    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `monitor:${event.discoverySource ?? "all"}:${event.routeId}`, source: "MONITOR", runSessionId: null, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (event.routeId === "direct" ? "Direct" : null), discoverySource: event.discoverySource, ...event.usage, costPerGbMicrosUsd: costRate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, costRate), updatedAt: Date.now() }); emitMonitorChanged(); return;
   }
   if (event.type === "MONITOR_HEALTH") {
     if (!active || event.runId !== active.detail.run.id) return;
     await saveHealth({ ...event.health, id: randomUUID(), subjectKind: "WATCHER", subjectId: active.detail.run.targetSnapshot?.storeId ?? "watcher", runId: active.detail.run.id, circuit: null });
     return;
+  }
+  if (event.type === "MONITOR_DISCOVERY_EVENT") {
+    if (!active || event.runId !== active.detail.run.id) return;
+    const storeId = active.detail.run.targetSnapshot?.storeId; if (storeId) await profiles.upsertMonitorDiscoveryState(storeId, event.event.source, event.event.routeId, { type: event.event.type, ...event.event.payload });
+    const previous = monitorStatus.sources.find((source) => source.source === event.event.source && source.routeId === event.event.routeId); const unavailable = event.event.type === "DISCOVERY_SOURCE_UNAVAILABLE";
+    const sourceHealth = { source: event.event.source, routeId: event.event.routeId, status: unavailable ? "BACKING_OFF" as const : "AVAILABLE" as const, lastStatusClass: typeof event.event.payload.statusClass === "number" ? event.event.payload.statusClass : previous?.lastStatusClass ?? null, lastLatencyMs: typeof event.event.payload.durationMs === "number" ? event.event.payload.durationMs : previous?.lastLatencyMs ?? null, backoffUntil: typeof event.event.payload.backoffUntil === "number" ? event.event.payload.backoffUntil : null, reasonCode: typeof event.event.payload.reasonCode === "string" ? event.event.payload.reasonCode : null, responseBytes: typeof event.event.payload.responseBytes === "number" ? event.event.payload.responseBytes : previous?.responseBytes ?? 0, candidateCount: typeof event.event.payload.candidateCount === "number" ? event.event.payload.candidateCount : previous?.candidateCount ?? 0 };
+    monitorStatus = { ...monitorStatus, sources: [...monitorStatus.sources.filter((source) => source.source !== sourceHealth.source || source.routeId !== sourceHealth.routeId), sourceHealth], updatedAt: Date.now() }; emitMonitorChanged();
+    await profiles.addRunEvent({ id: randomUUID(), runId: event.runId, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: event.event.elapsedNs, type: event.event.type, stateBefore: null, stateAfter: null, payload: { source: event.event.source, routeId: event.event.routeId, ...event.event.payload } });
+    emitRunsChanged(); return;
   }
   if (event.type !== "MONITOR_EVENT" || !active || event.runId !== active.detail.run.id) return;
   await appendMonitorEvent(active.detail.run.id, event.eventType, event.check, null);
@@ -564,7 +587,7 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
   }
   if (event.type === "NETWORK_USAGE") {
     const active = activeRun; if (!active || event.runId !== active.detail.run.id) return; const session = active.profileSessions.get(event.profileId); if (!session) return; const profile = await profiles.get(event.profileId); const proxy = profile?.proxyProfileId ? await profiles.getProxy(profile.proxyProfileId) : undefined; const rate = proxy?.costPerGbMicrosUsd ?? null;
-    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); emitMonitorChanged(); return;
+    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), discoverySource: null, ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); emitMonitorChanged(); return;
   }
   if (event.type === "PAYMENT_HANDOFF") { await handlePaymentHandoff(event.profileId, event.phase); return; }
   const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
@@ -626,6 +649,7 @@ async function resumeRunSession(profileId: string): Promise<boolean> {
 
 app.whenReady().then(async () => {
   const dataRoot = app.getPath("userData"); runsRoot = join(dataRoot, "runs"); profiles = openProfileRepository(join(dataRoot, "copify.sqlite"), join(dataRoot, "browser-profiles")); await profiles.recoverInterruptedRuns(); orchestrator = new SessionOrchestrator(nodeRunnerFactory(join(__dirname, "runner.js")));
+  protocol.handle("copify-artifact", async (request) => { const id = new URL(request.url).pathname.split("/").filter(Boolean).at(-1); if (!id) return new Response("Not found", { status: 404 }); const artifact = await profiles.getRunArtifact(id); if (!artifact || artifact.kind !== "SCREENSHOT") return new Response("Not found", { status: 404 }); const root = runDirectory(artifact.runId); const candidate = resolve(root, artifact.relativePath); if (!candidate.startsWith(`${root}${sep}`)) return new Response("Not found", { status: 404 }); return net.fetch(pathToFileURL(candidate).toString()); });
   clipboardCoordinator = new ClipboardCoordinator({
     availableFormats: () => clipboard.availableFormats(),
     writeLease: (value, requestId) => clipboard.write({ text: value, html: `<span data-copify-clipboard-lease="${requestId}"></span>` }),

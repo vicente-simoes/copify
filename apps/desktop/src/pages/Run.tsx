@@ -3,6 +3,7 @@ import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type MonitorR
 import { preflight, type PreflightCheck } from "../preflight";
 import { Field, Route } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
+import { RunAnalytics } from "./RunAnalytics";
 
 type Mode = "OBSERVATION" | "ASSISTED_CHECKOUT";
 
@@ -180,6 +181,7 @@ export function Run({
   onLoadSetup: (setup: RunSetup) => void;
   onRemoveSetup: (setup: RunSetup) => void;
 }) {
+  const [view, setView] = useState<"runs" | "analytics">("runs");
   if (activeRun) {
     return (
       <div className="page-stack">
@@ -210,8 +212,11 @@ export function Run({
     busy ||
     (level === "DEEP_DEBUG" && !acknowledged);
 
+  if (view === "analytics") return <div className="page-stack"><div className="actions"><button className="text" onClick={() => setView("runs")}>Runs</button><button className="primary">Analytics</button></div><RunAnalytics targets={targets} onShow={onShow} /></div>;
+
   return (
     <div className="page-stack">
+      <div className="actions"><button className="primary">Runs</button><button className="text" onClick={() => setView("analytics")}>Analytics</button></div>
       <section className="panel">
         <div className="section-title">
           <div>

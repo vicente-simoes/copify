@@ -35,7 +35,7 @@ export const appSettings = sqliteTable("app_settings", { key: text("key").primar
 
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey(), name: text("name").notNull(), diagnosticLevel: text("diagnostic_level").notNull(), executionMode: text("execution_mode").notNull(), status: text("status").notNull(),
-  startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), environmentJson: text("environment_json").notNull(), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+  startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), environmentJson: text("environment_json").notNull(), discoverySnapshotJson: text("discovery_snapshot_json"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
 export const runSessions = sqliteTable("run_sessions", {
@@ -63,9 +63,21 @@ export const profileWarmStates = sqliteTable("profile_warm_states", {
 
 export const runNetworkUsage = sqliteTable("run_network_usage", {
   id: text("id").primaryKey(), runId: text("run_id").notNull(), usageKey: text("usage_key").notNull(), source: text("source").notNull(),
-  runSessionId: text("run_session_id"), storeId: text("store_id"), proxyProfileId: text("proxy_profile_id"), proxyName: text("proxy_name"),
+  runSessionId: text("run_session_id"), storeId: text("store_id"), proxyProfileId: text("proxy_profile_id"), proxyName: text("proxy_name"), discoverySource: text("discovery_source"),
   receivedBytes: integer("received_bytes").notNull(), sentBytes: integer("sent_bytes").notNull(), requestCount: integer("request_count").notNull(), completeness: text("completeness").notNull(),
   costPerGbMicrosUsd: integer("cost_per_gb_micros_usd"), estimatedCostMicrosUsd: integer("estimated_cost_micros_usd"), updatedAt: integer("updated_at").notNull()
+});
+
+export const monitorDiscoveryState = sqliteTable("monitor_discovery_state", {
+  storeId: text("store_id").notNull(), source: text("source").notNull(), routeId: text("route_id").notNull(), stateJson: text("state_json").notNull(), updatedAt: integer("updated_at").notNull()
+});
+
+export const historicalMetrics = sqliteTable("historical_metrics", {
+  runId: text("run_id").notNull(), scopeKind: text("scope_kind").notNull(), scopeId: text("scope_id").notNull(), targetId: text("target_id"), storeId: text("store_id"), browserProfileId: text("browser_profile_id"), proxyProfileId: text("proxy_profile_id"), appVersion: text("app_version").notNull(), derivationVersion: integer("derivation_version").notNull(), metricsJson: text("metrics_json").notNull(), derivedAt: integer("derived_at").notNull()
+});
+
+export const runAnnotations = sqliteTable("run_annotations", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), runSessionId: text("run_session_id"), kind: text("kind").notNull(), text: text("text"), failureCategory: text("failure_category"), manualOutcome: text("manual_outcome"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
 export const runSetups = sqliteTable("run_setups", {

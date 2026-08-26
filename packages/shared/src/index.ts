@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { STORE_GENERAL, storeCurrencySchema } from "./stores";
+import { STORE_GENERAL, discoverySourceDescriptorSchema, discoverySourceSchema, storeCurrencySchema } from "./stores";
 
 export * from "./stores";
 
-export const IPC_VERSION = 16 as const;
-export const SCHEMA_VERSION = 14 as const;
+export const IPC_VERSION = 17 as const;
+export const SCHEMA_VERSION = 16 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -256,11 +256,24 @@ export const monitorPolicySchema = monitorBehaviorSchema.extend({
 export type MonitorPolicy = z.infer<typeof monitorPolicySchema>;
 export const monitorRuntimeStateSchema = z.enum(["STANDBY", "TURBO", "SERVICE_COOLDOWN", "POOL_EXHAUSTED", "STOPPED"]);
 export type MonitorRuntimeState = z.infer<typeof monitorRuntimeStateSchema>;
+export const discoverySourceHealthSchema = z.object({
+  source: discoverySourceSchema, routeId: z.string().min(1).max(120),
+  status: z.enum(["AVAILABLE", "BACKING_OFF", "UNAVAILABLE"]), lastStatusClass: z.number().int().min(1).max(5).nullable(),
+  lastLatencyMs: z.number().nonnegative().nullable(), backoffUntil: timestampSchema.nullable(), reasonCode: z.string().max(80).nullable(),
+  responseBytes: z.number().int().nonnegative().default(0), candidateCount: z.number().int().nonnegative().default(0),
+});
+export type DiscoverySourceHealth = z.infer<typeof discoverySourceHealthSchema>;
+export const discoverySnapshotSchema = z.object({
+  descriptorVersion: z.literal(1), mode: z.enum(["DIRECT", "MESH"]), sources: z.array(discoverySourceDescriptorSchema),
+  sitemapStandbyIntervalMs: z.literal(30_000), sitemapTurboIntervalMs: z.literal(5_000),
+  routeAllocation: z.record(discoverySourceSchema, z.string().max(120)), sourceHealth: z.array(discoverySourceHealthSchema),
+});
+export type DiscoverySnapshot = z.infer<typeof discoverySnapshotSchema>;
 export const monitorRuntimeStatusSchema = z.object({
   runId: idSchema.nullable(), storeId: storeIdSchema.nullable(), state: monitorRuntimeStateSchema,
   activeIntervalMs: z.number().int().min(200).nullable(), fastEndsAt: timestampSchema.nullable(), nextPollAt: timestampSchema.nullable(),
   configuredRouteCount: z.number().int().nonnegative(), healthyRouteCount: z.number().int().nonnegative(),
-  lastErrorCode: monitorFailureCodeSchema.nullable(), updatedAt: timestampSchema,
+  lastErrorCode: monitorFailureCodeSchema.nullable(), sources: z.array(discoverySourceHealthSchema).default([]), updatedAt: timestampSchema,
 });
 export type MonitorRuntimeStatus = z.infer<typeof monitorRuntimeStatusSchema>;
 export function defaultMonitorSettings(proxyProfileIds: string[] = []): MonitorSettings {
@@ -333,7 +346,7 @@ export type NetworkUsageCounter = z.infer<typeof networkUsageCounterSchema>;
 export const runNetworkUsageSchema = networkUsageCounterSchema.extend({
   id: idSchema, runId: idSchema, usageKey: z.string().min(1).max(160), source: networkUsageSourceSchema,
   runSessionId: idSchema.nullable(), storeId: storeIdSchema.nullable(), proxyProfileId: idSchema.nullable(), proxyName: z.string().max(80).nullable(),
-  costPerGbMicrosUsd: costPerGbMicrosUsdSchema, estimatedCostMicrosUsd: z.number().int().nonnegative().nullable(), updatedAt: timestampSchema,
+  discoverySource: discoverySourceSchema.nullable().default(null), costPerGbMicrosUsd: costPerGbMicrosUsdSchema, estimatedCostMicrosUsd: z.number().int().nonnegative().nullable(), updatedAt: timestampSchema,
 });
 export type RunNetworkUsage = z.infer<typeof runNetworkUsageSchema>;
 export const networkUsageTotalsSchema = networkUsageCounterSchema.extend({ estimatedCostMicrosUsd: z.number().int().nonnegative().nullable() });
@@ -365,7 +378,7 @@ export const runArtifactKindSchema = z.enum(["SCREENSHOT", "TRACE", "HAR", "VIDE
 export type RunArtifactKind = z.infer<typeof runArtifactKindSchema>;
 export const runEnvironmentSchema = z.object({ appVersion: z.string(), schemaVersion: z.number().int(), osVersion: z.string(), chromeVersion: z.string().nullable(), playwrightVersion: z.string(), capturedAt: timestampSchema });
 export type RunEnvironment = z.infer<typeof runEnvironmentSchema>;
-export const runSchema = z.object({ id: idSchema, name: z.string().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), status: runStatusSchema, startedAt: timestampSchema, endedAt: timestampSchema.nullable(), environment: runEnvironmentSchema, targetSnapshot: targetSnapshotSchema.nullable(), createdAt: timestampSchema, updatedAt: timestampSchema });
+export const runSchema = z.object({ id: idSchema, name: z.string().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), status: runStatusSchema, startedAt: timestampSchema, endedAt: timestampSchema.nullable(), environment: runEnvironmentSchema, targetSnapshot: targetSnapshotSchema.nullable(), discoverySnapshot: discoverySnapshotSchema.nullable().default(null), createdAt: timestampSchema, updatedAt: timestampSchema });
 export type Run = z.infer<typeof runSchema>;
 export const runSessionSchema = z.object({ id: idSchema, runId: idSchema, browserProfileId: idSchema, browserProfileName: z.string(), route: sessionRouteSchema, shippingProfile: shippingProfileSnapshotSchema.default({ shippingProfileId: null, name: null, country: null, complete: false }), assistedEligible: z.boolean().default(false), executionState: runExecutionStateSchema.default("OBSERVING"), checkpointReason: z.string().nullable().default(null), status: runSessionStatusSchema, startedAt: timestampSchema, endedAt: timestampSchema.nullable(), finalError: sessionErrorSchema.nullable() });
 export type RunSession = z.infer<typeof runSessionSchema>;
@@ -375,6 +388,48 @@ export const runArtifactSchema = z.object({ id: idSchema, runId: idSchema, runSe
 export type RunArtifact = z.infer<typeof runArtifactSchema>;
 export const runDetailSchema = z.object({ run: runSchema, sessions: z.array(runSessionSchema), events: z.array(runEventSchema), artifacts: z.array(runArtifactSchema) });
 export type RunDetail = z.infer<typeof runDetailSchema>;
+
+export const failureCategorySchema = z.enum(["NETWORK_PROXY", "STOREFRONT_PROTECTION", "PRODUCT_VARIANT", "CART", "CHECKOUT", "CAPTCHA", "PAYMENT_HANDOFF", "BROWSER_RUNNER", "USER_ABORTED", "UNKNOWN"]);
+export type FailureCategory = z.infer<typeof failureCategorySchema>;
+export const observedOutcomeSchema = z.enum(["READY_TO_CONFIRM", "FAILED", "ENDED_WITHOUT_READY", "OBSERVATION_ONLY"]);
+export const manualOutcomeSchema = z.enum(["ORDER_CONFIRMED", "ORDER_NOT_CONFIRMED", "UNKNOWN"]);
+export type ManualOutcome = z.infer<typeof manualOutcomeSchema>;
+const nullableMetric = z.number().nonnegative().nullable();
+export const sessionMetricsSchema = z.object({
+  derivationVersion: z.literal(1), runId: idSchema, runSessionId: idSchema, browserProfileId: idSchema, browserProfileName: z.string(),
+  proxyProfileId: idSchema.nullable(), proxyName: z.string().nullable(), observedOutcome: observedOutcomeSchema,
+  detectToCartMs: nullableMetric, cartToCheckoutMs: nullableMetric, human3dsDurationMs: nullableMetric, checkpointDurationMs: nullableMetric,
+  checkpointCount: z.number().int().nonnegative(), turnstileCount: z.number().int().nonnegative(), captchaChallengeCount: z.number().int().nonnegative(),
+  networkErrorCount: z.number().int().nonnegative(), http4xxCount: z.number().int().nonnegative(), http5xxCount: z.number().int().nonnegative(),
+  failureCategory: failureCategorySchema.nullable(), incompleteCheckpoint: z.boolean(), incomplete3ds: z.boolean(), anomalies: z.array(z.string()),
+  checkoutMode: z.string().nullable(), captchaStrategy: z.string().nullable(), captchaSolveDurationMs: nullableMetric,
+  captchaSolveCostMicrosUsd: z.number().int().nonnegative().nullable(), captchaFailoverCount: z.number().int().nonnegative(),
+});
+export type SessionMetrics = z.infer<typeof sessionMetricsSchema>;
+export const runMetricsSchema = z.object({
+  derivationVersion: z.literal(1), runId: idSchema, monitorToDetectMs: nullableMetric, totalDurationMs: nullableMetric,
+  discoveryWinner: discoverySourceSchema.nullable(), discoverySourceTimings: z.record(discoverySourceSchema, nullableMetric), anomalies: z.array(z.string()),
+});
+export type RunMetrics = z.infer<typeof runMetricsSchema>;
+export const runAnnotationSchema = z.object({
+  id: idSchema, runId: idSchema, runSessionId: idSchema.nullable(), kind: z.enum(["NOTE", "FAILURE_CLASSIFICATION", "MANUAL_OUTCOME"]),
+  text: z.string().trim().max(2_000).nullable(), failureCategory: failureCategorySchema.nullable(), manualOutcome: manualOutcomeSchema.nullable(),
+  createdAt: timestampSchema, updatedAt: timestampSchema,
+});
+export type RunAnnotation = z.infer<typeof runAnnotationSchema>;
+export const createRunAnnotationSchema = runAnnotationSchema.omit({ id: true, createdAt: true, updatedAt: true }).superRefine((value, context) => {
+  if (value.kind === "NOTE" && !value.text) context.addIssue({ code: z.ZodIssueCode.custom, message: "A note is required." });
+  if (value.kind === "FAILURE_CLASSIFICATION" && !value.failureCategory) context.addIssue({ code: z.ZodIssueCode.custom, message: "A failure category is required." });
+  if (value.kind === "MANUAL_OUTCOME" && !value.manualOutcome) context.addIssue({ code: z.ZodIssueCode.custom, message: "A manual outcome is required." });
+});
+export type CreateRunAnnotationInput = z.input<typeof createRunAnnotationSchema>;
+export const analyticsFilterSchema = z.object({ targetId: idSchema.nullable().default(null), storeId: storeIdSchema.nullable().default(null), profileId: idSchema.nullable().default(null), proxyProfileId: idSchema.nullable().default(null), appVersions: z.array(z.string()).default([]), range: z.enum(["LAST_20", "7_DAYS", "30_DAYS", "90_DAYS", "ALL"]).default("LAST_20") });
+export type AnalyticsFilter = z.infer<typeof analyticsFilterSchema>;
+export const analyticsRateSchema = z.object({ numerator: z.number().int().nonnegative(), denominator: z.number().int().nonnegative(), rate: z.number().min(0).max(1).nullable() });
+export const reliabilityRowSchema = z.object({ id: z.string(), name: z.string(), attempts: z.number().int().nonnegative(), readyRate: analyticsRateSchema, failureRate: analyticsRateSchema, checkpointRate: analyticsRateSchema, turnstileRate: analyticsRateSchema, medianDetectToCartMs: nullableMetric, p95DetectToCartMs: nullableMetric });
+export type ReliabilityRow = z.infer<typeof reliabilityRowSchema>;
+export const analyticsResultSchema = z.object({ runs: z.array(runSchema), runMetrics: z.array(runMetricsSchema), sessionMetrics: z.array(sessionMetricsSchema), profiles: z.array(reliabilityRowSchema), proxies: z.array(reliabilityRowSchema), annotations: z.array(runAnnotationSchema) });
+export type AnalyticsResult = z.infer<typeof analyticsResultSchema>;
 export const createRunSchema = z.object({ name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable().default(null), deepDebugAcknowledged: z.boolean().default(false) }).superRefine((value, context) => { if (value.diagnosticLevel === "DEEP_DEBUG" && !value.deepDebugAcknowledged) context.addIssue({ code: z.ZodIssueCode.custom, message: "Deep Debug requires acknowledgement because HAR and video can contain sensitive browser state.", path: ["deepDebugAcknowledged"] }); if (value.executionMode === "ASSISTED_CHECKOUT" && !value.targetId) context.addIssue({ code: z.ZodIssueCode.custom, message: "Assisted checkout requires a target.", path: ["targetId"] }); });
 export type CreateRunInput = z.input<typeof createRunSchema>;
 export const runSetupSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema, profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable(), createdAt: timestampSchema, updatedAt: timestampSchema });
@@ -433,7 +488,8 @@ export const monitorEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("MONITOR_TEST_RESULT"), version: z.literal(IPC_VERSION), check: targetCheckSchema }),
   z.object({ type: z.literal("MONITOR_HEALTH"), version: z.literal(IPC_VERSION), runId: idSchema.nullable(), health: browserHealthSnapshotSchema.omit({ id: true, subjectKind: true, subjectId: true, runId: true }) }),
   z.object({ type: z.literal("MONITOR_RUNTIME"), version: z.literal(IPC_VERSION), status: monitorRuntimeStatusSchema }),
-  z.object({ type: z.literal("MONITOR_USAGE"), version: z.literal(IPC_VERSION), runId: idSchema, routeId: z.string().min(1).max(120), usage: networkUsageCounterSchema }),
+  z.object({ type: z.literal("MONITOR_DISCOVERY_EVENT"), version: z.literal(IPC_VERSION), runId: idSchema, event: z.object({ type: z.enum(["DISCOVERY_SOURCE_PROBED", "DISCOVERY_SOURCE_UNAVAILABLE", "DISCOVERY_CANDIDATE_FOUND", "DISCOVERY_CANDIDATE_HYDRATED", "DISCOVERY_MESH_WINNER"]), source: discoverySourceSchema, routeId: z.string().min(1).max(120), elapsedNs: z.string().regex(/^\d+$/), payload: jsonRecordSchema }) }),
+  z.object({ type: z.literal("MONITOR_USAGE"), version: z.literal(IPC_VERSION), runId: idSchema, routeId: z.string().min(1).max(120), discoverySource: discoverySourceSchema.nullable().default(null), usage: networkUsageCounterSchema }),
   z.object({ type: z.literal("MONITOR_STOPPED"), version: z.literal(IPC_VERSION), runId: idSchema.nullable() })
 ]);
 export type MonitorEvent = z.infer<typeof monitorEventSchema>;
@@ -463,6 +519,7 @@ export const simulatePaymentHandoffSchema = z.object({
 });
 export type SimulatePaymentHandoffInput = z.infer<typeof simulatePaymentHandoffSchema>;
 export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", simulatePaymentHandoff: "runs:simulate-payment-handoff", changed: "runs:changed" } as const;
+export const analyticsIpc = { query: "analytics:query", compare: "analytics:compare", annotations: "analytics:annotations", createAnnotation: "analytics:create-annotation", removeAnnotation: "analytics:remove-annotation", revealArtifact: "analytics:reveal-artifact" } as const;
 export const runSetupIpc = { list: "run-setups:list", create: "run-setups:create", remove: "run-setups:remove", changed: "run-setups:changed" } as const;
 export type ApiResult<T> = { ok: true; value: T } | { ok: false; error: string };
 export function defaultRoute(): SessionRoute { return { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }; }

@@ -4,11 +4,13 @@ import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, appearanceSettingsSchema, chromeColorsSchema, defaultAppearanceSettings, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
-  proxyProfileSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  analyticsFilterSchema, createRunAnnotationSchema, proxyProfileSchema, runAnnotationSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runMetricsSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, sessionMetricsSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type AppearanceSettings, type ChromeColors, type WindowBounds, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
-  type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunSession, type RunSetup, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
+  type AnalyticsFilter, type AnalyticsResult, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
+import { deriveMetrics, reliabilityRows } from "./analytics";
+export { deriveMetrics, percentile, reliabilityRows } from "./analytics";
 
 export * from "./schema";
 
@@ -167,7 +169,28 @@ export class ProfileRepository {
       const hasDirectProductUrl = this.all("PRAGMA table_info(targets)").some((row) => String(row.name) === "direct_product_url");
       if (!hasDirectProductUrl) this.sql.exec("ALTER TABLE targets ADD COLUMN direct_product_url TEXT;");
     }
-    this.sql.exec("PRAGMA user_version = 14;");
+    if (version < 15) {
+      const runColumns = this.all("PRAGMA table_info(runs)");
+      if (runColumns.length && !runColumns.some((row) => row.name === "discovery_snapshot_json")) this.sql.exec("ALTER TABLE runs ADD COLUMN discovery_snapshot_json TEXT;");
+      const usageColumns = this.all("PRAGMA table_info(run_network_usage)");
+      if (usageColumns.length && !usageColumns.some((row) => row.name === "discovery_source")) this.sql.exec("ALTER TABLE run_network_usage ADD COLUMN discovery_source TEXT;");
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS monitor_discovery_state (store_id TEXT NOT NULL, source TEXT NOT NULL, route_id TEXT NOT NULL, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(store_id,source,route_id));`);
+    }
+    if (version < 16) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS historical_metrics (
+        run_id TEXT NOT NULL, scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL, target_id TEXT, store_id TEXT, browser_profile_id TEXT, proxy_profile_id TEXT,
+        app_version TEXT NOT NULL, derivation_version INTEGER NOT NULL, metrics_json TEXT NOT NULL, derived_at INTEGER NOT NULL, PRIMARY KEY(run_id,scope_kind,scope_id)
+      );
+      CREATE INDEX IF NOT EXISTS historical_metrics_cohort_idx ON historical_metrics(target_id,store_id,app_version,derived_at DESC);
+      CREATE INDEX IF NOT EXISTS historical_metrics_profile_idx ON historical_metrics(browser_profile_id,derived_at DESC);
+      CREATE INDEX IF NOT EXISTS historical_metrics_proxy_idx ON historical_metrics(proxy_profile_id,derived_at DESC);
+      CREATE TABLE IF NOT EXISTS run_annotations (
+        id TEXT PRIMARY KEY NOT NULL, run_id TEXT NOT NULL, run_session_id TEXT, kind TEXT NOT NULL, text TEXT, failure_category TEXT, manual_outcome TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS run_annotations_run_idx ON run_annotations(run_id,run_session_id,created_at);`);
+    }
+    this.sql.exec("PRAGMA user_version = 16;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -383,10 +406,10 @@ export class ProfileRepository {
 
   async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: NewRunSession[], targetSnapshot: TargetSnapshot | null = null): Promise<RunDetail> {
     const parsed = createRunSchema.parse(input); const now = Date.now(); const id = randomUUID();
-    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, executionMode: parsed.executionMode, status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, createdAt: now, updatedAt: now });
+    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, executionMode: parsed.executionMode, status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, discoverySnapshot: null, createdAt: now, updatedAt: now });
     this.transaction(() => {
-      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,execution_mode,status,started_at,ended_at,environment_json,target_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-        .run(run.id, run.name, run.diagnosticLevel, run.executionMode, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, now, now);
+      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,execution_mode,status,started_at,ended_at,environment_json,target_snapshot_json,discovery_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run(run.id, run.name, run.diagnosticLevel, run.executionMode, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, null, now, now);
       for (const session of sessions) {
         const value = runSessionSchema.parse({ ...session, runId: id });
         this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,shipping_profile_json,assisted_eligible,execution_state,checkpoint_reason,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
@@ -546,11 +569,11 @@ export class ProfileRepository {
     return value;
   }
 
-  async upsertRunNetworkUsage(input: RunNetworkUsage): Promise<RunNetworkUsage> {
+  async upsertRunNetworkUsage(input: RunNetworkUsage | Omit<RunNetworkUsage, "discoverySource">): Promise<RunNetworkUsage> {
     const value = runNetworkUsageSchema.parse(input);
-    this.sql.prepare(`INSERT INTO run_network_usage (id,run_id,usage_key,source,run_session_id,store_id,proxy_profile_id,proxy_name,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,usage_key) DO UPDATE SET received_bytes=excluded.received_bytes,sent_bytes=excluded.sent_bytes,request_count=excluded.request_count,completeness=excluded.completeness,cost_per_gb_micros_usd=excluded.cost_per_gb_micros_usd,estimated_cost_micros_usd=excluded.estimated_cost_micros_usd,updated_at=excluded.updated_at`)
-      .run(value.id, value.runId, value.usageKey, value.source, value.runSessionId, value.storeId, value.proxyProfileId, value.proxyName, value.receivedBytes, value.sentBytes, value.requestCount, value.completeness, value.costPerGbMicrosUsd, value.estimatedCostMicrosUsd, value.updatedAt);
+    this.sql.prepare(`INSERT INTO run_network_usage (id,run_id,usage_key,source,run_session_id,store_id,proxy_profile_id,proxy_name,discovery_source,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,usage_key) DO UPDATE SET discovery_source=excluded.discovery_source,received_bytes=excluded.received_bytes,sent_bytes=excluded.sent_bytes,request_count=excluded.request_count,completeness=excluded.completeness,cost_per_gb_micros_usd=excluded.cost_per_gb_micros_usd,estimated_cost_micros_usd=excluded.estimated_cost_micros_usd,updated_at=excluded.updated_at`)
+      .run(value.id, value.runId, value.usageKey, value.source, value.runSessionId, value.storeId, value.proxyProfileId, value.proxyName, value.discoverySource, value.receivedBytes, value.sentBytes, value.requestCount, value.completeness, value.costPerGbMicrosUsd, value.estimatedCostMicrosUsd, value.updatedAt);
     return value;
   }
 
@@ -561,6 +584,45 @@ export class ProfileRepository {
   async listNetworkUsage(): Promise<RunNetworkUsage[]> {
     return this.all("SELECT * FROM run_network_usage ORDER BY updated_at DESC").map((row) => runNetworkUsageSchema.parse(mapRunNetworkUsage(row)));
   }
+  async getRunArtifact(id: string): Promise<RunArtifact | undefined> { const row = this.getRow("SELECT * FROM run_artifacts WHERE id=?", [id]); return row ? runArtifactSchema.parse(mapRunArtifact(row)) : undefined; }
+  async setRunDiscoverySnapshot(id: string, snapshot: Run["discoverySnapshot"]): Promise<void> { this.sql.prepare("UPDATE runs SET discovery_snapshot_json=?,updated_at=? WHERE id=?").run(snapshot ? JSON.stringify(snapshot) : null, Date.now(), id); }
+  async upsertMonitorDiscoveryState(storeId: string, source: string, routeId: string, state: Record<string, unknown>): Promise<void> { this.sql.prepare("INSERT INTO monitor_discovery_state (store_id,source,route_id,state_json,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(store_id,source,route_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at").run(storeId, source, routeId, JSON.stringify(state), Date.now()); }
+  async listMonitorDiscoveryState(storeId: string): Promise<Array<{ source: string; routeId: string; state: Record<string, unknown>; updatedAt: number }>> { return this.all("SELECT * FROM monitor_discovery_state WHERE store_id=? ORDER BY source,route_id", [storeId]).map((row) => ({ source: String(row.source), routeId: String(row.route_id), state: JSON.parse(String(row.state_json)), updatedAt: Number(row.updated_at) })); }
+
+  async materializeRunMetrics(runId: string): Promise<{ run: RunMetrics; sessions: SessionMetrics[] }> {
+    const detail = await this.getRun(runId); if (!detail) throw new Error("Run not found."); const metrics = deriveMetrics(detail); const now = Date.now();
+    this.transaction(() => {
+      const put = this.sql.prepare(`INSERT INTO historical_metrics (run_id,scope_kind,scope_id,target_id,store_id,browser_profile_id,proxy_profile_id,app_version,derivation_version,metrics_json,derived_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,scope_kind,scope_id) DO UPDATE SET target_id=excluded.target_id,store_id=excluded.store_id,browser_profile_id=excluded.browser_profile_id,proxy_profile_id=excluded.proxy_profile_id,app_version=excluded.app_version,derivation_version=excluded.derivation_version,metrics_json=excluded.metrics_json,derived_at=excluded.derived_at`);
+      put.run(runId, "RUN", runId, detail.run.targetSnapshot?.targetId ?? null, detail.run.targetSnapshot?.storeId ?? null, null, null, detail.run.environment.appVersion, 1, JSON.stringify(metrics.run), now);
+      for (const session of metrics.sessions) put.run(runId, "SESSION", session.runSessionId, detail.run.targetSnapshot?.targetId ?? null, detail.run.targetSnapshot?.storeId ?? null, session.browserProfileId, session.proxyProfileId, detail.run.environment.appVersion, 1, JSON.stringify(session), now);
+    }); return metrics;
+  }
+
+  async listRunAnnotations(runId?: string): Promise<RunAnnotation[]> {
+    const rows = runId ? this.all("SELECT * FROM run_annotations WHERE run_id=? ORDER BY created_at", [runId]) : this.all("SELECT * FROM run_annotations ORDER BY created_at");
+    return rows.map((row) => runAnnotationSchema.parse({ id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, kind: row.kind, text: row.text ?? null, failureCategory: row.failure_category ?? null, manualOutcome: row.manual_outcome ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) }));
+  }
+
+  async createRunAnnotation(input: CreateRunAnnotationInput): Promise<RunAnnotation> {
+    const value = createRunAnnotationSchema.parse(input); if (!await this.getRun(value.runId)) throw new Error("Run not found."); const now = Date.now();
+    if (value.kind !== "NOTE") this.sql.prepare("DELETE FROM run_annotations WHERE run_id=? AND run_session_id IS ? AND kind=?").run(value.runId, value.runSessionId, value.kind);
+    const annotation = runAnnotationSchema.parse({ ...value, id: randomUUID(), createdAt: now, updatedAt: now });
+    this.sql.prepare("INSERT INTO run_annotations (id,run_id,run_session_id,kind,text,failure_category,manual_outcome,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)").run(annotation.id, annotation.runId, annotation.runSessionId, annotation.kind, annotation.text, annotation.failureCategory, annotation.manualOutcome, now, now); return annotation;
+  }
+  async removeRunAnnotation(id: string): Promise<boolean> { return this.sql.prepare("DELETE FROM run_annotations WHERE id=?").run(id).changes > 0; }
+
+  async queryAnalytics(input: AnalyticsFilter): Promise<AnalyticsResult> {
+    const filter = analyticsFilterSchema.parse(input); const allRuns = (await this.listRuns(500)).filter((run) => !["STARTING", "RECORDING"].includes(run.status)); const now = Date.now();
+    let runs = allRuns.filter((run) => (!filter.targetId || run.targetSnapshot?.targetId === filter.targetId) && (!filter.storeId || run.targetSnapshot?.storeId === filter.storeId) && (!filter.appVersions.length || filter.appVersions.includes(run.environment.appVersion)));
+    const days = filter.range === "7_DAYS" ? 7 : filter.range === "30_DAYS" ? 30 : filter.range === "90_DAYS" ? 90 : null; if (days) runs = runs.filter((run) => run.startedAt >= now - days * 86_400_000); if (filter.range === "LAST_20") runs = runs.slice(0, 20);
+    for (const run of runs) { const row = this.getRow("SELECT derivation_version FROM historical_metrics WHERE run_id=? AND scope_kind='RUN'", [run.id]); if (!row || Number(row.derivation_version) !== 1) await this.materializeRunMetrics(run.id); }
+    const ids = new Set(runs.map((run) => run.id)); const rows = this.all("SELECT * FROM historical_metrics").filter((row) => ids.has(String(row.run_id)));
+    let runMetrics = rows.filter((row) => row.scope_kind === "RUN").map((row) => runMetricsSchema.parse(JSON.parse(String(row.metrics_json))));
+    let sessionMetrics = rows.filter((row) => row.scope_kind === "SESSION").map((row) => sessionMetricsSchema.parse(JSON.parse(String(row.metrics_json))));
+    if (filter.profileId) sessionMetrics = sessionMetrics.filter((row) => row.browserProfileId === filter.profileId); if (filter.proxyProfileId) sessionMetrics = sessionMetrics.filter((row) => row.proxyProfileId === filter.proxyProfileId);
+    const activeRunIds = new Set(sessionMetrics.map((row) => row.runId)); runMetrics = runMetrics.filter((row) => activeRunIds.has(row.runId) || (!filter.profileId && !filter.proxyProfileId));
+    return { runs, runMetrics, sessionMetrics, profiles: reliabilityRows(sessionMetrics, "profile"), proxies: reliabilityRows(sessionMetrics, "proxy"), annotations: (await this.listRunAnnotations()).filter((row) => ids.has(row.runId)) };
+  }
 
   async removeRun(id: string): Promise<boolean> {
     const existing = this.getRow("SELECT id FROM runs WHERE id = ?", [id]); if (!existing) return false;
@@ -569,6 +631,8 @@ export class ProfileRepository {
       this.sql.prepare("DELETE FROM run_events WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM browser_health_snapshots WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM run_network_usage WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM historical_metrics WHERE run_id = ?").run(id);
+      this.sql.prepare("DELETE FROM run_annotations WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM run_sessions WHERE run_id = ?").run(id);
       this.sql.prepare("DELETE FROM runs WHERE id = ?").run(id);
     });
@@ -627,7 +691,7 @@ function mapBenchmark(row: Row): Record<string, unknown> {
   return { id: row.id, routeKind: row.route_kind, proxyProfileId: row.proxy_profile_id ?? null, probeUrl: row.probe_url, startedAt: Number(row.started_at), completedAt: Number(row.completed_at), attempts: Number(row.attempts), successes: Number(row.successes), publicIp: row.public_ip ?? null, country: row.country ?? null, city: row.city ?? null, connectLatencyMs: nullableNumber(row.connect_latency_ms), medianLatencyMs: nullableNumber(row.median_latency_ms), jitterMs: nullableNumber(row.jitter_ms), failureRate: Number(row.failure_rate), ipStable: Boolean(row.ip_stable), qualityScore: Number(row.quality_score), status: row.status, errorCode: row.error_code ?? null, errorMessage: row.error_message ?? null, samples: JSON.parse(String(row.samples_json)) };
 }
 function mapRun(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode ?? "OBSERVATION", status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode ?? "OBSERVATION", status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, discoverySnapshot: row.discovery_snapshot_json ? JSON.parse(String(row.discovery_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSetup(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
@@ -642,7 +706,7 @@ function mapRunEvent(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, wallTimeMs: Number(row.wall_time_ms), elapsedNs: String(row.elapsed_ns), type: row.type, stateBefore: row.state_before ?? null, stateAfter: row.state_after ?? null, payload: JSON.parse(String(row.payload_json)) };
 }
 function mapRunNetworkUsage(row: Row): Record<string, unknown> {
-  return { id: row.id, runId: row.run_id, usageKey: row.usage_key, source: row.source, runSessionId: row.run_session_id ?? null, storeId: row.store_id ?? null, proxyProfileId: row.proxy_profile_id ?? null, proxyName: row.proxy_name ?? null, receivedBytes: Number(row.received_bytes), sentBytes: Number(row.sent_bytes), requestCount: Number(row.request_count), completeness: row.completeness, costPerGbMicrosUsd: nullableNumber(row.cost_per_gb_micros_usd), estimatedCostMicrosUsd: nullableNumber(row.estimated_cost_micros_usd), updatedAt: Number(row.updated_at) };
+  return { id: row.id, runId: row.run_id, usageKey: row.usage_key, source: row.source, runSessionId: row.run_session_id ?? null, storeId: row.store_id ?? null, proxyProfileId: row.proxy_profile_id ?? null, proxyName: row.proxy_name ?? null, discoverySource: row.discovery_source ?? null, receivedBytes: Number(row.received_bytes), sentBytes: Number(row.sent_bytes), requestCount: Number(row.request_count), completeness: row.completeness, costPerGbMicrosUsd: nullableNumber(row.cost_per_gb_micros_usd), estimatedCostMicrosUsd: nullableNumber(row.estimated_cost_micros_usd), updatedAt: Number(row.updated_at) };
 }
 function mapRunArtifact(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id, kind: row.kind, relativePath: row.relative_path, sensitive: Boolean(row.sensitive), createdAt: Number(row.created_at) };

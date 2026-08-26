@@ -2,13 +2,13 @@ import { Readable, Transform } from "node:stream";
 import { HttpCrawler } from "@crawlee/http";
 import { Configuration, type BaseHttpClient, type HttpRequest, type HttpResponse, type ResponseTypes, type StreamingHttpResponse } from "@crawlee/core";
 import { Agent, ProxyAgent, Socks5ProxyAgent, fetch, type Dispatcher } from "undici";
-import { getStoreManifest, type MonitorPolicy, type MonitorRoute, type ProductCandidate, type ProductVariant, type TargetDecision, type TargetSnapshot } from "@copify/shared";
+import { getStoreManifest, type DiscoverySource, type DiscoverySourceDescriptor, type MonitorPolicy, type MonitorRoute, type ProductCandidate, type ProductVariant, type TargetDecision, type TargetSnapshot } from "@copify/shared";
 
 export const MAX_MONITOR_BODY_BYTES = 2 * 1024 * 1024;
 
 type Headers = Record<string, string | string[] | undefined>;
 export type MonitorResponse = { status: number; body: unknown; bytes: number; sentBytes: number; requestCount: number; latencyMs: number; endpoint: string; retryAfterMs: number | null };
-export interface MonitorTransport { get(endpoint: string, route: MonitorRoute, requestTimeoutMs: number): Promise<MonitorResponse>; }
+export interface MonitorTransport { get(endpoint: string, route: MonitorRoute, requestTimeoutMs: number, maxResponseBytes?: number): Promise<MonitorResponse>; }
 export interface HttpStoreAdapter { locateProducts(target: TargetSnapshot): Promise<{ candidates: ProductCandidate[]; response: MonitorResponse }>; }
 
 export class MonitorRequestError extends Error {
@@ -53,7 +53,7 @@ export function parseSupremeHtmlProducts(value: unknown, target: TargetSnapshot)
   const product = inlineJson(value, /product-[^"']+-json/);
   return product === null ? [] : parseShopifyProducts(product, target);
 }
-export function assertMonitorPolicy(target: TargetSnapshot, policy: MonitorPolicy): void { const required = getStoreManifest(target.storeId)?.monitorPolicy; if (!required) throw new MonitorRequestError("MONITOR_ENDPOINT_UNSUPPORTED", "MONITOR_ENDPOINT_UNSUPPORTED"); if (policy.endpoint !== required.endpoint || policy.access !== required.access) throw new MonitorRequestError("Monitor endpoint or access does not match the store manifest.", "INVALID_MONITOR_POLICY"); }
+export function assertMonitorPolicy(target: TargetSnapshot, policy: MonitorPolicy): void { const required = getStoreManifest(target.storeId)?.monitoring; if (!required) throw new MonitorRequestError("MONITOR_ENDPOINT_UNSUPPORTED", "MONITOR_ENDPOINT_UNSUPPORTED"); if (policy.endpoint !== required.endpoint || policy.access !== required.access) throw new MonitorRequestError("Monitor endpoint or access does not match the store manifest.", "INVALID_MONITOR_POLICY"); }
 export function parseRetryAfter(value: string | string[] | undefined, now = Date.now()): number | null { const raw = Array.isArray(value) ? value[0] : value; if (!raw) return null; if (/^\d+$/.test(raw.trim())) return Number(raw.trim()) * 1_000; const date = Date.parse(raw); return Number.isFinite(date) ? Math.max(0, date - now) : null; }
 export function shouldCoolRouteForProtection(route: MonitorRoute): boolean { return route.kind !== "PROXY" || route.proxyType !== "residential-rotating"; }
 export function shouldReuseMonitorConnection(route: MonitorRoute): boolean { return route.kind !== "PROXY" || route.proxyType !== "residential-rotating"; }
@@ -86,8 +86,8 @@ function proxyUrl(route: MonitorRoute): string | undefined { if (route.kind === 
 export class CrawleeJsonTransport implements MonitorTransport {
   private readonly client = new StandardHttpClient(); private readonly cache = new Map<string, { etag?: string; modified?: string; body: unknown }>();
   private readonly configuration = new Configuration({ persistStorage: false, purgeOnStart: false, storageClientOptions: { persistStorage: false } });
-  async get(endpoint: string, route: MonitorRoute, requestTimeoutMs: number): Promise<MonitorResponse> {
-    const cached = this.cache.get(endpoint); const started = Date.now(); let result: MonitorResponse | undefined; let failure: Error | undefined; let sentBytes = 0; const routeProxyUrl = proxyUrl(route); this.client.setProxyRotation(routeProxyUrl, !shouldReuseMonitorConnection(route));
+  async get(endpoint: string, route: MonitorRoute, requestTimeoutMs: number, maxResponseBytes = MAX_MONITOR_BODY_BYTES): Promise<MonitorResponse> {
+    const cacheKey = `${route.id}:${endpoint}`; const cached = this.cache.get(cacheKey); const started = Date.now(); let result: MonitorResponse | undefined; let failure: Error | undefined; let sentBytes = 0; const routeProxyUrl = proxyUrl(route); this.client.setProxyRotation(routeProxyUrl, !shouldReuseMonitorConnection(route));
     const crawler = new HttpCrawler({
       httpClient: this.client,
       maxConcurrency: 1,
@@ -131,7 +131,7 @@ export class CrawleeJsonTransport implements MonitorTransport {
           const raw = Buffer.isBuffer(body) ? body.toString("utf8") : String(body);
           const contentType = header(headers["content-type"])?.toLowerCase() ?? "";
           const parsed = contentType.includes("application/json") ? json ?? JSON.parse(raw) : raw;
-          this.cache.set(endpoint, { etag: header(headers.etag), modified: header(headers["last-modified"]), body: parsed });
+          this.cache.set(cacheKey, { etag: header(headers.etag), modified: header(headers["last-modified"]), body: parsed });
           result = { status, body: parsed, bytes, sentBytes, requestCount: 1, latencyMs: Date.now() - started, endpoint, retryAfterMs };
         }
       },
@@ -139,7 +139,7 @@ export class CrawleeJsonTransport implements MonitorTransport {
         failure = error instanceof Error ? error : new Error(String(error));
       }
     }, this.configuration);
-    await crawler.run([{ url: endpoint, uniqueKey: `${endpoint}:${Date.now()}:${Math.random()}` }]); if (failure) throw failure; if (!result) throw new MonitorRequestError("MONITOR_ENDPOINT_UNSUPPORTED", "MONITOR_ENDPOINT_UNSUPPORTED"); return result;
+    await crawler.run([{ url: endpoint, uniqueKey: `${endpoint}:${Date.now()}:${Math.random()}` }]); if (failure) throw failure; if (!result) throw new MonitorRequestError("MONITOR_ENDPOINT_UNSUPPORTED", "MONITOR_ENDPOINT_UNSUPPORTED"); if (result.bytes > maxResponseBytes) throw new MonitorRequestError("Monitor response exceeded the source size limit.", "MONITOR_RESPONSE_TOO_LARGE", result.status, null, result); return result;
   }
 }
 function header(value: string | string[] | undefined): string | undefined { return Array.isArray(value) ? value[0] : value; }
@@ -185,10 +185,73 @@ function combineResponses(responses: MonitorResponse[], endpoint: string): Monit
   return { ...latest, endpoint, bytes: responses.reduce((sum, item) => sum + item.bytes, 0), sentBytes: responses.reduce((sum, item) => sum + item.sentBytes, 0), requestCount: responses.reduce((sum, item) => sum + item.requestCount, 0), latencyMs: responses.reduce((sum, item) => sum + item.latencyMs, 0) };
 }
 
+export type DiscoveryDiagnostic = { type: "DISCOVERY_SOURCE_PROBED" | "DISCOVERY_SOURCE_UNAVAILABLE" | "DISCOVERY_CANDIDATE_FOUND" | "DISCOVERY_CANDIDATE_HYDRATED" | "DISCOVERY_MESH_WINNER"; source: DiscoverySource; routeId: string; payload: Record<string, unknown> };
+export type SitemapCandidate = { canonicalUrl: string; productHandle: string | null; titleHints: string[]; modifiedAt: number | null };
+const REGISTERED_DISCOVERY_HANDLERS = new Set(["supreme-product-page-v1", "supreme-collection-v1", "shopify-sitemap-v1", "shopify-predictive-search-v1"]);
+export function validateDiscoveryHandlers(descriptors: DiscoverySourceDescriptor[], hydrationHandlerId: string): string[] {
+  return [...new Set([...descriptors.map((source) => source.handlerId), hydrationHandlerId])].filter((id) => !REGISTERED_DISCOVERY_HANDLERS.has(id));
+}
+export function canonicalProductUrl(value: string, origin = "https://eu.supreme.com"): string | null {
+  try { const url = new URL(value, origin); if (url.protocol !== "https:" || url.origin !== new URL(origin).origin || !url.pathname.includes("/products/")) return null; url.search = ""; url.hash = ""; return url.toString(); } catch { return null; }
+}
+export function parseShopifySitemap(value: unknown, origin = "https://eu.supreme.com"): { nested: string[]; products: SitemapCandidate[] } {
+  if (typeof value !== "string") return { nested: [], products: [] }; const nested: string[] = []; const products: SitemapCandidate[] = [];
+  for (const block of value.match(/<(?:sitemap|url)\b[\s\S]*?<\/(?:sitemap|url)>/gi) ?? []) {
+    const location = block.match(/<loc[^>]*>([\s\S]*?)<\/loc>/i)?.[1]?.trim().replaceAll("&amp;", "&"); if (!location) continue;
+    if (/sitemap/i.test(block.slice(0, 20)) || /sitemap.*\.xml/i.test(location)) { try { const url = new URL(location, origin); if (url.origin === new URL(origin).origin) nested.push(url.toString()); } catch { /* ignored */ } continue; }
+    const canonicalUrl = canonicalProductUrl(location, origin); if (!canonicalUrl) continue; const handle = new URL(canonicalUrl).pathname.split("/products/")[1]?.split("/")[0] ?? null;
+    const titleHints = [...block.matchAll(/<image:(?:title|caption)[^>]*>([\s\S]*?)<\/image:(?:title|caption)>/gi)].map((match) => match[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim()).filter(Boolean);
+    const modified = block.match(/<lastmod[^>]*>([\s\S]*?)<\/lastmod>/i)?.[1]?.trim(); const parsed = modified ? Date.parse(modified) : NaN;
+    products.push({ canonicalUrl, productHandle: handle, titleHints, modifiedAt: Number.isFinite(parsed) ? parsed : null });
+  }
+  return { nested: [...new Set(nested)], products: [...new Map(products.map((item) => [item.canonicalUrl, item])).values()] };
+}
+export function parsePredictiveProductUrls(value: unknown, origin = "https://eu.supreme.com"): string[] {
+  const products = value && typeof value === "object" && !Array.isArray(value) ? (value as any).resources?.results?.products : null;
+  if (!Array.isArray(products)) return []; return [...new Set(products.flatMap((product) => { const raw = product?.url ?? (product?.handle ? `/products/${product.handle}` : null); const url = typeof raw === "string" ? canonicalProductUrl(raw, origin) : null; return url ? [url] : []; }))];
+}
+
+class DiscoveryMesh {
+  private readonly seen = new Set<string>(); private sequence = 0; private lastSitemapAt = 0;
+  private readonly backoff = new Map<DiscoverySource, { until: number; attempts: number }>();
+  constructor(private readonly transport: MonitorTransport, private readonly policy: MonitorPolicy) {}
+  async poll(target: TargetSnapshot, routes: MonitorConnectionPool, turbo = false): Promise<{ decision: TargetDecision; candidates: ProductCandidate[]; response: MonitorResponse; route: MonitorRoute; diagnostics: DiscoveryDiagnostic[] }> {
+    const manifest = getStoreManifest(target.storeId); const monitoring = manifest?.monitoring; if (!monitoring) throw new MonitorRequestError("Monitoring is unsupported.", "MONITOR_ENDPOINT_UNSUPPORTED");
+    const missing = validateDiscoveryHandlers(monitoring.sources, monitoring.hydrationHandlerId); if (missing.length) throw new MonitorRequestError(`Discovery handlers are unavailable: ${missing.join(", ")}`, "MONITOR_ENDPOINT_UNSUPPORTED");
+    const descriptors = target.directProductUrl ? monitoring.sources.filter((source) => source.kind === "direct-product") : monitoring.sources.filter((source) => source.kind !== "direct-product");
+    const due = descriptors.filter((source) => (this.backoff.get(source.kind)?.until ?? 0) <= Date.now() && (source.cadence !== "adaptive-sitemap" || Date.now() - this.lastSitemapAt >= (turbo ? 5_000 : 30_000))); if (due.some((source) => source.kind === "product-sitemap")) this.lastSitemapAt = Date.now();
+    const allocation = new Map(due.map((source, index) => [source.kind, routes.routes[index % routes.routes.length] ?? routes.acquire()]));
+    const diagnostics: DiscoveryDiagnostic[] = []; const responses: MonitorResponse[] = []; const allCandidates: ProductCandidate[] = []; const failures: unknown[] = [];
+    const tasks = due.map(async (source) => {
+      const route = allocation.get(source.kind)!; const started = Date.now();
+      try {
+        const candidates = await this.sourceCandidates(source, target, route, diagnostics, responses); this.backoff.delete(source.kind); allCandidates.push(...candidates); const decision = decideTarget(target, candidates);
+        diagnostics.push({ type: "DISCOVERY_SOURCE_PROBED", source: source.kind, routeId: route.id, payload: { durationMs: Date.now() - started, responseBytes: responses.at(-1)?.bytes ?? 0, candidateCount: candidates.length, statusClass: responses.at(-1) ? Math.floor(responses.at(-1)!.status / 100) : null } });
+        if (decision.kind !== "VARIANT_SELECTED" || !decision.candidate || !decision.selectedVariant) throw new Error("NO_VERIFIED_MATCH");
+        const key = `${decision.candidate.url}:${decision.selectedVariant.id}`; if (this.seen.has(key)) throw new Error("DUPLICATE_WINNER"); this.seen.add(key); this.sequence += 1;
+        diagnostics.push({ type: "DISCOVERY_MESH_WINNER", source: source.kind, routeId: route.id, payload: { sequence: this.sequence, variantId: decision.selectedVariant.id, verifiedElapsedNs: (BigInt(Date.now()) * 1_000_000n).toString() } }); return { decision, route };
+      } catch (error) { if (!/NO_VERIFIED_MATCH|DUPLICATE_WINNER/.test(error instanceof Error ? error.message : "")) { failures.push(error); const previous = this.backoff.get(source.kind)?.attempts ?? 0; const protection = error instanceof MonitorRequestError && (error.status === 403 || error.status === 429); const delay = protection ? Math.min(600_000, (error.retryAfterMs ?? 60_000) * 2 ** previous) : Math.min(300_000, 5_000 * 2 ** previous); const backoffUntil = Date.now() + delay; this.backoff.set(source.kind, { until: backoffUntil, attempts: previous + 1 }); diagnostics.push({ type: "DISCOVERY_SOURCE_UNAVAILABLE", source: source.kind, routeId: route.id, payload: { reasonCode: error instanceof MonitorRequestError ? error.code : "SOURCE_FAILED", backoffUntil } }); } throw error; }
+    });
+    let winner: { decision: TargetDecision; route: MonitorRoute } | null = null; try { winner = await Promise.any(tasks); } catch { await Promise.allSettled(tasks); }
+    if (!winner && failures.length === due.length && failures.length) throw failures[0];
+    const response = responses.length ? combineResponses(responses, monitoring.endpoint) : { status: 200, body: null, bytes: 0, sentBytes: 0, requestCount: 0, latencyMs: 0, endpoint: monitoring.endpoint, retryAfterMs: null };
+    const route = winner?.route ?? allocation.values().next().value ?? routes.acquire(); return { decision: winner?.decision ?? decideTarget(target, allCandidates), candidates: allCandidates, response, route, diagnostics };
+  }
+  private async sourceCandidates(source: DiscoverySourceDescriptor, target: TargetSnapshot, route: MonitorRoute, diagnostics: DiscoveryDiagnostic[], responses: MonitorResponse[]): Promise<ProductCandidate[]> {
+    const origin = new URL(this.policy.endpoint).origin; const get = async (url: string) => { const response = await this.transport.get(url, route, this.policy.requestTimeoutMs, source.maxResponseBytes); responses.push(response); if (response.status >= 400 && response.status !== 304) throw new MonitorRequestError(`Discovery source returned ${response.status}.`, "STOREFRONT_PROTECTION", response.status, response.retryAfterMs, response); return response; };
+    if (source.kind === "direct-product" || source.kind === "collection") { const url = source.kind === "direct-product" ? target.directProductUrl! : new URL(source.pathTemplate ?? "/collections/all", origin).toString(); const response = await get(url); return parseSupremeHtmlProducts(response.body, target); }
+    let urls: string[] = [];
+    if (source.kind === "predictive-search") { for (const phrase of target.productKeywords.slice(0, 3)) { const url = new URL(source.pathTemplate ?? "/search/suggest.json", origin); url.searchParams.set("q", phrase); url.searchParams.set("resources[type]", "product"); urls.push(...parsePredictiveProductUrls((await get(url.toString())).body, origin)); } }
+    if (source.kind === "product-sitemap") { const root = parseShopifySitemap((await get(new URL(source.pathTemplate ?? "/sitemap.xml", origin).toString())).body, origin); let products = root.products; for (const nested of root.nested.slice(0, 20)) products.push(...parseShopifySitemap((await get(nested)).body, origin).products); urls = products.filter((item) => item.titleHints.some((hint) => matchesTarget(hint, target)) || item.productHandle && matchesTarget(item.productHandle, target)).map((item) => item.canonicalUrl); }
+    const hydrated: ProductCandidate[] = []; for (const url of [...new Set(urls)].slice(0, 20)) { diagnostics.push({ type: "DISCOVERY_CANDIDATE_FOUND", source: source.kind, routeId: route.id, payload: { candidateKey: url } }); const started = Date.now(); const parsed = parseSupremeHtmlProducts((await get(url)).body, target); hydrated.push(...parsed); diagnostics.push({ type: "DISCOVERY_CANDIDATE_HYDRATED", source: source.kind, routeId: route.id, payload: { candidateKey: url, accepted: parsed.length > 0, durationMs: Date.now() - started } }); } return hydrated;
+  }
+}
+
 export class HttpStoreMonitor {
   private readonly adapters = new Map<string, SupremeHttpAdapter>();
+  private readonly meshes = new Map<string, DiscoveryMesh>();
   constructor(private readonly transport: MonitorTransport) {}
-  async poll(target: TargetSnapshot, policy: MonitorPolicy, routes: MonitorConnectionPool): Promise<{ decision: TargetDecision; candidates: ProductCandidate[]; response: MonitorResponse; route: MonitorRoute }> {
-    assertMonitorPolicy(target, policy); const route = routes.acquire(); try { const key = `${target.targetId}:${target.capturedAt}:${route.id}`; let adapter = this.adapters.get(key); if (!adapter) { adapter = new SupremeHttpAdapter(this.transport, route, policy); this.adapters.set(key, adapter); } const { candidates, response } = await adapter.locateProducts(target); return { decision: decideTarget(target, candidates), candidates, response, route }; } catch (error) { throw new MonitorPollError(route, error); }
+  async poll(target: TargetSnapshot, policy: MonitorPolicy, routes: MonitorConnectionPool, turbo = false): Promise<{ decision: TargetDecision; candidates: ProductCandidate[]; response: MonitorResponse; route: MonitorRoute; diagnostics: DiscoveryDiagnostic[] }> {
+    assertMonitorPolicy(target, policy); const route = routes.acquire(); try { const key = `${target.targetId}:${target.capturedAt}`; let mesh = this.meshes.get(key); if (!mesh) { mesh = new DiscoveryMesh(this.transport, policy); this.meshes.set(key, mesh); } return await mesh.poll(target, routes, turbo); } catch (error) { throw new MonitorPollError(route, error); }
   }
 }

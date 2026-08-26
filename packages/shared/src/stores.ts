@@ -8,6 +8,24 @@ export type StoreStatus = z.infer<typeof storeStatusSchema>;
 export const storeMonitorKindSchema = z.enum(["shared", "in-browser"]).nullable();
 export type StoreMonitorKind = z.infer<typeof storeMonitorKindSchema>;
 
+export const discoverySourceSchema = z.enum(["direct-product", "collection", "product-sitemap", "predictive-search"]);
+export type DiscoverySource = z.infer<typeof discoverySourceSchema>;
+export const discoverySourceDescriptorSchema = z.object({
+  kind: discoverySourceSchema,
+  handlerId: z.string().min(1).max(80),
+  cadence: z.enum(["active-interval", "adaptive-sitemap"]),
+  pathTemplate: z.string().min(1).max(512).optional(),
+  maxResponseBytes: z.number().int().min(1_024).max(8 * 1024 * 1024),
+});
+export type DiscoverySourceDescriptor = z.infer<typeof discoverySourceDescriptorSchema>;
+export const storeMonitoringSchema = z.object({
+  descriptorVersion: z.literal(1), mode: z.enum(["shared", "in-browser"]),
+  access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), recommendedPollIntervalMs: z.number().int().min(200),
+  endpoint: z.string().url(), hydrationHandlerId: z.string().min(1).max(80),
+  sources: z.array(discoverySourceDescriptorSchema).min(1),
+}).nullable();
+export type StoreMonitoring = z.infer<typeof storeMonitoringSchema>;
+
 export const storeCapabilitiesSchema = z.object({
   monitor: storeMonitorKindSchema, cartInspection: z.boolean(), addToCart: z.boolean(), checkoutAutofill: z.boolean()
 });
@@ -22,7 +40,7 @@ export type StoreVariantSizes = z.infer<typeof storeVariantSizesSchema>;
 export const storeManifestSchema = z.object({
   id: z.string().min(1).max(64), name: z.string().min(1).max(80), region: z.string().min(1).max(40).nullable(),
   currency: storeCurrencySchema, status: storeStatusSchema, capabilities: storeCapabilitiesSchema,
-  monitorPolicy: z.object({ access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), recommendedPollIntervalMs: z.number().int().min(200), endpoint: z.string().url() }).nullable(),
+  monitoring: storeMonitoringSchema,
   warming: z.object({ storefrontUrl: z.string().url() }).nullable(),
   variants: z.object({ sizes: storeVariantSizesSchema, colors: z.object({ kind: z.literal("freeform") }) })
 });
@@ -37,14 +55,23 @@ const MANIFESTS: readonly StoreManifest[] = [
   {
     id: STORE_SUPREME_EU, name: "Supreme", region: "EU", currency: "EUR", status: "stable",
     capabilities: { monitor: "shared", cartInspection: true, addToCart: true, checkoutAutofill: true },
-    monitorPolicy: { access: "PUBLIC", recommendedPollIntervalMs: 1_000, endpoint: "https://eu.supreme.com/collections/all" },
+    monitoring: {
+      descriptorVersion: 1, mode: "shared", access: "PUBLIC", recommendedPollIntervalMs: 1_000,
+      endpoint: "https://eu.supreme.com/collections/all", hydrationHandlerId: "supreme-product-page-v1",
+      sources: [
+        { kind: "direct-product", handlerId: "supreme-product-page-v1", cadence: "active-interval", maxResponseBytes: 2 * 1024 * 1024 },
+        { kind: "collection", handlerId: "supreme-collection-v1", cadence: "active-interval", pathTemplate: "/collections/all", maxResponseBytes: 2 * 1024 * 1024 },
+        { kind: "product-sitemap", handlerId: "shopify-sitemap-v1", cadence: "adaptive-sitemap", pathTemplate: "/sitemap.xml", maxResponseBytes: 2 * 1024 * 1024 },
+        { kind: "predictive-search", handlerId: "shopify-predictive-search-v1", cadence: "active-interval", pathTemplate: "/search/suggest.json", maxResponseBytes: 512 * 1024 },
+      ],
+    },
     warming: { storefrontUrl: "https://eu.supreme.com/pages/shop" },
     variants: { sizes: { kind: "enum", values: SUPREME_EU_APPAREL_SIZES }, colors: { kind: "freeform" } }
   },
   {
     id: STORE_GENERAL, name: "General", region: null, currency: "EUR", status: "unsupported",
     capabilities: { monitor: null, cartInspection: false, addToCart: false, checkoutAutofill: false },
-    monitorPolicy: null,
+    monitoring: null,
     warming: null,
     variants: { sizes: { kind: "freeform" }, colors: { kind: "freeform" } }
   }
@@ -57,7 +84,7 @@ export function getStoreManifest(id: string): StoreManifest | undefined { return
 export function isKnownStore(id: string): boolean { return BY_ID.has(id); }
 export function requireStoreManifest(id: string): StoreManifest { const manifest = BY_ID.get(id); if (!manifest) throw new Error(`Unknown store "${id}".`); return manifest; }
 export function storeCapabilities(id: string): StoreCapabilities | undefined { return BY_ID.get(id)?.capabilities; }
-export function isMonitorable(id: string): boolean { return BY_ID.get(id)?.capabilities.monitor !== null && BY_ID.has(id); }
+export function isMonitorable(id: string): boolean { return BY_ID.get(id)?.monitoring !== null && BY_ID.has(id); }
 export function supportsAssistedCheckout(id: string): boolean { const capabilities = BY_ID.get(id)?.capabilities; return Boolean(capabilities?.addToCart && capabilities.checkoutAutofill); }
 
 export const storeSettingsSchema = z.object({ id: z.string().min(1).max(64), enabled: z.boolean() });

@@ -134,7 +134,7 @@ export function Settings(props: {
       )}
 
       {tab === "monitor" && (() => {
-        const manifestStore = props.stores.find((store) => store.id === monitorStoreId && store.monitorPolicy);
+        const manifestStore = props.stores.find((store) => store.id === monitorStoreId && store.monitoring);
         const storeBehavior = resolveMonitorBehavior(monitorSettings, monitorStoreId);
         const grouped = new Map<string, { label: string; store: string; bytes: number; requests: number; cost: number | null }>();
         for (const row of usage) { const key = `${row.source}:${row.proxyProfileId ?? "direct"}:${row.storeId ?? "none"}`; const current = grouped.get(key) ?? { label: `${row.source.toLowerCase()} · ${row.proxyName ?? "Direct"}`, store: row.storeId ?? "—", bytes: 0, requests: 0, cost: row.estimatedCostMicrosUsd === null ? null : 0 }; current.bytes += row.receivedBytes + row.sentBytes; current.requests += row.requestCount; if (current.cost !== null) current.cost += row.estimatedCostMicrosUsd ?? 0; grouped.set(key, current); }
@@ -152,8 +152,8 @@ export function Settings(props: {
           </section>
           <section className="panel">
             <div className="section-title"><div><h2>Store override</h2><p className="muted">The manifest recommends cadence and owns the endpoint; your settings remain authoritative.</p></div>{monitorSettings.stores[monitorStoreId] ? <button onClick={() => { const stores = { ...monitorSettings.stores }; delete stores[monitorStoreId]; setMonitorSettings({ ...monitorSettings, stores }); }}>Use global</button> : null}</div>
-            <Field label="Store"><select value={monitorStoreId} onChange={(event) => setMonitorStoreId(event.target.value)}>{props.stores.filter((store) => store.monitorPolicy).map((store) => <option key={store.id} value={store.id}>{store.name} {store.region}</option>)}</select></Field>
-            <BehaviorEditor value={storeBehavior} recommended={manifestStore?.monitorPolicy?.recommendedPollIntervalMs} onChange={(behavior) => setMonitorSettings({ ...monitorSettings, stores: { ...monitorSettings.stores, [monitorStoreId]: behavior } })} />
+            <Field label="Store"><select value={monitorStoreId} onChange={(event) => setMonitorStoreId(event.target.value)}>{props.stores.filter((store) => store.monitoring).map((store) => <option key={store.id} value={store.id}>{store.name} {store.region}</option>)}</select></Field>
+            <BehaviorEditor value={storeBehavior} recommended={manifestStore?.monitoring?.recommendedPollIntervalMs} onChange={(behavior) => setMonitorSettings({ ...monitorSettings, stores: { ...monitorSettings.stores, [monitorStoreId]: behavior } })} />
             <div className="rows"><div className="row"><span className="row-main"><span className="row-name">Effective policy</span><span className="row-meta">{storeBehavior.pollIntervalMs} ms standby / {storeBehavior.fastPollIntervalMs} ms Turbo · route cooldown {Math.round(storeBehavior.routeUnhealthyMs / 60_000)}m · 503 {Math.round(storeBehavior.serviceCooldownMs / 1_000)}s · {storeBehavior.rotateOnProtection ? "rotate on protection" : "monitor cooldown on protection"}</span></span></div></div>
           </section>
           <section className="panel">
