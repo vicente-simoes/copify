@@ -12,6 +12,11 @@ describe("HTTP monitor domain", () => {
     expect(parsed[0]).toMatchObject({ name: "Leather Jacket", priceMinor: 19_900, variants: [{ id: "123456", color: "Black", size: "M", available: true }] });
     expect(selectPreferredVariant(candidate, target)?.id).toBe("2"); expect(decideTarget(target, [candidate]).kind).toBe("VARIANT_SELECTED");
   });
+  it("selects an available preferred colour across separate Supreme colour records", () => {
+    const soldOutBlack = { ...candidate, listingOrder: 1, variants: [{ id: "black", color: "Black", size: "M", available: false }] };
+    const availableRed = { ...candidate, listingOrder: 2, variants: [{ id: "red", color: "Red", size: "M", available: true }] };
+    expect(decideTarget(target, [soldOutBlack, availableRed])).toMatchObject({ kind: "VARIANT_SELECTED", candidate: { listingOrder: 2 }, selectedVariant: { id: "red" } });
+  });
   it("parses Supreme catalog and product HTML JSON without loading page assets", () => {
     const product = { title: "Leather Jacket", handle: "leather-jacket", color: "Black", price: 19_900, variants: [{ id: 123456, option1: "M", available: true, price: 19_900 }] };
     expect(parseSupremeHtmlProducts(`<html><script id="products-json" type="application/json">${JSON.stringify([product])}</script></html>`, target)[0]).toMatchObject({ name: "Leather Jacket", variants: [{ id: "123456", color: "Black" }] });
@@ -79,5 +84,17 @@ describe("HTTP monitor domain", () => {
     ]);
     await expect(monitor.poll(target, policy(), pool)).rejects.toMatchObject({ route: { port: 8001 }, reason: { code: "STOREFRONT_PROTECTION", status: 429 } });
     expect(calls).toBe(3);
+  });
+  it("uses the collection first when discovery sources would share one route", async () => {
+    const product = { title: "Leather Jacket", handle: "leather-jacket", color: "Black", price: 19_900, variants: [{ id: 123456, option1: "M", available: true, price: 19_900 }] };
+    const calls: string[] = [];
+    const monitor = new HttpStoreMonitor({ get: async (endpoint) => {
+      calls.push(endpoint);
+      const body = `<script id="products-json" type="application/json">${JSON.stringify([product])}</script>`;
+      return { status: 200, body, bytes: body.length, sentBytes: 100, requestCount: 1, latencyMs: 5, endpoint, retryAfterMs: null };
+    } });
+    const result = await monitor.poll(target, policy(), new MonitorConnectionPool([]));
+    expect(result.decision.kind).toBe("VARIANT_SELECTED");
+    expect(calls).toEqual([policy().endpoint]);
   });
 });

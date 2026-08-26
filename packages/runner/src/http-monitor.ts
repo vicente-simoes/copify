@@ -25,7 +25,15 @@ export function selectPreferredVariant(candidate: ProductCandidate, target: Pick
 export function decideTarget(target: TargetSnapshot, candidates: ProductCandidate[]): TargetDecision {
   const matched = candidates.filter((candidate) => matchesTarget(candidate.name, target)).sort((a, b) => a.listingOrder - b.listingOrder); if (!matched.length) return { kind: "NO_MATCH", message: "No configured product phrase was found.", candidate: null, selectedVariant: null };
   const candidate = matched[0]; if (!candidate.currency || candidate.priceMinor === null) return { kind: "ERROR", message: "The matching product did not expose a readable price.", candidate, selectedVariant: null }; if (candidate.currency !== target.currency) return { kind: "CURRENCY_MISMATCH", message: `Expected ${target.currency}, found ${candidate.currency}.`, candidate, selectedVariant: null }; if (candidate.priceMinor > target.maxRetailMinor) return { kind: "PRICE_LIMIT_EXCEEDED", message: `Detected price exceeds the configured ${target.currency} limit.`, candidate, selectedVariant: null };
-  const selectedVariant = selectPreferredVariant(candidate, target); return selectedVariant ? { kind: "VARIANT_SELECTED", message: "An acceptable product variant was found.", candidate, selectedVariant } : { kind: "NO_ACCEPTABLE_VARIANT", message: "The matching product has no available preferred variant.", candidate, selectedVariant: null };
+  // Supreme exposes colourways as separate catalog records with the same title.
+  // Select across every compatible record so a sold-out early colour cannot hide a
+  // later preferred colour with an available size.
+  const rank = (value: string, wanted: string[]) => { const index = wanted.findIndex((item) => normalizeMatch(item) === normalizeMatch(value)); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
+  const available = matched
+    .filter((item) => item.currency === target.currency && item.priceMinor !== null && item.priceMinor <= target.maxRetailMinor)
+    .flatMap((item) => { const selectedVariant = selectPreferredVariant(item, target); return selectedVariant ? [{ candidate: item, selectedVariant }] : []; })
+    .sort((left, right) => rank(left.selectedVariant.color, target.preferredColors) - rank(right.selectedVariant.color, target.preferredColors) || rank(left.selectedVariant.size, target.sizePriority) - rank(right.selectedVariant.size, target.sizePriority) || left.candidate.listingOrder - right.candidate.listingOrder);
+  const selected = available[0]; return selected ? { kind: "VARIANT_SELECTED", message: "An acceptable product variant was found.", candidate: selected.candidate, selectedVariant: selected.selectedVariant } : { kind: "NO_ACCEPTABLE_VARIANT", message: "The matching product has no available preferred variant.", candidate, selectedVariant: null };
 }
 function decimalId(value: unknown): string | null { if (typeof value === "string" && /^\d{1,32}$/.test(value)) return value; if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value); return null; }
 function priceMinor(value: unknown): number | null { const number = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; return typeof number === "number" && Number.isSafeInteger(number) && number >= 0 ? number : null; }
@@ -222,7 +230,7 @@ class DiscoveryMesh {
     const due = descriptors.filter((source) => (this.backoff.get(source.kind)?.until ?? 0) <= Date.now() && (source.cadence !== "adaptive-sitemap" || Date.now() - this.lastSitemapAt >= (turbo ? 5_000 : 30_000))); if (due.some((source) => source.kind === "product-sitemap")) this.lastSitemapAt = Date.now();
     const allocation = new Map(due.map((source, index) => [source.kind, routes.routes[index % routes.routes.length] ?? routes.acquire()]));
     const diagnostics: DiscoveryDiagnostic[] = []; const responses: MonitorResponse[] = []; const allCandidates: ProductCandidate[] = []; const failures: unknown[] = [];
-    const tasks = due.map(async (source) => {
+    const probeSource = async (source: DiscoverySourceDescriptor) => {
       const route = allocation.get(source.kind)!; const started = Date.now();
       try {
         const candidates = await this.sourceCandidates(source, target, route, diagnostics, responses); this.backoff.delete(source.kind); allCandidates.push(...candidates); const decision = decideTarget(target, candidates);
@@ -231,7 +239,19 @@ class DiscoveryMesh {
         const key = `${decision.candidate.url}:${decision.selectedVariant.id}`; if (this.seen.has(key)) throw new Error("DUPLICATE_WINNER"); this.seen.add(key); this.sequence += 1;
         diagnostics.push({ type: "DISCOVERY_MESH_WINNER", source: source.kind, routeId: route.id, payload: { sequence: this.sequence, variantId: decision.selectedVariant.id, verifiedElapsedNs: (BigInt(Date.now()) * 1_000_000n).toString() } }); return { decision, route };
       } catch (error) { if (!/NO_VERIFIED_MATCH|DUPLICATE_WINNER/.test(error instanceof Error ? error.message : "")) { failures.push(error); const previous = this.backoff.get(source.kind)?.attempts ?? 0; const protection = error instanceof MonitorRequestError && (error.status === 403 || error.status === 429); const delay = protection ? Math.min(600_000, (error.retryAfterMs ?? 60_000) * 2 ** previous) : Math.min(300_000, 5_000 * 2 ** previous); const backoffUntil = Date.now() + delay; this.backoff.set(source.kind, { until: backoffUntil, attempts: previous + 1 }); diagnostics.push({ type: "DISCOVERY_SOURCE_UNAVAILABLE", source: source.kind, routeId: route.id, payload: { reasonCode: error instanceof MonitorRequestError ? error.code : "SOURCE_FAILED", backoffUntil } }); } throw error; }
-    });
+    };
+    // Simultaneous probes sharing a route can trip storefront protection before the
+    // reliable collection endpoint is read. Preserve the race across distinct routes,
+    // but serialize a reused route (including Direct) with collection first.
+    const tasks = routes.routes.length < due.length
+      ? [(async () => {
+        let lastError: unknown = new Error("NO_VERIFIED_MATCH");
+        for (const source of due) {
+          try { return await probeSource(source); } catch (error) { lastError = error; }
+        }
+        throw lastError;
+      })()]
+      : due.map((source) => probeSource(source));
     let winner: { decision: TargetDecision; route: MonitorRoute } | null = null; try { winner = await Promise.any(tasks); } catch { await Promise.allSettled(tasks); }
     if (!winner && failures.length === due.length && failures.length) throw failures[0];
     const response = responses.length ? combineResponses(responses, monitoring.endpoint) : { status: 200, body: null, bytes: 0, sentBytes: 0, requestCount: 0, latencyMs: 0, endpoint: monitoring.endpoint, retryAfterMs: null };
