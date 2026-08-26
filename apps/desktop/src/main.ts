@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net, protocol, safeStorage, screen, shell, type Rectangle } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,6 +38,14 @@ const sensitiveRevealLeases = new Map<string, SensitiveRevealLease>();
 
 const APP_USER_MODEL_ID = "com.copify.app";
 protocol.registerSchemesAsPrivileged([{ scheme: "copify-artifact", privileges: { secure: true, standard: true, supportFetchAPI: true } }]);
+
+// electron-vite identifies development builds as @copify/desktop, while the
+// packaged application is named copify. Preserve the established development
+// data directory on the first packaged launch instead of silently starting with
+// an empty database and browser-profile root.
+const packagedDataRoot = app.getPath("userData");
+const legacyDataRoot = join(app.getPath("appData"), "@copify", "desktop");
+if (!existsSync(join(packagedDataRoot, "copify.sqlite")) && existsSync(join(legacyDataRoot, "copify.sqlite"))) app.setPath("userData", legacyDataRoot);
 
 if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
 

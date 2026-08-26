@@ -2,7 +2,7 @@
 
 **Document:** `spec.md`  
 **Product:** Copify  
-**Status:** Living specification — implemented through v0.7.0; drop-tuned input, speed & coherence architecture planned for v0.8+
+**Status:** Living specification — implemented through v0.12.0; v0.13 hybrid CAPTCHA work is next
 **Primary platform:** Windows  
 **Future platforms:** macOS, Linux  
 **Date:** 2026-08-25

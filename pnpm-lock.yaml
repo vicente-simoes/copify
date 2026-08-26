@@ -7,6 +7,22 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@crawlee/core':
+        specifier: 3.18.1
+        version: 3.18.1
+      '@crawlee/http':
+        specifier: 3.18.1
+        version: 3.18.1
+      rebrowser-playwright:
+        specifier: 1.52.0
+        version: 1.52.0
+      undici:
+        specifier: 7.29.0
+        version: 7.29.0
+      zod:
+        specifier: ^3.24.3
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.15.3
