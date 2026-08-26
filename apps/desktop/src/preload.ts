@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  analyticsIpc, healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
-  type AnalyticsFilter, type AnalyticsResult, type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunAnnotation, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  analyticsIpc, costIpc, healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
+  type AnalyticsFilter, type AnalyticsResult, type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CostBudget, type CostQuery, type CostSummary, type CreateBrowserProfileInput, type CreateManualCostSnapshotInput, type CreateProxyProfileInput, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportMapping, type ProviderImportPreview, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type ReconciliationStatus, type Run, type RunAnnotation, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type UpsertCostBudgetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -87,6 +87,20 @@ const api = {
   usage: {
     run: (runId: string): Promise<ApiResult<RunNetworkUsage[]>> => ipcRenderer.invoke(usageIpc.run, runId),
     totals: (): Promise<ApiResult<RunNetworkUsage[]>> => ipcRenderer.invoke(usageIpc.totals),
+  },
+  costs: {
+    query:(input:CostQuery):Promise<ApiResult<CostSummary>>=>ipcRenderer.invoke(costIpc.query,input),
+    manualSnapshot:(input:CreateManualCostSnapshotInput):Promise<ApiResult<boolean>>=>ipcRenderer.invoke(costIpc.manualSnapshot,input),
+    removeManualSnapshot:(id:string):Promise<ApiResult<boolean>>=>ipcRenderer.invoke(costIpc.removeManualSnapshot,id),
+    importOpen:(provider:string):Promise<ApiResult<ProviderImportPreview|null>>=>ipcRenderer.invoke(costIpc.importOpen,{provider}),
+    importPreview:(token:string,mapping?:ProviderImportMapping):Promise<ApiResult<ProviderImportPreview>>=>ipcRenderer.invoke(costIpc.importPreview,{token,mapping}),
+    importCommit:(token:string,mapping:ProviderImportMapping):Promise<ApiResult<ProviderImportCommitResult>>=>ipcRenderer.invoke(costIpc.importCommit,{token,mapping}),
+    importCancel:(token:string):Promise<ApiResult<boolean>>=>ipcRenderer.invoke(costIpc.importCancel,token),
+    budgets:():Promise<ApiResult<CostBudget[]>>=>ipcRenderer.invoke(costIpc.budgets),
+    upsertBudget:(input:UpsertCostBudgetInput):Promise<ApiResult<CostBudget>>=>ipcRenderer.invoke(costIpc.upsertBudget,input),
+    removeBudget:(id:string):Promise<ApiResult<boolean>>=>ipcRenderer.invoke(costIpc.removeBudget,id),
+    reconciliation:(provider?:string):Promise<ApiResult<ReconciliationStatus>>=>ipcRenderer.invoke(costIpc.reconciliation,provider),
+    onChanged:(listener:()=>void):(()=>void)=>{const callback=()=>listener();ipcRenderer.on(costIpc.changed,callback);return()=>ipcRenderer.removeListener(costIpc.changed,callback);},
   },
   analytics: {
     query: (input: AnalyticsFilter): Promise<ApiResult<AnalyticsResult>> => ipcRenderer.invoke(analyticsIpc.query, input),

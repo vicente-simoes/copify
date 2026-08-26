@@ -7,6 +7,7 @@ const candidate: ProductCandidate = { name: "Leather Jacket", url: "https://eu.s
 const policy = (over: Partial<MonitorPolicy> = {}): MonitorPolicy => ({ ...DEFAULT_MONITOR_BEHAVIOR, access: "PUBLIC", recommendedPollIntervalMs: 1_000, endpoint: "https://eu.supreme.com/collections/all", ...over });
 
 describe("HTTP monitor domain", () => {
+  it("keeps provider budget blocks separate from health and never invents a direct fallback",()=>{const pool=new MonitorConnectionPool([{kind:"PROXY",id:"a",proxyType:"residential-rotating",protocol:"http",host:"a",port:1},{kind:"PROXY",id:"b",proxyType:"residential-sticky",protocol:"http",host:"b",port:2}]);pool.setBudgetBlocked(["a"]);expect(pool.acquire().id).toBe("b");pool.setBudgetBlocked(["a","b"]);expect(()=>pool.acquire()).toThrow("provider budget");expect(pool.allBudgetBlocked()).toBe(true);pool.setBudgetBlocked([]);expect(pool.healthyCount()).toBe(2);});
   it("parses decimal variant IDs and selects the configured priority", () => {
     const parsed = parseShopifyProducts({ products: [{ title: "Leather Jacket", handle: "leather-jacket", image: { src: "https://cdn.shopify.com/a.jpg?v=1" }, variants: [{ id: 123456, option1: "M", option2: "Black", available: true, price: "19900" }] }] }, target);
     expect(parsed[0]).toMatchObject({ name: "Leather Jacket", priceMinor: 19_900, variants: [{ id: "123456", color: "Black", size: "M", available: true }] });

@@ -5,8 +5,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, analyticsFilterSchema, analyticsIpc, appearanceSettingsSchema, chromeColorsSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunAnnotationSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
-  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, analyticsFilterSchema, analyticsIpc, appearanceSettingsSchema, chromeColorsSchema, commitProviderImportSchema, costIpc, costQuerySchema, createBrowserProfileSchema, createManualCostSnapshotSchema, createProxyProfileSchema, createRunAnnotationSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, openProviderImportSchema, previewProviderImportSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, upsertCostBudgetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type BudgetStatus, type CartStatus, type CostBudget, type CostSummary, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportPreview, type ReconciliationStatus, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -14,12 +14,15 @@ import { benchmarkRoute } from "@copify/runner";
 import { ClipboardCoordinator } from "./clipboard-coordinator";
 import { canStartTargetMonitor } from "./run-monitor";
 import { formatProxyUrl } from "./proxy-url";
+import { ProviderImportCoordinator } from "./cost-import";
 
 let mainWindow: BrowserWindow | undefined;
 let profiles: ProfileRepository;
 let orchestrator: SessionOrchestrator;
 let clipboardCoordinator: ClipboardCoordinator;
+const providerImports = new ProviderImportCoordinator();
 let benchmarkRunning = false;
+let budgetEvaluationTimer: NodeJS.Timeout | undefined;
 let runsRoot = "";
 type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; monitorRouteProfiles: Map<string, ProxyProfile> };
 let activeRun: ActiveRun | undefined;
@@ -47,6 +50,15 @@ function emitShippingChanged(): void { void profiles.listShippingProfiles().then
 function emitHealthChanged(): void { mainWindow?.webContents.send(healthIpc.changed); }
 function emitMonitorChanged(): void { mainWindow?.webContents.send(monitorIpc.changed, monitorStatus); }
 function emitWarmingChanged(): void { void profiles.listProfileWarmStates().then((states) => mainWindow?.webContents.send(warmingIpc.changed, states)); }
+function emitCostsChanged(): void { mainWindow?.webContents.send(costIpc.changed); }
+async function evaluateCostBudgets():Promise<BudgetStatus[]> {
+  const statuses=await profiles.getBudgetStatuses();
+  for(const status of statuses){ for(const threshold of status.budget.thresholds.filter((value)=>status.percent>=value)){ if(await profiles.markBudgetThreshold(status.budget.id,status.periodStartAt,threshold)){ if(Notification.isSupported())new Notification({title:`${status.budget.provider} budget ${threshold}%`,body:`${status.budget.cadence.toLowerCase()} proxy spend reached ${status.percent.toFixed(1)}%.`}).show(); } } }
+  const cappedProviders=new Set(statuses.filter((status)=>status.capped).map((status)=>status.budget.provider)); const active=activeRun;
+  if(active?.monitor){const routeIds=[...active.monitorRouteProfiles.entries()].filter(([,proxy])=>cappedProviders.has(proxy.provider)).map(([id])=>id);const resetAt=statuses.filter((status)=>status.capped&&cappedProviders.has(status.budget.provider)).reduce<number|null>((latest,status)=>Math.max(latest??0,status.periodEndAt),null);trySendMonitorCommand(active.monitor,{type:"SET_BUDGET_BLOCKS",version:IPC_VERSION,routeIds,resetAt});}
+  if(budgetEvaluationTimer)clearTimeout(budgetEvaluationTimer); const next=statuses.reduce<number|null>((earliest,status)=>Math.min(earliest??Number.MAX_SAFE_INTEGER,status.periodEndAt),null); if(next) {budgetEvaluationTimer=setTimeout(()=>{void evaluateCostBudgets().then(()=>emitCostsChanged());},Math.max(1_000,next-Date.now()+50));budgetEvaluationTimer.unref();}
+  return statuses;
+}
 
 async function createWindow(): Promise<void> {
   // The frame is painted before the renderer exists, so the theme it should
@@ -200,6 +212,17 @@ function registerIpc(): void {
   ipcMain.handle(monitorIpc.setTurbo, (_event, enabled: boolean): ApiResult<MonitorRuntimeStatus> => result(() => { if (!activeRun?.monitor || !trySendMonitorCommand(activeRun.monitor, { type: "SET_MONITOR_TURBO", version: IPC_VERSION, enabled: Boolean(enabled) })) throw new Error("There is no active target monitor."); return monitorStatus; }));
   ipcMain.handle(usageIpc.run, (_event, runId: string): Promise<ApiResult<RunNetworkUsage[]>> => resultAsync(() => profiles.listRunNetworkUsage(runId)));
   ipcMain.handle(usageIpc.totals, (): Promise<ApiResult<RunNetworkUsage[]>> => resultAsync(() => profiles.listNetworkUsage()));
+  ipcMain.handle(costIpc.query, (_event,input:unknown):Promise<ApiResult<CostSummary>>=>resultAsync(()=>profiles.queryCosts(costQuerySchema.parse(input))));
+  ipcMain.handle(costIpc.manualSnapshot,(_event,input:unknown):Promise<ApiResult<boolean>>=>resultAsync(async()=>{await profiles.createManualCostSnapshot(createManualCostSnapshotSchema.parse(input));await evaluateCostBudgets();emitCostsChanged();return true;}));
+  ipcMain.handle(costIpc.removeManualSnapshot,(_event,id:string):Promise<ApiResult<boolean>>=>resultAsync(async()=>{const removed=await profiles.removeManualCostSnapshot(id);await evaluateCostBudgets();emitCostsChanged();return removed;}));
+  ipcMain.handle(costIpc.importOpen,(_event,input:unknown):Promise<ApiResult<ProviderImportPreview|null>>=>resultAsync(async()=>{const {provider}=openProviderImportSchema.parse(input);const selected=await dialog.showOpenDialog(mainWindow!,{title:"Import provider usage CSV",properties:["openFile"],filters:[{name:"CSV",extensions:["csv"]}]});if(selected.canceled||!selected.filePaths[0])return null;return providerImports.open(provider,selected.filePaths[0]);}));
+  ipcMain.handle(costIpc.importPreview,(_event,input:unknown):ApiResult<ProviderImportPreview>=>result(()=>{const value=previewProviderImportSchema.parse(input);return providerImports.preview(value.token,value.mapping);}));
+  ipcMain.handle(costIpc.importCommit,(_event,input:unknown):Promise<ApiResult<ProviderImportCommitResult>>=>resultAsync(async()=>{const value=commitProviderImportSchema.parse(input);const normalized=providerImports.commit(value.token,value.mapping);const committed=await profiles.commitProviderImport(normalized.provider,normalized.digest,normalized.records,normalized.rejected);await evaluateCostBudgets();emitCostsChanged();return committed;}));
+  ipcMain.handle(costIpc.importCancel,(_event,token:string):ApiResult<boolean>=>result(()=>providerImports.cancel(token)));
+  ipcMain.handle(costIpc.budgets,():Promise<ApiResult<CostBudget[]>>=>resultAsync(()=>profiles.listCostBudgets()));
+  ipcMain.handle(costIpc.upsertBudget,(_event,input:unknown):Promise<ApiResult<CostBudget>>=>resultAsync(async()=>{const budget=await profiles.upsertCostBudget(upsertCostBudgetSchema.parse(input));await evaluateCostBudgets();emitCostsChanged();return budget;}));
+  ipcMain.handle(costIpc.removeBudget,(_event,id:string):Promise<ApiResult<boolean>>=>resultAsync(async()=>{const removed=await profiles.removeCostBudget(id);await evaluateCostBudgets();emitCostsChanged();return removed;}));
+  ipcMain.handle(costIpc.reconciliation,(_event,provider?:string):Promise<ApiResult<ReconciliationStatus>>=>resultAsync(async()=>({...(await profiles.listReconciliation(provider)),connectors:[{provider:"dataimpulse",available:false,unavailableReason:"Normal-plan read-only API endpoint has not been verified."}]})));
 
   ipcMain.handle(sessionIpc.list, (): ApiResult<SessionSnapshot[]> => result(() => orchestrator.list()));
   ipcMain.handle(sessionIpc.open, (_event, id: string): Promise<ApiResult<SessionSnapshot>> => resultAsync(() => openSession(id)));
@@ -459,7 +482,7 @@ async function startMonitor(runId: string, target: TargetSnapshot): Promise<Chil
     if (intentionallyStoppedMonitors.delete(worker)) return;
     if (activeRun?.detail.run.id === runId && !activeRun.ending) void appendMonitorEvent(runId, "TARGET_MONITOR_FAILED", null, "The shared monitor exited unexpectedly.");
   });
-  if (!trySendMonitorCommand(worker, { type: "START_MONITOR", version: IPC_VERSION, runId, target, policy, routes })) throw new Error("The target monitor could not be started."); return worker;
+  if (!trySendMonitorCommand(worker, { type: "START_MONITOR", version: IPC_VERSION, runId, target, policy, routes })) throw new Error("The target monitor could not be started."); setTimeout(()=>{void evaluateCostBudgets();},0); return worker;
 }
 function stopMonitor(active: ActiveRun): void {
   const worker = active.monitor;
@@ -502,7 +525,7 @@ async function onMonitorEvent(value: unknown): Promise<void> {
   if (event.type === "MONITOR_RUNTIME") { monitorStatus = event.status; emitMonitorChanged(); return; }
   if (event.type === "MONITOR_USAGE") {
     if (!active || event.runId !== active.detail.run.id) return; const proxy = active.monitorRouteProfiles.get(event.routeId); const costRate = proxy?.costPerGbMicrosUsd ?? null;
-    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `monitor:${event.discoverySource ?? "all"}:${event.routeId}`, source: "MONITOR", runSessionId: null, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (event.routeId === "direct" ? "Direct" : null), discoverySource: event.discoverySource, ...event.usage, costPerGbMicrosUsd: costRate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, costRate), updatedAt: Date.now() }); emitMonitorChanged(); return;
+    await profiles.recordUsageSnapshot({ id: randomUUID(), runId: event.runId, usageKey: `monitor:${event.discoverySource ?? "all"}:${event.routeId}`, source: "MONITOR", runSessionId: null, browserProfileId:null, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyProvider:proxy?.provider??null, proxyName: proxy?.name ?? (event.routeId === "direct" ? "Direct" : null), discoverySource: event.discoverySource, ...event.usage, costPerGbMicrosUsd: costRate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, costRate), updatedAt: Date.now() }); await evaluateCostBudgets(); emitCostsChanged(); emitMonitorChanged(); return;
   }
   if (event.type === "MONITOR_HEALTH") {
     if (!active || event.runId !== active.detail.run.id) return;
@@ -587,7 +610,7 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
   }
   if (event.type === "NETWORK_USAGE") {
     const active = activeRun; if (!active || event.runId !== active.detail.run.id) return; const session = active.profileSessions.get(event.profileId); if (!session) return; const profile = await profiles.get(event.profileId); const proxy = profile?.proxyProfileId ? await profiles.getProxy(profile.proxyProfileId) : undefined; const rate = proxy?.costPerGbMicrosUsd ?? null;
-    await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), discoverySource: null, ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); emitMonitorChanged(); return;
+    await profiles.recordUsageSnapshot({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, browserProfileId:event.profileId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyProvider:proxy?.provider??null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), discoverySource: null, ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); await evaluateCostBudgets();emitCostsChanged(); emitMonitorChanged(); return;
   }
   if (event.type === "PAYMENT_HANDOFF") { await handlePaymentHandoff(event.profileId, event.phase); return; }
   const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
@@ -659,7 +682,7 @@ app.whenReady().then(async () => {
     grant: (profileId, requestId) => orchestrator.grantClipboardLease(profileId, requestId),
     deny: (profileId, requestId, reason) => orchestrator.denyClipboardLease(profileId, requestId, reason),
   });
-  orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow();
+  orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow(); await evaluateCostBudgets();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
 app.on("before-quit", (event) => { flushPlacement(); if (!orchestrator) return; event.preventDefault(); clipboardCoordinator?.cancelAll(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });

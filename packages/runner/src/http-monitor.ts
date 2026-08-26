@@ -69,11 +69,14 @@ export function effectiveRouteCooldown(policy: MonitorPolicy, retryAfterMs: numb
 export function isProtectionHtml(body: string): boolean { return /<title[^>]*>\s*(?:access denied|just a moment|security check)|you do not have permission to access|your request was blocked|verify (?:that )?you are human/i.test(body); }
 
 export class MonitorConnectionPool {
-  private index = 0; private readonly unhealthyUntil = new Map<string, number>(); readonly routes: MonitorRoute[];
+  private index = 0; private readonly unhealthyUntil = new Map<string, number>(); private readonly budgetBlocked = new Set<string>(); readonly routes: MonitorRoute[];
   constructor(routes: MonitorRoute[]) { this.routes = routes.length ? routes : [{ kind: "DIRECT", id: "direct" }]; }
-  acquire(now = Date.now()): MonitorRoute { const healthy = this.routes.filter((route) => (this.unhealthyUntil.get(route.id) ?? 0) <= now); if (!healthy.length) throw new MonitorRequestError("Every configured monitor route is temporarily unhealthy.", "NO_HEALTHY_ROUTES"); const route = healthy[this.index % healthy.length]; this.index = (this.index + 1) % Number.MAX_SAFE_INTEGER; return route; }
+  available(now = Date.now()): MonitorRoute[] { return this.routes.filter((route) => !this.budgetBlocked.has(route.id) && (this.unhealthyUntil.get(route.id) ?? 0) <= now); }
+  acquire(now = Date.now()): MonitorRoute { const healthy = this.available(now); if (!healthy.length) throw new MonitorRequestError(this.budgetBlocked.size ? "Every configured monitor route is blocked by a provider budget." : "Every configured monitor route is temporarily unhealthy.", this.budgetBlocked.size ? "BUDGET_CAPPED" : "NO_HEALTHY_ROUTES"); const route = healthy[this.index % healthy.length]; this.index = (this.index + 1) % Number.MAX_SAFE_INTEGER; return route; }
+  setBudgetBlocked(routeIds:string[]):void { this.budgetBlocked.clear(); for(const id of routeIds)this.budgetBlocked.add(id); }
+  allBudgetBlocked():boolean { return this.routes.length>0&&this.routes.every((route)=>this.budgetBlocked.has(route.id)); }
   markUnhealthy(route: MonitorRoute, until: number): void { this.unhealthyUntil.set(route.id, until); }
-  healthyCount(now = Date.now()): number { return this.routes.filter((route) => (this.unhealthyUntil.get(route.id) ?? 0) <= now).length; }
+  healthyCount(now = Date.now()): number { return this.available(now).length; }
   nextHealthyAt(): number | null { const values = [...this.unhealthyUntil.values()].filter((value) => value > Date.now()); return values.length ? Math.min(...values) : null; }
 }
 class SizeLimit extends Transform { private bytes = 0; _transform(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void): void { this.bytes += chunk.length; callback(this.bytes > MAX_MONITOR_BODY_BYTES ? new MonitorRequestError("Monitor response exceeded the size limit.", "MONITOR_RESPONSE_TOO_LARGE") : null, chunk); } }
@@ -228,7 +231,8 @@ class DiscoveryMesh {
     const missing = validateDiscoveryHandlers(monitoring.sources, monitoring.hydrationHandlerId); if (missing.length) throw new MonitorRequestError(`Discovery handlers are unavailable: ${missing.join(", ")}`, "MONITOR_ENDPOINT_UNSUPPORTED");
     const descriptors = target.directProductUrl ? monitoring.sources.filter((source) => source.kind === "direct-product") : monitoring.sources.filter((source) => source.kind !== "direct-product");
     const due = descriptors.filter((source) => (this.backoff.get(source.kind)?.until ?? 0) <= Date.now() && (source.cadence !== "adaptive-sitemap" || Date.now() - this.lastSitemapAt >= (turbo ? 5_000 : 30_000))); if (due.some((source) => source.kind === "product-sitemap")) this.lastSitemapAt = Date.now();
-    const allocation = new Map(due.map((source, index) => [source.kind, routes.routes[index % routes.routes.length] ?? routes.acquire()]));
+    const availableRoutes=routes.available(); if(!availableRoutes.length)routes.acquire();
+    const allocation = new Map(due.map((source, index) => [source.kind, availableRoutes[index % availableRoutes.length]!]));
     const diagnostics: DiscoveryDiagnostic[] = []; const responses: MonitorResponse[] = []; const allCandidates: ProductCandidate[] = []; const failures: unknown[] = [];
     const probeSource = async (source: DiscoverySourceDescriptor) => {
       const route = allocation.get(source.kind)!; const started = Date.now();

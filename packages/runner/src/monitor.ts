@@ -7,9 +7,10 @@ import { CrawleeJsonTransport, HttpStoreMonitor, MonitorConnectionPool, MonitorP
 
 let timer: NodeJS.Timeout | undefined;
 let turboTimer: NodeJS.Timeout | undefined;
+let budgetTimer: NodeJS.Timeout | undefined;
 let running = false;
 let stopping = false;
-let pausedState: Extract<MonitorRuntimeState, "SERVICE_COOLDOWN" | "POOL_EXHAUSTED"> | null = null;
+let pausedState: Extract<MonitorRuntimeState, "SERVICE_COOLDOWN" | "POOL_EXHAUSTED" | "BUDGET_CAPPED"> | null = null;
 let activeRunId: string | null = null;
 let activeTarget: TargetSnapshot | null = null;
 let activePolicy: MonitorPolicy | null = null;
@@ -50,6 +51,7 @@ function failureCode(error: MonitorRequestError | null, reason: unknown): Monito
   if (error?.code === "STOREFRONT_PROTECTION") return "STOREFRONT_PROTECTION";
   if (error?.code === "STOREFRONT_SERVICE_UNAVAILABLE" || error?.status === 503) return "STOREFRONT_SERVICE_UNAVAILABLE";
   if (error?.code === "NO_HEALTHY_ROUTES") return "NO_HEALTHY_ROUTES";
+  if (error?.code === "BUDGET_CAPPED") return "BUDGET_CAPPED";
   if (error?.code === "INVALID_MONITOR_POLICY") return "INVALID_MONITOR_POLICY";
   if (error?.code === "MONITOR_ENDPOINT_UNSUPPORTED") return "MONITOR_ENDPOINT_UNSUPPORTED";
   if (error?.code === "MONITOR_RESPONSE_TOO_LARGE") return "MONITOR_RESPONSE_TOO_LARGE";
@@ -118,13 +120,18 @@ function setTurbo(enabled: boolean): void {
   if (enabled && fastEndsAt) turboTimer = setTimeout(() => setTurbo(false), Math.max(0, fastEndsAt - Date.now()));
   if (!pausedState) schedule(activeRunId, activeTarget, activePolicy, pool, enabled ? 0 : activePolicy.pollIntervalMs); else emitRuntime();
 }
+function setBudgetBlocks(routeIds:string[],resetAt:number|null):void {
+  if(!pool)return; if(budgetTimer)clearTimeout(budgetTimer); budgetTimer=undefined; pool.setBudgetBlocked(routeIds);
+  if(pool.allBudgetBlocked()){clearPollTimer();pausedState="BUDGET_CAPPED";nextPollAt=resetAt;lastErrorCode="BUDGET_CAPPED";emitRuntime();if(resetAt)budgetTimer=setTimeout(()=>setBudgetBlocks([],null),Math.max(0,resetAt-Date.now()));return;}
+  if(pausedState==="BUDGET_CAPPED"){pausedState=null;lastErrorCode=null;if(activeRunId&&activeTarget&&activePolicy&&!stopping)schedule(activeRunId,activeTarget,activePolicy,pool,0);}else emitRuntime();
+}
 function emitHealth(runId: string | null, policy: MonitorPolicy, routes: MonitorConnectionPool): void {
   const elapsedMinutes = Math.max((Date.now() - startedAt) / 60_000, 1 / 60); const endpoint = new URL(policy.endpoint); endpoint.search = "";
   const health: Omit<BrowserHealthSnapshot, "id" | "subjectKind" | "subjectId" | "runId"> = { capturedAt: Date.now(), navigatorWebdriver: null, browserVersion: null, driverKind: null, stealthStatus: null, profileAgeMs: null, cookieCount: null, requestCount, requestsPerMinute: requestCount / elapsedMinutes, navigationCount: 0, navigationsPerMinute: 0, atcAttempts: 0, forbiddenCount, rateLimitedCount, challengeCount, checkoutFailures: 0, averagePageLoadMs: lastLatency, monitorTransport: "HTTP", monitorEndpoint: endpoint.toString(), configuredRouteCount: routes.routes.length, healthyRouteCount: routes.healthyCount(), pollIntervalMs: activeInterval(policy), lastHttpStatus: lastStatus, lastResponseLatencyMs: lastLatency, bytesReceived, nextPollAt, circuit: null };
   send({ type: "MONITOR_HEALTH", version: IPC_VERSION, runId, health });
 }
 function stop(): void {
-  stopping = true; clearPollTimer(); if (turboTimer) clearTimeout(turboTimer); turboTimer = undefined; turbo = false; fastEndsAt = null;
+  stopping = true; clearPollTimer(); if (turboTimer) clearTimeout(turboTimer); if(budgetTimer)clearTimeout(budgetTimer); turboTimer = undefined; budgetTimer=undefined; turbo = false; fastEndsAt = null;
   if (activePolicy && pool) emitHealth(activeRunId, activePolicy, pool); const runId = activeRunId; activeRunId = null; activeTarget = null; activePolicy = null; pool = null; pausedState = null; emitRuntime(); send({ type: "MONITOR_STOPPED", version: IPC_VERSION, runId });
 }
 process.on("message", async (value: unknown) => {
@@ -132,6 +139,7 @@ process.on("message", async (value: unknown) => {
   if (command.type === "TEST_TARGET") { startedAt = Date.now(); const routes = new MonitorConnectionPool(command.routes); const result = await check(command.target, command.policy, routes); emitHealth(null, command.policy, routes); send({ type: "MONITOR_TEST_RESULT", version: IPC_VERSION, check: result.check }); return; }
   if (command.type === "START_MONITOR") { if (timer || running || activeRunId) return; assertMonitorPolicy(command.target, command.policy); activeRunId = command.runId; activeTarget = command.target; activePolicy = command.policy; pool = new MonitorConnectionPool(command.routes); stopping = false; pausedState = null; turbo = false; fastEndsAt = null; startedAt = Date.now(); startedMono = process.hrtime.bigint(); requestCount = forbiddenCount = rateLimitedCount = challengeCount = bytesReceived = bytesSent = 0; routeUsage.clear(); send({ type: "MONITOR_EVENT", version: IPC_VERSION, runId: command.runId, eventType: "TARGET_MONITOR_STARTED", check: null }); emitRuntime(); schedule(command.runId, command.target, command.policy, pool, command.policy.immediateFirstPoll ? 0 : command.policy.pollIntervalMs); return; }
   if (command.type === "SET_MONITOR_TURBO") { setTurbo(command.enabled); return; }
+  if(command.type==="SET_BUDGET_BLOCKS"){setBudgetBlocks(command.routeIds,command.resetAt);return;}
   if (command.type === "PAUSE_MONITOR") { enterCooldown("SERVICE_COOLDOWN", Math.max(0, command.until - Date.now())); return; }
   if (command.type === "RESUME_MONITOR") { if (!activeRunId || !activeTarget || !activePolicy || !pool) return; pausedState = null; schedule(activeRunId, activeTarget, activePolicy, pool, 0); return; }
   if (command.type === "STOP_MONITOR") stop();

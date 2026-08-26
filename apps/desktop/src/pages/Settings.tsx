@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
-import { defaultMonitorSettings, resolveMonitorBehavior, type BrowserDriverInput, type BrowserProfile, type MonitorBehavior, type MonitorSettings, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage, type SessionSnapshot, type Store } from "@copify/shared";
+import { defaultMonitorSettings, resolveMonitorBehavior, type BrowserDriverInput, type BrowserProfile, type MonitorBehavior, type MonitorSettings, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store } from "@copify/shared";
 import type { ProxyDraft } from "../types";
 import { Field, Benchmark } from "../ui/primitives";
 import { Proxies } from "./Proxies";
 import { BrowserDrivers } from "./LaunchModes";
 import { Appearance } from "./Appearance";
 import { StoreMark, hasStoreMark } from "../ui/StoreMark";
+import { Costs } from "./Costs";
 
-type Tab = "routes" | "monitor" | "stores" | "advanced" | "appearance" | "about";
+type Tab = "routes" | "monitor" | "costs" | "stores" | "advanced" | "appearance" | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "routes", label: "Routes" },
   { id: "monitor", label: "Monitor" },
+  { id: "costs", label: "Costs & budgets" },
   { id: "stores", label: "Stores" },
   { id: "advanced", label: "Advanced" },
   { id: "appearance", label: "Appearance" },
@@ -33,9 +35,6 @@ function BehaviorEditor({ value, onChange, recommended }: { value: MonitorBehavi
     {recommended && value.pollIntervalMs < recommended ? <p className="field-note warning">Below the store recommendation of {recommended.toLocaleString()} ms. Copify will allow this setting.</p> : null}
   </div>;
 }
-
-function usageBytes(value: number): string { return `${(value / 1_000_000).toFixed(2)} MB`; }
-function usageCost(value: number | null): string { return value === null ? "—" : `$${(value / 1_000_000).toFixed(4)}`; }
 
 export function Settings(props: {
   proxies: ProxyProfile[];
@@ -69,8 +68,7 @@ export function Settings(props: {
   const [monitorSettings, setMonitorSettings] = useState<MonitorSettings>(defaultMonitorSettings());
   const [monitorNotice, setMonitorNotice] = useState<string>("");
   const [monitorStoreId, setMonitorStoreId] = useState("supreme-eu");
-  const [usage, setUsage] = useState<RunNetworkUsage[]>([]);
-  useEffect(() => { void window.copify.settings.getMonitor().then((result) => { if (result.ok) setMonitorSettings(result.value); }); void window.copify.usage.totals().then((result) => { if (result.ok) setUsage(result.value); }); }, []);
+  useEffect(() => { void window.copify.settings.getMonitor().then((result) => { if (result.ok) setMonitorSettings(result.value); }); }, []);
   const saveMonitor = async () => { const result = await window.copify.settings.updateMonitor(monitorSettings); setMonitorNotice(result.ok ? "Monitor settings saved." : result.error); if (result.ok) setMonitorSettings(result.value); };
 
   return (
@@ -136,8 +134,6 @@ export function Settings(props: {
       {tab === "monitor" && (() => {
         const manifestStore = props.stores.find((store) => store.id === monitorStoreId && store.monitoring);
         const storeBehavior = resolveMonitorBehavior(monitorSettings, monitorStoreId);
-        const grouped = new Map<string, { label: string; store: string; bytes: number; requests: number; cost: number | null }>();
-        for (const row of usage) { const key = `${row.source}:${row.proxyProfileId ?? "direct"}:${row.storeId ?? "none"}`; const current = grouped.get(key) ?? { label: `${row.source.toLowerCase()} · ${row.proxyName ?? "Direct"}`, store: row.storeId ?? "—", bytes: 0, requests: 0, cost: row.estimatedCostMicrosUsd === null ? null : 0 }; current.bytes += row.receivedBytes + row.sentBytes; current.requests += row.requestCount; if (current.cost !== null) current.cost += row.estimatedCostMicrosUsd ?? 0; grouped.set(key, current); }
         return <>
           <section className="panel">
             <div className="section-title"><div><h2>Monitor behavior</h2><p className="muted">Settings are snapshotted when a monitor starts.</p></div><button disabled={props.busy} onClick={() => void saveMonitor()}>Save</button></div>
@@ -156,13 +152,11 @@ export function Settings(props: {
             <BehaviorEditor value={storeBehavior} recommended={manifestStore?.monitoring?.recommendedPollIntervalMs} onChange={(behavior) => setMonitorSettings({ ...monitorSettings, stores: { ...monitorSettings.stores, [monitorStoreId]: behavior } })} />
             <div className="rows"><div className="row"><span className="row-main"><span className="row-name">Effective policy</span><span className="row-meta">{storeBehavior.pollIntervalMs} ms standby / {storeBehavior.fastPollIntervalMs} ms Turbo · route cooldown {Math.round(storeBehavior.routeUnhealthyMs / 60_000)}m · 503 {Math.round(storeBehavior.serviceCooldownMs / 1_000)}s · {storeBehavior.rotateOnProtection ? "rotate on protection" : "monitor cooldown on protection"}</span></span></div></div>
           </section>
-          <section className="panel">
-            <div className="section-title"><div><h2>Recorded usage</h2><p className="muted">Measured application bytes; proxy tunnel overhead is not observable.</p></div></div>
-            <div className="rows">{[...grouped.entries()].map(([key, row]) => <div className="row" key={key}><span className="row-main"><span className="row-name">{row.label}</span><span className="row-meta">{row.store} · {row.requests.toLocaleString()} requests</span></span><span className="row-cell mono">{usageBytes(row.bytes)}</span><span className="row-cell mono">{usageCost(row.cost)}</span></div>)}{grouped.size === 0 ? <div className="empty">Usage appears after a monitored run.</div> : null}</div>
-          </section>
           {monitorNotice && <p className="field-note">{monitorNotice}</p>}
         </>;
       })()}
+
+      {tab === "costs" && <Costs proxies={props.proxies} />}
 
       {tab === "stores" && (
         <section className="panel">

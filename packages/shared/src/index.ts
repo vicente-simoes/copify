@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { STORE_GENERAL, discoverySourceDescriptorSchema, discoverySourceSchema, storeCurrencySchema } from "./stores";
+import { estimateCostMicrosUsd } from "./costs";
 
 export * from "./stores";
+export * from "./costs";
 
-export const IPC_VERSION = 17 as const;
-export const SCHEMA_VERSION = 16 as const;
+export const IPC_VERSION = 18 as const;
+export const SCHEMA_VERSION = 17 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -35,7 +37,7 @@ export const productCandidateSchema = z.object({ name: z.string().min(1).max(300
 export type ProductCandidate = z.infer<typeof productCandidateSchema>;
 export const targetDecisionSchema = z.object({ kind: z.enum(["NO_MATCH", "MATCHED", "VARIANT_SELECTED", "PRICE_LIMIT_EXCEEDED", "CURRENCY_MISMATCH", "NO_ACCEPTABLE_VARIANT", "ERROR"]), message: z.string().max(500), candidate: productCandidateSchema.nullable(), selectedVariant: productVariantSchema.nullable() });
 export type TargetDecision = z.infer<typeof targetDecisionSchema>;
-export const monitorFailureCodeSchema = z.enum(["PROXY_TRANSPORT_FAILED", "PROXY_AUTH_FAILED", "STOREFRONT_PROTECTION", "STOREFRONT_SERVICE_UNAVAILABLE", "NO_HEALTHY_ROUTES", "MONITOR_ENDPOINT_UNSUPPORTED", "INVALID_MONITOR_POLICY", "MONITOR_RESPONSE_TOO_LARGE", "MONITOR_CONNECTION_FAILED", "UNKNOWN"]);
+export const monitorFailureCodeSchema = z.enum(["PROXY_TRANSPORT_FAILED", "PROXY_AUTH_FAILED", "STOREFRONT_PROTECTION", "STOREFRONT_SERVICE_UNAVAILABLE", "NO_HEALTHY_ROUTES", "BUDGET_CAPPED", "MONITOR_ENDPOINT_UNSUPPORTED", "INVALID_MONITOR_POLICY", "MONITOR_RESPONSE_TOO_LARGE", "MONITOR_CONNECTION_FAILED", "UNKNOWN"]);
 export type MonitorFailureCode = z.infer<typeof monitorFailureCodeSchema>;
 export const monitorRouteActionSchema = z.enum(["NONE", "ROTATING_GATEWAY_RETAINED", "ROUTE_COOLED", "ROTATED", "MONITOR_COOLDOWN", "POOL_EXHAUSTED"]);
 export type MonitorRouteAction = z.infer<typeof monitorRouteActionSchema>;
@@ -254,7 +256,7 @@ export const monitorPolicySchema = monitorBehaviorSchema.extend({
   access: z.enum(["PUBLIC", "AUTHORIZED", "LOCAL"]), endpoint: z.string().url(), recommendedPollIntervalMs: z.number().int().min(200)
 });
 export type MonitorPolicy = z.infer<typeof monitorPolicySchema>;
-export const monitorRuntimeStateSchema = z.enum(["STANDBY", "TURBO", "SERVICE_COOLDOWN", "POOL_EXHAUSTED", "STOPPED"]);
+export const monitorRuntimeStateSchema = z.enum(["STANDBY", "TURBO", "SERVICE_COOLDOWN", "POOL_EXHAUSTED", "BUDGET_CAPPED", "STOPPED"]);
 export type MonitorRuntimeState = z.infer<typeof monitorRuntimeStateSchema>;
 export const discoverySourceHealthSchema = z.object({
   source: discoverySourceSchema, routeId: z.string().min(1).max(120),
@@ -352,8 +354,7 @@ export type RunNetworkUsage = z.infer<typeof runNetworkUsageSchema>;
 export const networkUsageTotalsSchema = networkUsageCounterSchema.extend({ estimatedCostMicrosUsd: z.number().int().nonnegative().nullable() });
 export type NetworkUsageTotals = z.infer<typeof networkUsageTotalsSchema>;
 export function estimateProxyCostMicrosUsd(receivedBytes: number, sentBytes: number, costPerGbMicrosUsd: number | null): number | null {
-  if (costPerGbMicrosUsd === null) return null;
-  return Math.round(((receivedBytes + sentBytes) * costPerGbMicrosUsd) / 1_000_000_000);
+  return estimateCostMicrosUsd(receivedBytes, sentBytes, costPerGbMicrosUsd);
 }
 export const runnerShippingSchema = shippingDetailsSchema;
 export type RunnerShipping = z.infer<typeof runnerShippingSchema>;
@@ -478,6 +479,7 @@ export const monitorCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("START_MONITOR"), version: z.literal(IPC_VERSION), runId: idSchema, target: targetSnapshotSchema, policy: monitorPolicySchema, routes: z.array(monitorRouteSchema).max(20) }),
   z.object({ type: z.literal("TEST_TARGET"), version: z.literal(IPC_VERSION), target: targetSnapshotSchema, policy: monitorPolicySchema, routes: z.array(monitorRouteSchema).max(20) }),
   z.object({ type: z.literal("SET_MONITOR_TURBO"), version: z.literal(IPC_VERSION), enabled: z.boolean() }),
+  z.object({ type: z.literal("SET_BUDGET_BLOCKS"), version: z.literal(IPC_VERSION), routeIds: z.array(z.string().min(1).max(120)).max(20), resetAt: timestampSchema.nullable() }),
   z.object({ type: z.literal("PAUSE_MONITOR"), version: z.literal(IPC_VERSION), until: timestampSchema }),
   z.object({ type: z.literal("RESUME_MONITOR"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("STOP_MONITOR"), version: z.literal(IPC_VERSION) })

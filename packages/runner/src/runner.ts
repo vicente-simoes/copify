@@ -31,6 +31,7 @@ let heldClipboardLeaseId: string | undefined;
 let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
 let trafficReceivedBytes = 0; let trafficSentBytes = 0; let trafficCdpAttached = 0; let trafficFallbackSeen = false; let observedPages = new WeakSet<Page>(); let trafficSessions: CDPSession[] = [];
 let paymentHandoffLatch: PaymentHandoffLatch | undefined;
+let usageTimer:NodeJS.Timeout|undefined;
 
 process.on("message", async (message: unknown) => {
   const command = runnerCommandSchema.safeParse(message); if (!command.success) return;
@@ -103,6 +104,7 @@ async function start(id: string, userDataDir: string, driver: RunnerBrowserDrive
 async function beginRecording(activeContext: BrowserContext, value: RunnerRecording): Promise<void> {
   await mkdir(value.artifactDir, { recursive: true });
   emitRun("RECORDING_STARTED", { diagnosticLevel: value.diagnosticLevel });
+  if(usageTimer)clearInterval(usageTimer); usageTimer=setInterval(()=>emitNetworkUsage(),5_000);usageTimer.unref();
   activeContext.on("page", (page) => observePage(page));
   activeContext.on("request", (request) => { requestCount += 1; const body = request.postDataBuffer(); if (body) trafficSentBytes += body.length; });
   activeContext.on("requestfailed", (request) => emitRun("NETWORK_FAILED", sanitizeRequest(request.url(), request.method(), request.resourceType(), request.failure()?.errorText ?? "NETWORK_FAILED")));
@@ -140,7 +142,7 @@ async function endRun(runSessionId: string): Promise<void> {
   } catch (error) {
     emitRun("RECORDING_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
   } finally {
-    const id = profileId; const current = recording; recording = undefined;
+    if(usageTimer)clearInterval(usageTimer);usageTimer=undefined; const id = profileId; const current = recording; recording = undefined;
     if (id && current) send({ type: "RUN_ENDED", version: IPC_VERSION, profileId: id, runSessionId: current.runSessionId });
   }
 }
@@ -728,7 +730,7 @@ function emitNetworkUsage(): void {
 }
 
 async function stop(): Promise<void> {
-  stopping = true; const id = profileId;
+  stopping = true; if(usageTimer)clearInterval(usageTimer);usageTimer=undefined; const id = profileId;
   try {
     await runnerClipboard.release();
     for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear();

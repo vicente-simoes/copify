@@ -7,6 +7,8 @@ import {
   analyticsFilterSchema, createRunAnnotationSchema, proxyProfileSchema, runAnnotationSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runMetricsSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, sessionMetricsSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type AppearanceSettings, type ChromeColors, type WindowBounds, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
   type AnalyticsFilter, type AnalyticsResult, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
+  budgetStatusSchema, costBudgetSchema, costQuerySchema, costSummarySchema, createManualCostSnapshotSchema, estimateCostMicrosUsd, providerBalanceSnapshotSchema, providerUsageRecordSchema, resolveBudgetPeriod, resolveCostPeriod, upsertCostBudgetSchema,
+  type BudgetStatus, type CostBudget, type CostQuery, type CostSummary, type CreateManualCostSnapshotInput, type ProviderBalanceSnapshot, type ProviderUsageRecord, type UpsertCostBudgetInput,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { deriveMetrics, reliabilityRows } from "./analytics";
@@ -22,6 +24,8 @@ export type StoredProxy = ProxyProfile & { usernameCiphertext: Buffer | null; pa
 export type StoredShippingProfile = ShippingProfile & { detailsCiphertext: Buffer | null };
 export type StoredBrowserProfile = BrowserProfile & { externalCdpEndpointCiphertext: Buffer | null };
 type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason">>;
+export type RecordedUsageSnapshot = RunNetworkUsage & { browserProfileId?: string | null; proxyProvider?: string | null; timezoneId?: string };
+export type ProviderImportRecord = Omit<ProviderUsageRecord, "id" | "authority" | "importBatchId" | "recordedAt">;
 
 export function profileDirectory(profilesRoot: string, profileId: string): string {
   return join(resolve(profilesRoot), profileId);
@@ -190,7 +194,80 @@ export class ProfileRepository {
       );
       CREATE INDEX IF NOT EXISTS run_annotations_run_idx ON run_annotations(run_id,run_session_id,created_at);`);
     }
-    this.sql.exec("PRAGMA user_version = 16;");
+    if (version < 17) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS cost_usage_buckets (
+        id TEXT PRIMARY KEY NOT NULL, bucket_start_at INTEGER NOT NULL, timezone_id TEXT NOT NULL,
+        run_id TEXT NOT NULL, usage_key TEXT NOT NULL, source TEXT NOT NULL, run_session_id TEXT, browser_profile_id TEXT, store_id TEXT,
+        proxy_profile_id TEXT, proxy_name TEXT, proxy_provider TEXT, discovery_source TEXT,
+        received_bytes INTEGER NOT NULL, sent_bytes INTEGER NOT NULL, request_count INTEGER NOT NULL, completeness TEXT NOT NULL,
+        cost_per_gb_micros_usd INTEGER, estimated_cost_micros_usd INTEGER, legacy INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+        UNIQUE(bucket_start_at,run_id,usage_key)
+      );
+      CREATE INDEX IF NOT EXISTS cost_usage_buckets_period_idx ON cost_usage_buckets(bucket_start_at,proxy_provider);
+      CREATE INDEX IF NOT EXISTS cost_usage_buckets_proxy_idx ON cost_usage_buckets(proxy_profile_id,bucket_start_at);
+      CREATE INDEX IF NOT EXISTS cost_usage_buckets_run_idx ON cost_usage_buckets(run_id,bucket_start_at);
+      CREATE INDEX IF NOT EXISTS cost_usage_buckets_store_idx ON cost_usage_buckets(store_id,bucket_start_at);
+      CREATE INDEX IF NOT EXISTS cost_usage_buckets_profile_idx ON cost_usage_buckets(browser_profile_id,bucket_start_at);
+      CREATE TABLE IF NOT EXISTS usage_cursors (
+        run_id TEXT NOT NULL, usage_key TEXT NOT NULL, received_bytes INTEGER NOT NULL, sent_bytes INTEGER NOT NULL,
+        request_count INTEGER NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(run_id,usage_key)
+      );
+      CREATE TABLE IF NOT EXISTS provider_import_batches (
+        id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, normalized_digest TEXT NOT NULL UNIQUE, row_count INTEGER NOT NULL,
+        rejected_row_count INTEGER NOT NULL, interval_start_at INTEGER, interval_end_at INTEGER, imported_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS provider_usage_records (
+        id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, authority TEXT NOT NULL, interval_start_at INTEGER NOT NULL,
+        interval_end_at INTEGER NOT NULL, received_bytes INTEGER, request_count INTEGER, billed_cost_micros_usd INTEGER,
+        plan_label TEXT, import_batch_id TEXT, recorded_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS provider_usage_records_period_idx ON provider_usage_records(provider,interval_start_at,interval_end_at);
+      CREATE TABLE IF NOT EXISTS provider_balance_snapshots (
+        id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, authority TEXT NOT NULL, effective_at INTEGER NOT NULL,
+        remaining_credit_micros_usd INTEGER, remaining_bytes INTEGER, recorded_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS provider_balance_snapshots_provider_idx ON provider_balance_snapshots(provider,effective_at DESC);
+      CREATE TABLE IF NOT EXISTS cost_budgets (
+        id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, cadence TEXT NOT NULL, limit_micros_usd INTEGER NOT NULL,
+        starting_credit_micros_usd INTEGER, timezone_id TEXT NOT NULL, thresholds_json TEXT NOT NULL, hard_cap INTEGER NOT NULL,
+        enabled INTEGER NOT NULL, enabled_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE(provider,cadence)
+      );
+      CREATE TABLE IF NOT EXISTS budget_threshold_events (
+        id TEXT PRIMARY KEY NOT NULL, budget_id TEXT NOT NULL, period_start_at INTEGER NOT NULL, threshold INTEGER NOT NULL,
+        fired_at INTEGER NOT NULL, UNIQUE(budget_id,period_start_at,threshold)
+      );`);
+      const timezoneId = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      const hasUsage=Boolean(this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_network_usage'").get());
+      const hasProxies=Boolean(this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='proxy_profiles'").get());
+      const hasSessions=Boolean(this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_sessions'").get());
+      const legacyRows = hasUsage ? this.all(`SELECT u.*, ${hasProxies?"p.provider":"NULL"} AS proxy_provider, ${hasSessions?"s.browser_profile_id":"NULL"} AS browser_profile_id
+        FROM run_network_usage u ${hasProxies?"LEFT JOIN proxy_profiles p ON p.id=u.proxy_profile_id":""} ${hasSessions?"LEFT JOIN run_sessions s ON s.id=u.run_session_id":""}`) : [];
+      const insertBucket = this.sql.prepare(`INSERT OR IGNORE INTO cost_usage_buckets
+        (id,bucket_start_at,timezone_id,run_id,usage_key,source,run_session_id,browser_profile_id,store_id,proxy_profile_id,proxy_name,proxy_provider,discovery_source,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,legacy,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insertCursor = this.sql.prepare(`INSERT OR IGNORE INTO usage_cursors (run_id,usage_key,received_bytes,sent_bytes,request_count,epoch,updated_at) VALUES (?,?,?,?,?,0,?)`);
+      for (const row of legacyRows) {
+        const received = Number(row.received_bytes); const sent = Number(row.sent_bytes); const rate = nullableNumber(row.cost_per_gb_micros_usd);
+        const supported = Boolean(row.proxy_profile_id) && row.completeness !== "UNSUPPORTED";
+        const estimate = estimateCostMicrosUsd(received, sent, rate, supported);
+        insertBucket.run(randomUUID(), Math.floor(Number(row.updated_at) / 60_000) * 60_000, timezoneId, row.run_id, row.usage_key, row.source,
+          row.run_session_id ?? null, row.browser_profile_id ?? null, row.store_id ?? null, row.proxy_profile_id ?? null, row.proxy_name ?? null,
+          row.proxy_provider ?? null, row.discovery_source ?? null, received, sent, Number(row.request_count), "PARTIAL", rate, estimate, 1, Number(row.updated_at));
+        insertCursor.run(row.run_id, row.usage_key, received, sent, Number(row.request_count), Number(row.updated_at));
+        this.sql.prepare("UPDATE run_network_usage SET estimated_cost_micros_usd=? WHERE id=?").run(estimate, row.id);
+      }
+    }
+    // Earlier v0.12 builds used the user-entered range end as a manual balance's
+    // effective timestamp. A balance is observed when it is entered, so repair
+    // those records once on open; this also makes today's current balance visible.
+    if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_balance_snapshots'").get()) {
+      this.sql.prepare("UPDATE provider_balance_snapshots SET effective_at=recorded_at WHERE authority='MANUAL_CONFIRMED' AND effective_at>recorded_at").run();
+    }
+    if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_usage_records'").get()) {
+      this.sql.prepare("UPDATE provider_usage_records SET interval_end_at=recorded_at WHERE authority='MANUAL_CONFIRMED' AND interval_end_at>recorded_at").run();
+    }
+    this.sql.exec("PRAGMA user_version = 17;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -577,12 +654,137 @@ export class ProfileRepository {
     return value;
   }
 
+  /** Converts a cumulative worker counter into an append-only minute delta. */
+  async recordUsageSnapshot(input: RecordedUsageSnapshot): Promise<RunNetworkUsage> {
+    const value = runNetworkUsageSchema.parse(input); const now = value.updatedAt;
+    const cursor = this.getRow("SELECT * FROM usage_cursors WHERE run_id=? AND usage_key=?", [value.runId, value.usageKey]);
+    const reset = Boolean(cursor) && (value.receivedBytes < Number(cursor!.received_bytes) || value.sentBytes < Number(cursor!.sent_bytes) || value.requestCount < Number(cursor!.request_count));
+    const deltaReceived = cursor && !reset ? value.receivedBytes - Number(cursor.received_bytes) : value.receivedBytes;
+    const deltaSent = cursor && !reset ? value.sentBytes - Number(cursor.sent_bytes) : value.sentBytes;
+    const deltaRequests = cursor && !reset ? value.requestCount - Number(cursor.request_count) : value.requestCount;
+    const previous = this.getRow("SELECT * FROM run_network_usage WHERE run_id=? AND usage_key=?", [value.runId, value.usageKey]);
+    const totalReceived = (previous ? Number(previous.received_bytes) : 0) + deltaReceived;
+    const totalSent = (previous ? Number(previous.sent_bytes) : 0) + deltaSent;
+    const totalRequests = (previous ? Number(previous.request_count) : 0) + deltaRequests;
+    const provider = input.proxyProvider ?? (value.proxyProfileId ? this.getRow("SELECT provider FROM proxy_profiles WHERE id=?", [value.proxyProfileId])?.provider as string | undefined : undefined) ?? null;
+    const browserProfileId = input.browserProfileId ?? (value.runSessionId ? this.getRow("SELECT browser_profile_id FROM run_sessions WHERE id=?", [value.runSessionId])?.browser_profile_id as string | undefined : undefined) ?? null;
+    const supported = Boolean(value.proxyProfileId) && value.completeness !== "UNSUPPORTED";
+    const totalEstimate = estimateCostMicrosUsd(totalReceived, totalSent, value.costPerGbMicrosUsd, supported);
+    const deltaEstimate = estimateCostMicrosUsd(deltaReceived, deltaSent, value.costPerGbMicrosUsd, supported);
+    const result = runNetworkUsageSchema.parse({ ...value, receivedBytes: totalReceived, sentBytes: totalSent, requestCount: totalRequests, estimatedCostMicrosUsd: totalEstimate });
+    this.transaction(() => {
+      this.sql.prepare(`INSERT INTO usage_cursors (run_id,usage_key,received_bytes,sent_bytes,request_count,epoch,updated_at) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(run_id,usage_key) DO UPDATE SET received_bytes=excluded.received_bytes,sent_bytes=excluded.sent_bytes,request_count=excluded.request_count,epoch=excluded.epoch,updated_at=excluded.updated_at`)
+        .run(value.runId, value.usageKey, value.receivedBytes, value.sentBytes, value.requestCount, Number(cursor?.epoch ?? 0) + (reset ? 1 : 0), now);
+      this.sql.prepare(`INSERT INTO run_network_usage (id,run_id,usage_key,source,run_session_id,store_id,proxy_profile_id,proxy_name,discovery_source,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,usage_key) DO UPDATE SET discovery_source=excluded.discovery_source,received_bytes=excluded.received_bytes,sent_bytes=excluded.sent_bytes,request_count=excluded.request_count,completeness=excluded.completeness,cost_per_gb_micros_usd=excluded.cost_per_gb_micros_usd,estimated_cost_micros_usd=excluded.estimated_cost_micros_usd,updated_at=excluded.updated_at`)
+        .run(result.id, result.runId, result.usageKey, result.source, result.runSessionId, result.storeId, result.proxyProfileId, result.proxyName, result.discoverySource, result.receivedBytes, result.sentBytes, result.requestCount, result.completeness, result.costPerGbMicrosUsd, result.estimatedCostMicrosUsd, result.updatedAt);
+      if (deltaReceived || deltaSent || deltaRequests) {
+        const bucket = Math.floor(now / 60_000) * 60_000; const bucketId = randomUUID(); const timezoneId = input.timezoneId ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
+        this.sql.prepare(`INSERT INTO cost_usage_buckets (id,bucket_start_at,timezone_id,run_id,usage_key,source,run_session_id,browser_profile_id,store_id,proxy_profile_id,proxy_name,proxy_provider,discovery_source,received_bytes,sent_bytes,request_count,completeness,cost_per_gb_micros_usd,estimated_cost_micros_usd,legacy,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bucket_start_at,run_id,usage_key) DO UPDATE SET
+          received_bytes=received_bytes+excluded.received_bytes,sent_bytes=sent_bytes+excluded.sent_bytes,request_count=request_count+excluded.request_count,
+          completeness=CASE WHEN completeness='UNSUPPORTED' OR excluded.completeness='UNSUPPORTED' THEN 'UNSUPPORTED' WHEN completeness='PARTIAL' OR excluded.completeness='PARTIAL' THEN 'PARTIAL' ELSE 'EXACT' END,
+          estimated_cost_micros_usd=CASE WHEN estimated_cost_micros_usd IS NULL OR excluded.estimated_cost_micros_usd IS NULL THEN NULL ELSE estimated_cost_micros_usd+excluded.estimated_cost_micros_usd END,updated_at=excluded.updated_at`)
+          .run(bucketId, bucket, timezoneId, value.runId, value.usageKey, value.source, value.runSessionId, browserProfileId, value.storeId, value.proxyProfileId, value.proxyName, provider, value.discoverySource,
+            deltaReceived, deltaSent, deltaRequests, value.completeness, value.costPerGbMicrosUsd, deltaEstimate, 0, now);
+      }
+    });
+    return result;
+  }
+
   async listRunNetworkUsage(runId: string): Promise<RunNetworkUsage[]> {
     return this.all("SELECT * FROM run_network_usage WHERE run_id=? ORDER BY source, usage_key", [runId]).map((row) => runNetworkUsageSchema.parse(mapRunNetworkUsage(row)));
   }
 
   async listNetworkUsage(): Promise<RunNetworkUsage[]> {
     return this.all("SELECT * FROM run_network_usage ORDER BY updated_at DESC").map((row) => runNetworkUsageSchema.parse(mapRunNetworkUsage(row)));
+  }
+
+  async createManualCostSnapshot(input: CreateManualCostSnapshotInput): Promise<{ usage: ProviderUsageRecord | null; balance: ProviderBalanceSnapshot | null }> {
+    const value = createManualCostSnapshotSchema.parse(input); const now = Date.now(); let usage: ProviderUsageRecord | null = null; let balance: ProviderBalanceSnapshot | null = null;
+    const observedEndAt = Math.min(value.intervalEndAt, now);
+    if (value.usedBytes !== null || value.requestCount !== null || value.billedCostMicrosUsd !== null) usage = providerUsageRecordSchema.parse({ id: randomUUID(), provider: value.provider, authority: "MANUAL_CONFIRMED", intervalStartAt: value.intervalStartAt, intervalEndAt: observedEndAt, receivedBytes: value.usedBytes, requestCount: value.requestCount, billedCostMicrosUsd: value.billedCostMicrosUsd, planLabel: null, importBatchId: null, recordedAt: now });
+    if (value.remainingCreditMicrosUsd !== null) balance = providerBalanceSnapshotSchema.parse({ id: randomUUID(), provider: value.provider, authority: "MANUAL_CONFIRMED", effectiveAt: observedEndAt, remainingCreditMicrosUsd: value.remainingCreditMicrosUsd, remainingBytes: null, recordedAt: now });
+    this.transaction(() => {
+      if (usage) this.insertProviderUsage(usage);
+      if (balance) this.insertProviderBalance(balance);
+    }); return { usage, balance };
+  }
+
+  /** Removes only an operator-entered usage/cost snapshot; imports are immutable. */
+  async removeManualCostSnapshot(id: string): Promise<boolean> {
+    return this.sql.prepare("DELETE FROM provider_usage_records WHERE id=? AND authority='MANUAL_CONFIRMED' AND import_batch_id IS NULL").run(id).changes > 0;
+  }
+
+  async commitProviderImport(provider: string, digest: string, records: ProviderImportRecord[], rejectedRowCount = 0): Promise<{ id: string; duplicate: boolean; rowCount: number }> {
+    const existing = this.getRow("SELECT id,row_count FROM provider_import_batches WHERE normalized_digest=?", [digest]);
+    if (existing) return { id: String(existing.id), duplicate: true, rowCount: Number(existing.row_count) };
+    const now = Date.now(); const id = randomUUID(); const starts = records.map((row) => row.intervalStartAt); const ends = records.map((row) => row.intervalEndAt);
+    this.transaction(() => {
+      this.sql.prepare("INSERT INTO provider_import_batches (id,provider,normalized_digest,row_count,rejected_row_count,interval_start_at,interval_end_at,imported_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(id, provider, digest, records.length, rejectedRowCount, starts.length ? Math.min(...starts) : null, ends.length ? Math.max(...ends) : null, now);
+      for (const record of records) this.insertProviderUsage(providerUsageRecordSchema.parse({ ...record, id: randomUUID(), provider, authority: "PROVIDER_CONFIRMED", importBatchId: id, recordedAt: now }));
+    }); return { id, duplicate: false, rowCount: records.length };
+  }
+
+  async listReconciliation(provider?: string): Promise<{ usage: ProviderUsageRecord[]; balances: ProviderBalanceSnapshot[]; imports: Array<{id:string;provider:string;rowCount:number;rejectedRowCount:number;spendRowCount:number;billedCostMicrosUsd:number|null;intervalStartAt:number|null;intervalEndAt:number|null;importedAt:number}> }> {
+    const where = provider ? " WHERE provider=?" : ""; const params = provider ? [provider] : [];
+    return {
+      usage: this.all(`SELECT * FROM provider_usage_records${where} ORDER BY interval_end_at DESC`, params).map(mapProviderUsage),
+      balances: this.all(`SELECT * FROM provider_balance_snapshots${where} ORDER BY effective_at DESC`, params).map(mapProviderBalance),
+      imports: this.all(`SELECT b.id,b.provider,b.row_count,b.rejected_row_count,b.interval_start_at,b.interval_end_at,b.imported_at,COUNT(u.id) AS spend_row_count,SUM(u.billed_cost_micros_usd) AS billed_cost_micros_usd FROM provider_import_batches b LEFT JOIN provider_usage_records u ON u.import_batch_id=b.id AND u.billed_cost_micros_usd IS NOT NULL${provider ? " WHERE b.provider=?" : ""} GROUP BY b.id,b.provider,b.row_count,b.rejected_row_count,b.interval_start_at,b.interval_end_at,b.imported_at ORDER BY b.imported_at DESC`, params).map((row) => ({ id: String(row.id), provider: String(row.provider), rowCount: Number(row.row_count), rejectedRowCount: Number(row.rejected_row_count), spendRowCount: Number(row.spend_row_count), billedCostMicrosUsd: nullableNumber(row.billed_cost_micros_usd), intervalStartAt: nullableNumber(row.interval_start_at), intervalEndAt: nullableNumber(row.interval_end_at), importedAt: Number(row.imported_at) })),
+    };
+  }
+
+  async listCostBudgets(): Promise<CostBudget[]> { return this.all("SELECT * FROM cost_budgets ORDER BY provider,cadence").map(mapCostBudget); }
+  async upsertCostBudget(input: UpsertCostBudgetInput): Promise<CostBudget> {
+    const value = upsertCostBudgetSchema.parse(input); const current = this.getRow("SELECT * FROM cost_budgets WHERE provider=? AND cadence=?", [value.provider, value.cadence]); const now = Date.now();
+    const budget = costBudgetSchema.parse({ ...value, id: current?.id ?? value.id ?? randomUUID(), enabledAt: current ? Number(current.enabled_at) : now, createdAt: current ? Number(current.created_at) : now, updatedAt: now });
+    this.sql.prepare(`INSERT INTO cost_budgets (id,provider,cadence,limit_micros_usd,starting_credit_micros_usd,timezone_id,thresholds_json,hard_cap,enabled,enabled_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(provider,cadence) DO UPDATE SET limit_micros_usd=excluded.limit_micros_usd,starting_credit_micros_usd=excluded.starting_credit_micros_usd,timezone_id=excluded.timezone_id,thresholds_json=excluded.thresholds_json,hard_cap=excluded.hard_cap,enabled=excluded.enabled,updated_at=excluded.updated_at`)
+      .run(budget.id,budget.provider,budget.cadence,budget.limitMicrosUsd,budget.startingCreditMicrosUsd,budget.timezoneId,JSON.stringify(budget.thresholds),budget.hardCap?1:0,budget.enabled?1:0,budget.enabledAt,budget.createdAt,budget.updatedAt);
+    return budget;
+  }
+  async removeCostBudget(id: string): Promise<boolean> { return this.sql.prepare("DELETE FROM cost_budgets WHERE id=?").run(id).changes > 0; }
+
+  async getBudgetStatuses(now = Date.now()): Promise<BudgetStatus[]> {
+    const results: BudgetStatus[] = [];
+    for (const budget of (await this.listCostBudgets()).filter((row) => row.enabled)) {
+      const period = resolveBudgetPeriod(budget.cadence, budget.timezoneId, now); const effectiveStart = Math.max(period.startAt, budget.enabledAt);
+      const estimateRow = this.getRow("SELECT COALESCE(SUM(estimated_cost_micros_usd),0) AS total,MAX(updated_at) AS latest FROM cost_usage_buckets WHERE proxy_provider=? AND bucket_start_at>=? AND bucket_start_at<?", [budget.provider,effectiveStart,period.endAt]);
+      const confirmed = this.confirmedRange(budget.provider,effectiveStart,Math.min(period.endAt,now)); const estimate = Number(estimateRow?.total ?? 0); const latestUsage = nullableNumber(estimateRow?.latest); const useConfirmed = latestUsage !== null && confirmed.coverageStart !== null && confirmed.coverageStart <= effectiveStart && confirmed.coveredThrough !== null && confirmed.coveredThrough >= latestUsage;
+      const spent = useConfirmed ? confirmed.cost : estimate; const firedThresholds = this.all("SELECT threshold FROM budget_threshold_events WHERE budget_id=? AND period_start_at=? ORDER BY threshold", [budget.id,period.startAt]).map((row)=>Number(row.threshold));
+      results.push(budgetStatusSchema.parse({ budget, periodStartAt: period.startAt, periodEndAt: period.endAt, spentMicrosUsd: spent, authority: useConfirmed ? confirmed.authority : "COPIFY_ESTIMATED", percent: budget.limitMicrosUsd ? spent / budget.limitMicrosUsd * 100 : 0, firedThresholds, capped: budget.hardCap && spent >= budget.limitMicrosUsd, dataAgeMs: useConfirmed && confirmed.recordedAt ? Math.max(0,now-confirmed.recordedAt) : null }));
+    } return results;
+  }
+
+  async markBudgetThreshold(budgetId: string, periodStartAt: number, threshold: number, firedAt = Date.now()): Promise<boolean> {
+    return this.sql.prepare("INSERT OR IGNORE INTO budget_threshold_events (id,budget_id,period_start_at,threshold,fired_at) VALUES (?,?,?,?,?)").run(randomUUID(),budgetId,periodStartAt,threshold,firedAt).changes > 0;
+  }
+
+  async queryCosts(input: CostQuery, now = Date.now()): Promise<CostSummary> {
+    const query = costQuerySchema.parse(input); const period = resolveCostPeriod(query.period, now); const providerClause = query.provider ? " AND b.proxy_provider=?" : ""; const params: any[] = [period.startAt,period.endAt]; if (query.provider) params.push(query.provider);
+    const buckets = this.all(`SELECT b.*, p.name AS browser_profile_name, r.name AS run_name FROM cost_usage_buckets b LEFT JOIN browser_profiles p ON p.id=b.browser_profile_id LEFT JOIN runs r ON r.id=b.run_id WHERE b.bucket_start_at>=? AND b.bucket_start_at<?${providerClause}`, params);
+    const groups = new Map<string,{label:string;rows:Row[]}>(); const keyFor = (row:Row):[string,string] => {
+      if (query.groupBy === "PROXY") return [String(row.proxy_profile_id ?? "direct"),String(row.proxy_name ?? "Direct")];
+      if (query.groupBy === "STORE") return [String(row.store_id ?? "unknown"),String(row.store_id ?? "Unknown store")];
+      if (query.groupBy === "SOURCE") return [String(row.source),String(row.source).toLowerCase()];
+      if (query.groupBy === "BROWSER_PROFILE") return [String(row.browser_profile_id ?? "monitor"),String(row.browser_profile_name ?? "Monitor")];
+      if (query.groupBy === "RUN") return [String(row.run_id),String(row.run_name ?? row.run_id)];
+      return [String(row.proxy_provider ?? "direct"),String(row.proxy_provider ?? "Direct")];
+    };
+    for (const row of buckets) { const [key,label]=keyFor(row); const group=groups.get(key)??{label,rows:[]}; group.rows.push(row); groups.set(key,group); }
+    const pricedBytes = buckets.filter((row)=>row.proxy_profile_id && row.estimated_cost_micros_usd!==null).reduce((sum,row)=>sum+Number(row.received_bytes)+Number(row.sent_bytes),0);
+    const proxiedBytes = buckets.filter((row)=>row.proxy_profile_id).reduce((sum,row)=>sum+Number(row.received_bytes)+Number(row.sent_bytes),0); const estimateValues=buckets.map((r)=>nullableNumber(r.estimated_cost_micros_usd)); const estimate=estimateValues.some((v)=>v!==null)?estimateValues.reduce<number>((s,v)=>s+(v??0),0):null;
+    const providers = query.provider ? [query.provider] : [...new Set(buckets.map((row)=>row.proxy_provider).filter(Boolean).map(String))]; let confirmedCost=0; let hasConfirmed=false; let confirmedAuthority: "PROVIDER_CONFIRMED"|"MANUAL_CONFIRMED"|null=null; let confirmedAge:number|null=null;
+    for (const provider of providers) { const confirmed=this.confirmedRange(provider,period.startAt,period.endAt); if (confirmed.hasData) { hasConfirmed=true; confirmedCost+=confirmed.cost; if (confirmed.authority==="PROVIDER_CONFIRMED") confirmedAuthority="PROVIDER_CONFIRMED"; else confirmedAuthority??="MANUAL_CONFIRMED"; if (confirmed.recordedAt) confirmedAge=Math.max(confirmedAge??0,now-confirmed.recordedAt); } }
+    const balanceParams: any[] = [period.endAt]; if (query.provider) balanceParams.push(query.provider); balanceParams.push(period.endAt);
+    const balances=this.all(`SELECT b.* FROM provider_balance_snapshots b WHERE b.effective_at<=?${query.provider?" AND b.provider=?":""} AND NOT EXISTS (SELECT 1 FROM provider_balance_snapshots newer WHERE newer.provider=b.provider AND newer.effective_at<=? AND (newer.effective_at>b.effective_at OR (newer.effective_at=b.effective_at AND (newer.recorded_at>b.recorded_at OR (newer.recorded_at=b.recorded_at AND newer.id>b.id)))))`,balanceParams);
+    const remaining=balances.length&&balances.some((r)=>r.remaining_credit_micros_usd!==null)?balances.reduce((s,r)=>s+Number(r.remaining_credit_micros_usd??0),0):null;
+    const rows=[...groups.entries()].map(([id,group])=>{ const received=group.rows.reduce((s,r)=>s+Number(r.received_bytes),0); const sent=group.rows.reduce((s,r)=>s+Number(r.sent_bytes),0); const vals=group.rows.map((r)=>nullableNumber(r.estimated_cost_micros_usd)); const estimated=vals.some((v)=>v!==null)?vals.reduce<number>((s,v)=>s+(v??0),0):null; const confirmed=query.groupBy==="PROVIDER"&&id!=="direct"?this.confirmedRange(id,period.startAt,period.endAt):null; return { id,label:group.label,receivedBytes:received,sentBytes:sent,requestCount:group.rows.reduce((s,r)=>s+Number(r.request_count),0),estimatedCostMicrosUsd:estimated,confirmedCostMicrosUsd:confirmed?.hasData?confirmed.cost:null,completeness:worstCompleteness(group.rows.map((r)=>String(r.completeness))),authority:confirmed?.hasData?confirmed.authority:(estimated!==null?"COPIFY_ESTIMATED":null),lastActivityAt:Math.max(...group.rows.map((r)=>Number(r.updated_at))) }; });
+    const confirmedComparable = providers.length > 0 && providers.every((provider) => this.confirmedRange(provider,period.startAt,period.endAt).coversRange);
+    return costSummarySchema.parse({period,estimatedCostMicrosUsd:estimate,confirmedCostMicrosUsd:hasConfirmed?confirmedCost:null,confirmedAuthority,confirmedDifferenceMicrosUsd:hasConfirmed&&confirmedComparable&&estimate!==null?confirmedCost-estimate:null,receivedBytes:buckets.reduce((s,r)=>s+Number(r.received_bytes),0),sentBytes:buckets.reduce((s,r)=>s+Number(r.sent_bytes),0),requestCount:buckets.reduce((s,r)=>s+Number(r.request_count),0),remainingCreditMicrosUsd:remaining,estimationCoverage:proxiedBytes?pricedBytes/proxiedBytes:null,confirmedDataAgeMs:confirmedAge,rows,budgets:await this.getBudgetStatuses(now),updatedAt:now});
   }
   async getRunArtifact(id: string): Promise<RunArtifact | undefined> { const row = this.getRow("SELECT * FROM run_artifacts WHERE id=?", [id]); return row ? runArtifactSchema.parse(mapRunArtifact(row)) : undefined; }
   async setRunDiscoverySnapshot(id: string, snapshot: Run["discoverySnapshot"]): Promise<void> { this.sql.prepare("UPDATE runs SET discovery_snapshot_json=?,updated_at=? WHERE id=?").run(snapshot ? JSON.stringify(snapshot) : null, Date.now(), id); }
@@ -655,6 +857,29 @@ export class ProfileRepository {
 
   close(): void { this.sql.close(); }
 
+  private insertProviderUsage(value: ProviderUsageRecord): void {
+    this.sql.prepare("INSERT INTO provider_usage_records (id,provider,authority,interval_start_at,interval_end_at,received_bytes,request_count,billed_cost_micros_usd,plan_label,import_batch_id,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+      .run(value.id,value.provider,value.authority,value.intervalStartAt,value.intervalEndAt,value.receivedBytes,value.requestCount,value.billedCostMicrosUsd,value.planLabel,value.importBatchId,value.recordedAt);
+  }
+  private insertProviderBalance(value: ProviderBalanceSnapshot): void {
+    this.sql.prepare("INSERT INTO provider_balance_snapshots (id,provider,authority,effective_at,remaining_credit_micros_usd,remaining_bytes,recorded_at) VALUES (?,?,?,?,?,?,?)")
+      .run(value.id,value.provider,value.authority,value.effectiveAt,value.remainingCreditMicrosUsd,value.remainingBytes,value.recordedAt);
+  }
+  /** Provider CSV rows take precedence; overlapping manual rows are excluded. */
+  private confirmedRange(provider: string, startAt: number, endAt: number): { hasData:boolean; cost:number; authority:"PROVIDER_CONFIRMED"|"MANUAL_CONFIRMED"; coverageStart:number|null; coveredThrough:number|null; coversRange:boolean; recordedAt:number|null } {
+    const rows=this.all("SELECT * FROM provider_usage_records WHERE provider=? AND interval_end_at>? AND interval_start_at<? ORDER BY interval_start_at",[provider,startAt,endAt]);
+    // A traffic-only provider export is authoritative for traffic, but not for billed
+    // spend. It must not hide an overlapping manual Money Stats total.
+    const providerCostRows=rows.filter((row)=>row.authority==="PROVIDER_CONFIRMED" && row.billed_cost_micros_usd!==null);
+    // A manually entered dashboard total is an aggregate, not a time-series. Show
+    // it when the requested range fully contains that confirmed interval, but never
+    // allocate it into a smaller overlapping range such as Today.
+    const manualRows=rows.filter((row)=>row.authority==="MANUAL_CONFIRMED" && Number(row.interval_start_at)>=startAt && Number(row.interval_end_at)<=endAt && !providerCostRows.some((confirmed)=>Number(row.interval_start_at)<Number(confirmed.interval_end_at)&&Number(row.interval_end_at)>Number(confirmed.interval_start_at)));
+    const selected=[...providerCostRows,...manualRows]; const costRows=selected; const authority=providerCostRows.length?"PROVIDER_CONFIRMED":"MANUAL_CONFIRMED";
+    const ordered=[...selected].sort((a,b)=>Number(a.interval_start_at)-Number(b.interval_start_at)); const coverageStart=ordered.length?Number(ordered[0].interval_start_at):null; let coveredThrough=coverageStart;
+    for(const row of ordered){const rowStart=Number(row.interval_start_at);const rowEnd=Number(row.interval_end_at);if(coveredThrough!==null&&rowStart<=coveredThrough+1_000)coveredThrough=Math.max(coveredThrough,rowEnd);}
+    return { hasData:costRows.length>0,cost:costRows.reduce((sum,row)=>sum+Number(row.billed_cost_micros_usd),0),authority,coverageStart,coveredThrough,coversRange:coverageStart!==null&&coverageStart<=startAt+1_000&&coveredThrough!==null&&coveredThrough>=endAt-1_000,recordedAt:selected.length?Math.max(...selected.map((row)=>Number(row.recorded_at))):null };
+  }
   private getProxyRow(id: string): Row | undefined { return this.getRow("SELECT * FROM proxy_profiles WHERE id = ?", [id]); }
   private getRow(query: string, params: any[] = []): Row | undefined { return this.sql.prepare(query).get(...params) as Row | undefined; }
   private all(query: string, params: any[] = []): Row[] { return this.sql.prepare(query).all(...params) as Row[]; }
@@ -708,6 +933,10 @@ function mapRunEvent(row: Row): Record<string, unknown> {
 function mapRunNetworkUsage(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, usageKey: row.usage_key, source: row.source, runSessionId: row.run_session_id ?? null, storeId: row.store_id ?? null, proxyProfileId: row.proxy_profile_id ?? null, proxyName: row.proxy_name ?? null, discoverySource: row.discovery_source ?? null, receivedBytes: Number(row.received_bytes), sentBytes: Number(row.sent_bytes), requestCount: Number(row.request_count), completeness: row.completeness, costPerGbMicrosUsd: nullableNumber(row.cost_per_gb_micros_usd), estimatedCostMicrosUsd: nullableNumber(row.estimated_cost_micros_usd), updatedAt: Number(row.updated_at) };
 }
+function mapProviderUsage(row: Row): ProviderUsageRecord { return providerUsageRecordSchema.parse({id:row.id,provider:row.provider,authority:row.authority,intervalStartAt:Number(row.interval_start_at),intervalEndAt:Number(row.interval_end_at),receivedBytes:nullableNumber(row.received_bytes),requestCount:nullableNumber(row.request_count),billedCostMicrosUsd:nullableNumber(row.billed_cost_micros_usd),planLabel:row.plan_label??null,importBatchId:row.import_batch_id??null,recordedAt:Number(row.recorded_at)}); }
+function mapProviderBalance(row: Row): ProviderBalanceSnapshot { return providerBalanceSnapshotSchema.parse({id:row.id,provider:row.provider,authority:row.authority,effectiveAt:Number(row.effective_at),remainingCreditMicrosUsd:nullableNumber(row.remaining_credit_micros_usd),remainingBytes:nullableNumber(row.remaining_bytes),recordedAt:Number(row.recorded_at)}); }
+function mapCostBudget(row: Row): CostBudget { return costBudgetSchema.parse({id:row.id,provider:row.provider,cadence:row.cadence,limitMicrosUsd:Number(row.limit_micros_usd),startingCreditMicrosUsd:nullableNumber(row.starting_credit_micros_usd),timezoneId:row.timezone_id,thresholds:JSON.parse(String(row.thresholds_json)),hardCap:Boolean(row.hard_cap),enabled:Boolean(row.enabled),enabledAt:Number(row.enabled_at),createdAt:Number(row.created_at),updatedAt:Number(row.updated_at)}); }
+function worstCompleteness(values:string[]):"EXACT"|"PARTIAL"|"UNSUPPORTED" { return values.includes("UNSUPPORTED")?"UNSUPPORTED":values.includes("PARTIAL")?"PARTIAL":"EXACT"; }
 function mapRunArtifact(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id, kind: row.kind, relativePath: row.relative_path, sensitive: Boolean(row.sensitive), createdAt: Number(row.created_at) };
 }

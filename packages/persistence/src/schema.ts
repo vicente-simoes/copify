@@ -68,6 +68,39 @@ export const runNetworkUsage = sqliteTable("run_network_usage", {
   costPerGbMicrosUsd: integer("cost_per_gb_micros_usd"), estimatedCostMicrosUsd: integer("estimated_cost_micros_usd"), updatedAt: integer("updated_at").notNull()
 });
 
+export const costUsageBuckets = sqliteTable("cost_usage_buckets", {
+  id: text("id").primaryKey(), bucketStartAt: integer("bucket_start_at").notNull(), timezoneId: text("timezone_id").notNull(),
+  runId: text("run_id").notNull(), usageKey: text("usage_key").notNull(), source: text("source").notNull(), runSessionId: text("run_session_id"), browserProfileId: text("browser_profile_id"), storeId: text("store_id"),
+  proxyProfileId: text("proxy_profile_id"), proxyName: text("proxy_name"), proxyProvider: text("proxy_provider"), discoverySource: text("discovery_source"),
+  receivedBytes: integer("received_bytes").notNull(), sentBytes: integer("sent_bytes").notNull(), requestCount: integer("request_count").notNull(), completeness: text("completeness").notNull(),
+  costPerGbMicrosUsd: integer("cost_per_gb_micros_usd"), estimatedCostMicrosUsd: integer("estimated_cost_micros_usd"), legacy: integer("legacy", { mode: "boolean" }).notNull().default(false), updatedAt: integer("updated_at").notNull(),
+});
+
+export const usageCursors = sqliteTable("usage_cursors", {
+  runId: text("run_id").notNull(), usageKey: text("usage_key").notNull(), receivedBytes: integer("received_bytes").notNull(), sentBytes: integer("sent_bytes").notNull(), requestCount: integer("request_count").notNull(), epoch: integer("epoch").notNull(), updatedAt: integer("updated_at").notNull(),
+});
+
+export const providerUsageRecords = sqliteTable("provider_usage_records", {
+  id: text("id").primaryKey(), provider: text("provider").notNull(), authority: text("authority").notNull(), intervalStartAt: integer("interval_start_at").notNull(), intervalEndAt: integer("interval_end_at").notNull(),
+  receivedBytes: integer("received_bytes"), requestCount: integer("request_count"), billedCostMicrosUsd: integer("billed_cost_micros_usd"), planLabel: text("plan_label"), importBatchId: text("import_batch_id"), recordedAt: integer("recorded_at").notNull(),
+});
+
+export const providerBalanceSnapshots = sqliteTable("provider_balance_snapshots", {
+  id: text("id").primaryKey(), provider: text("provider").notNull(), authority: text("authority").notNull(), effectiveAt: integer("effective_at").notNull(), remainingCreditMicrosUsd: integer("remaining_credit_micros_usd"), remainingBytes: integer("remaining_bytes"), recordedAt: integer("recorded_at").notNull(),
+});
+
+export const providerImportBatches = sqliteTable("provider_import_batches", {
+  id: text("id").primaryKey(), provider: text("provider").notNull(), normalizedDigest: text("normalized_digest").notNull(), rowCount: integer("row_count").notNull(), rejectedRowCount: integer("rejected_row_count").notNull(), intervalStartAt: integer("interval_start_at"), intervalEndAt: integer("interval_end_at"), importedAt: integer("imported_at").notNull(),
+});
+
+export const costBudgets = sqliteTable("cost_budgets", {
+  id: text("id").primaryKey(), provider: text("provider").notNull(), cadence: text("cadence").notNull(), limitMicrosUsd: integer("limit_micros_usd").notNull(), startingCreditMicrosUsd: integer("starting_credit_micros_usd"), timezoneId: text("timezone_id").notNull(), thresholdsJson: text("thresholds_json").notNull(), hardCap: integer("hard_cap", { mode: "boolean" }).notNull(), enabled: integer("enabled", { mode: "boolean" }).notNull(), enabledAt: integer("enabled_at").notNull(), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull(),
+});
+
+export const budgetThresholdEvents = sqliteTable("budget_threshold_events", {
+  id: text("id").primaryKey(), budgetId: text("budget_id").notNull(), periodStartAt: integer("period_start_at").notNull(), threshold: integer("threshold").notNull(), firedAt: integer("fired_at").notNull(),
+});
+
 export const monitorDiscoveryState = sqliteTable("monitor_discovery_state", {
   storeId: text("store_id").notNull(), source: text("source").notNull(), routeId: text("route_id").notNull(), stateJson: text("state_json").notNull(), updatedAt: integer("updated_at").notNull()
 });
