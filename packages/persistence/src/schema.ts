@@ -4,7 +4,7 @@ export const browserProfiles = sqliteTable("browser_profiles", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), userDataDir: text("user_data_dir").notNull(),
   proxyProfileId: text("proxy_profile_id"), shippingProfileId: text("shipping_profile_id"), launchMode: text("launch_mode").notNull().default("PLAYWRIGHT"),
   driverKind: text("driver_kind").notNull().default("NATIVE_STEALTH"), externalCdpEndpointSecretId: text("external_cdp_endpoint_secret_id"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+  position: integer("position").notNull().default(0), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
 export const proxyProfiles = sqliteTable("proxy_profiles", {
@@ -75,6 +75,6 @@ export const runSetups = sqliteTable("run_setups", {
 
 export const targets = sqliteTable("targets", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), storeId: text("store_id").notNull(), productKeywordsJson: text("product_keywords_json").notNull(), negativeKeywordsJson: text("negative_keywords_json").notNull(),
-  preferredColorsJson: text("preferred_colors_json").notNull(), sizePriorityJson: text("size_priority_json").notNull(), currency: text("currency").notNull(), maxRetailMinor: integer("max_retail_minor").notNull(), quantity: integer("quantity").notNull(),
+  directProductUrl: text("direct_product_url"), preferredColorsJson: text("preferred_colors_json").notNull(), sizePriorityJson: text("size_priority_json").notNull(), currency: text("currency").notNull(), maxRetailMinor: integer("max_retail_minor").notNull(), quantity: integer("quantity").notNull(),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true), latestCheckJson: text("latest_check_json"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });

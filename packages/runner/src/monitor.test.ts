@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { HttpStoreMonitor, MonitorConnectionPool, MonitorRequestError, SupremeHttpAdapter, assertMonitorPolicy, decideTarget, effectiveRouteCooldown, isProtectionHtml, parseRetryAfter, parseShopifyProducts, parseSupremeHtmlProducts, selectPreferredVariant, shouldCoolRouteForProtection, shouldReuseMonitorConnection } from "./http-monitor";
 import { DEFAULT_MONITOR_BEHAVIOR, type MonitorPolicy, type ProductCandidate, type TargetSnapshot } from "@copify/shared";
 
-const target: TargetSnapshot = { targetId: "00000000-0000-4000-8000-000000000001", name: "Jacket", storeId: "supreme-eu", productKeywords: ["Leather Jacket"], negativeKeywords: ["Kids"], preferredColors: ["Black", "Red"], sizePriority: ["M", "L"], currency: "EUR", maxRetailMinor: 20_000, quantity: 1, enabled: true, capturedAt: 1 };
+const target: TargetSnapshot = { targetId: "00000000-0000-4000-8000-000000000001", name: "Jacket", storeId: "supreme-eu", productKeywords: ["Leather Jacket"], negativeKeywords: ["Kids"], directProductUrl: null, preferredColors: ["Black", "Red"], sizePriority: ["M", "L"], currency: "EUR", maxRetailMinor: 20_000, quantity: 1, enabled: true, capturedAt: 1 };
 const candidate: ProductCandidate = { name: "Leather Jacket", url: "https://eu.supreme.com/products/jacket", imageUrl: null, priceMinor: 19_900, currency: "EUR", listingOrder: 0, variants: [{ id: "1", color: "Red", size: "L", available: true }, { id: "2", color: "Black", size: "M", available: true }] };
 const policy = (over: Partial<MonitorPolicy> = {}): MonitorPolicy => ({ ...DEFAULT_MONITOR_BEHAVIOR, access: "PUBLIC", recommendedPollIntervalMs: 1_000, endpoint: "https://eu.supreme.com/collections/all", ...over });
 
@@ -26,6 +26,19 @@ describe("HTTP monitor domain", () => {
     expect((await adapter.locateProducts(target)).candidates[0]?.variants[0]?.available).toBe(false);
     expect((await adapter.locateProducts(target)).candidates[0]?.variants[0]?.available).toBe(true);
     expect(calls).toEqual([policy().endpoint, "https://eu.supreme.com/products/leather-jacket"]);
+  });
+  it("polls an explicit product URL directly instead of the collection catalog", async () => {
+    const product = { title: "Leather Jacket", handle: "leather-jacket", color: "Black", price: 19_900, variants: [{ id: 123456, option1: "M", available: true, price: 19_900 }] };
+    const directUrl = "https://eu.supreme.com/products/leather-jacket?all=1";
+    const calls: string[] = [];
+    const adapter = new SupremeHttpAdapter({ get: async (endpoint) => {
+      calls.push(endpoint); const body = `<script type='application/json' id='product-leather-jacket-json'>${JSON.stringify(product)}</script>`;
+      return { status: 200, body, bytes: body.length, sentBytes: 100, requestCount: 1, latencyMs: 5, endpoint, retryAfterMs: null };
+    } }, { kind: "DIRECT", id: "direct" }, policy());
+    const directTarget = { ...target, directProductUrl: directUrl };
+    expect((await adapter.locateProducts(directTarget)).candidates[0]).toMatchObject({ name: "Leather Jacket", url: "https://eu.supreme.com/products/leather-jacket" });
+    await adapter.locateProducts(directTarget);
+    expect(calls).toEqual([directUrl, directUrl]);
   });
   it("allows user cadence below the recommendation but enforces the manifest endpoint", () => {
     expect(() => assertMonitorPolicy(target, policy({ pollIntervalMs: 200 }))).not.toThrow();

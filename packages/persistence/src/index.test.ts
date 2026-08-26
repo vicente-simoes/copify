@@ -40,6 +40,24 @@ describe("ProfileRepository", () => {
     expect(await repo.list()).toEqual([]);
   });
 
+  it("keeps a manual browser order across restarts and appends new profiles last", async () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-order-")); roots.push(root);
+    const databasePath = join(root, "copify.sqlite"); const profilesRoot = join(root, "browser-profiles");
+    const repo = openProfileRepository(databasePath, profilesRoot); repositories.push(repo);
+    const first = await repo.create({ name: "First" }); const second = await repo.create({ name: "Second" }); const third = await repo.create({ name: "Third" });
+    expect((await repo.list()).map((profile) => profile.name)).toEqual(["First", "Second", "Third"]);
+    await repo.reorder([third.id, first.id, second.id]);
+    expect((await repo.list()).map((profile) => profile.name)).toEqual(["Third", "First", "Second"]);
+    await expect(repo.reorder([third.id, first.id])).rejects.toThrow("exactly once");
+    await expect(repo.reorder([third.id, third.id, first.id])).rejects.toThrow("exactly once");
+    const fourth = await repo.create({ name: "Fourth" });
+    expect((await repo.list()).map((profile) => profile.name)).toEqual(["Third", "First", "Second", "Fourth"]);
+    repo.close(); repositories.splice(repositories.indexOf(repo), 1);
+    const reopened = openProfileRepository(databasePath, profilesRoot); repositories.push(reopened);
+    expect((await reopened.list()).map((profile) => profile.name)).toEqual(["Third", "First", "Second", "Fourth"]);
+    expect(fourth.name).toBe("Fourth");
+  });
+
   it("always generates a child directory under the configured profile root", () => {
     expect(profileDirectory("C:/Copify/browser-profiles", "abc")).toMatch(/browser-profiles[\\/]abc$/);
   });
@@ -86,7 +104,7 @@ describe("ProfileRepository", () => {
     const root = mkdtempSync(join(tmpdir(), "copify-v3-")); roots.push(root); const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(join(root, "copify.sqlite"));
     database.exec("CREATE TABLE runs (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, diagnostic_level TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, environment_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version = 3;"); database.close();
     const repo = openProfileRepository(join(root, "copify.sqlite"), join(root, "browser-profiles")); repositories.push(repo);
-    await expect(repo.createTarget({ name: "Migrated target", productKeywords: ["Jacket"], maxRetailMinor: 1_000 })).resolves.toMatchObject({ storeId: "general" });
+    await expect(repo.createTarget({ name: "Migrated target", productKeywords: ["Jacket"], maxRetailMinor: 1_000 })).resolves.toMatchObject({ storeId: "general", directProductUrl: null });
   });
 
   it("persists ordered run timelines and removes all run records transactionally", async () => {
@@ -141,7 +159,7 @@ describe("ProfileRepository", () => {
     await repo.upsertRunNetworkUsage(usage); expect(await repo.listRunNetworkUsage(runId)).toMatchObject([usage]);
   });
 
-  it("migrates a v11 database to v12 without removing its browser profiles", async () => {
+  it("migrates a v11 database to the current schema without removing its browser profiles", async () => {
     const root = mkdtempSync(join(tmpdir(), "copify-v11-")); roots.push(root); const databasePath = join(root, "copify.sqlite");
     const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(databasePath);
     database.exec("CREATE TABLE browser_profiles (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, user_data_dir TEXT NOT NULL, proxy_profile_id TEXT, shipping_profile_id TEXT, driver_kind TEXT NOT NULL DEFAULT 'NATIVE_STEALTH', external_cdp_endpoint_secret_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version=11;");
@@ -149,8 +167,17 @@ describe("ProfileRepository", () => {
     const repo = openProfileRepository(databasePath, join(root, "browser-profiles")); repositories.push(repo);
     expect(await repo.list()).toMatchObject([{ id: idFor(11), name: "v0.9 profile", userDataDir: "C:/persistent-profile" }]);
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
-    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
+    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
     expect(inspection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profile_warm_states'").get()).toBeTruthy(); inspection.close();
+  });
+
+  it("repairs an existing target table missing the direct URL column and round-trips its value", async () => {
+    const root = mkdtempSync(join(tmpdir(), "copify-target-url-")); roots.push(root); const databasePath = join(root, "copify.sqlite");
+    const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(databasePath);
+    database.exec("CREATE TABLE targets (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, store_id TEXT NOT NULL, product_keywords_json TEXT NOT NULL, negative_keywords_json TEXT NOT NULL, preferred_colors_json TEXT NOT NULL, size_priority_json TEXT NOT NULL, currency TEXT NOT NULL, max_retail_minor INTEGER NOT NULL, quantity INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, latest_check_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); PRAGMA user_version=14;"); database.close();
+    const repo = openProfileRepository(databasePath, join(root, "browser-profiles")); repositories.push(repo);
+    const created = await repo.createTarget({ name: "Direct", storeId: "supreme-eu", productKeywords: ["Boxer Briefs"], directProductUrl: "https://eu.supreme.com/products/known?all=1", maxRetailMinor: 5_000 });
+    expect((await repo.getTarget(created.id))?.directProductUrl).toBe("https://eu.supreme.com/products/known?all=1");
   });
 
   it("round-trips isolated warming state and marks it for review when route identity changes", async () => {
@@ -189,7 +216,7 @@ describe("ProfileRepository", () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Jacket", productKeywords: ["Leather Jacket"], currency: "GBP", maxRetailMinor: 20_000 });
     const check = { id: randomUUID(), targetId: target.id, checkedAt: Date.now(), status: "SUCCESS" as const, decision: { kind: "NO_MATCH" as const, message: "No configured product phrase was found.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: null };
     await repo.setTargetCheck(target.id, check); expect((await repo.getTarget(target.id))?.latestCheck).toEqual(check);
-    const startedAt = Date.now(); const snapshot = { targetId: target.id, name: target.name, storeId: target.storeId, productKeywords: target.productKeywords, negativeKeywords: target.negativeKeywords, preferredColors: target.preferredColors, sizePriority: target.sizePriority, currency: target.currency, maxRetailMinor: target.maxRetailMinor, quantity: target.quantity, enabled: target.enabled, capturedAt: startedAt } as const;
+    const startedAt = Date.now(); const snapshot = { targetId: target.id, name: target.name, storeId: target.storeId, productKeywords: target.productKeywords, negativeKeywords: target.negativeKeywords, directProductUrl: target.directProductUrl, preferredColors: target.preferredColors, sizePriority: target.sizePriority, currency: target.currency, maxRetailMinor: target.maxRetailMinor, quantity: target.quantity, enabled: target.enabled, capturedAt: startedAt } as const;
     const detail = await repo.createRun({ name: "Target run", diagnosticLevel: "NORMAL", profileIds: [profile.id], targetId: target.id }, { appVersion: "0.4.0", schemaVersion: 4, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "STARTING", startedAt, endedAt: null, finalError: null }], snapshot);
     await repo.updateTarget(target.id, { name: "Changed" }); await repo.removeTarget(target.id);
     expect((await repo.getRun(detail.run.id))?.run.targetSnapshot?.name).toBe("Jacket");

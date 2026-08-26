@@ -46,6 +46,12 @@ describe("browser drivers", () => {
     expect(options).not.toHaveProperty("geolocation");
   });
 
+  it("starts coherence-only native checks minimized without changing their identity policy", () => {
+    const options = nativeStealthLaunchOptions(null, {}, undefined, undefined, true);
+    expect(options.args).toContain("--start-minimized");
+    expect(options.args).toContain("--force-webrtc-ip-handling-policy=default_public_interface_only");
+  });
+
   it("answers only proxy authentication challenges with the configured proxy credentials", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     let authRequired: ((event: { requestId: string; authChallenge: { source: string } }) => void) | undefined;

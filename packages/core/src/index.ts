@@ -6,7 +6,7 @@ import {
 } from "@copify/shared";
 
 export type RunnerChild = Pick<ChildProcess, "send" | "kill" | "on" | "once" | "removeAllListeners">;
-export type SessionLaunchSpec = { profile: BrowserProfile; driver: RunnerBrowserDriver; proxy: RunnerProxy | null; probeUrl: string; recording: RunnerRecording | null };
+export type SessionLaunchSpec = { profile: BrowserProfile; driver: RunnerBrowserDriver; proxy: RunnerProxy | null; probeUrl: string; recording: RunnerRecording | null; background?: boolean };
 export type RunnerFactory = (spec: SessionLaunchSpec) => RunnerChild;
 type ActiveRunner = { child: RunnerChild; expectedStop: boolean };
 
@@ -30,7 +30,7 @@ export class SessionOrchestrator extends EventEmitter {
       this.setState(spec.profile.id, "STARTING", null, route);
       const child = this.createRunner(spec); const active: ActiveRunner = { child, expectedStop: false }; this.runners.set(spec.profile.id, active);
       child.on("message", (message) => this.onRunnerMessage(spec.profile.id, message)); child.once("exit", () => this.onRunnerExit(spec.profile.id, active));
-      this.send(child, { type: "START", version: IPC_VERSION, profileId: spec.profile.id, userDataDir: spec.profile.userDataDir, driver: spec.driver, proxy: spec.proxy, probeUrl: spec.probeUrl, recording: spec.recording });
+      this.send(child, { type: "START", version: IPC_VERSION, profileId: spec.profile.id, userDataDir: spec.profile.userDataDir, driver: spec.driver, proxy: spec.proxy, probeUrl: spec.probeUrl, recording: spec.recording, background: spec.background ?? false });
     });
   }
 
@@ -56,6 +56,7 @@ export class SessionOrchestrator extends EventEmitter {
   checkCart(profileId: string): void { this.pendingCartActions.set(profileId, "CHECK_CART"); this.dispatchCartAction(profileId); }
   emptyCart(profileId: string): void { this.pendingCartActions.set(profileId, "EMPTY_CART"); this.dispatchCartAction(profileId); }
   openWarmDestination(profileId: string, url: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "OPEN_WARM_DESTINATION", version: IPC_VERSION, url }); }
+  focusAssistPage(profileId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "FOCUS_ASSIST_PAGE", version: IPC_VERSION }); }
 
   private onRunnerMessage(profileId: string, message: unknown): void {
     const parsed = runnerEventSchema.safeParse(message); if (!parsed.success || (parsed.data.profileId !== null && parsed.data.profileId !== profileId)) return;
@@ -84,6 +85,6 @@ export function nodeRunnerFactory(runnerPath: string): RunnerFactory { return ()
 function toLaunchSpec(input: BrowserProfile | SessionLaunchSpec): SessionLaunchSpec {
   if ("profile" in input) return input;
   if (input.driver.kind !== "NATIVE_STEALTH") throw new Error("External CDP profiles require a resolved encrypted endpoint.");
-  return { profile: input, driver: { kind: "NATIVE_STEALTH" }, proxy: null, probeUrl: DEFAULT_NETWORK_PROBE_URL, recording: null };
+  return { profile: input, driver: { kind: "NATIVE_STEALTH" }, proxy: null, probeUrl: DEFAULT_NETWORK_PROBE_URL, recording: null, background: false };
 }
 function routeFor(proxy: RunnerProxy | null): SessionRoute { return proxy ? { kind: "proxy", proxyProfileId: proxy.proxyProfileId, proxyName: proxy.proxyName, protocol: proxy.protocol, verification: defaultRoute().verification } : defaultRoute(); }

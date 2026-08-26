@@ -4,8 +4,9 @@ import { HumanInput, randomInteger, samplePath, type HumanInputTelemetry, type V
 
 type FakeField = { value: string; checked: boolean; selected: boolean };
 
-function fixture(options: { visible?: boolean; disabled?: boolean; covered?: boolean; clipboard?: boolean } = {}) {
+function fixture(options: { visible?: boolean; disabled?: boolean; covered?: boolean; clipboard?: boolean; checkedReadDelay?: number } = {}) {
   let now = 0; let selectedAll = false;
+  let checkedReadDelay = options.checkedReadDelay ?? 0;
   const field: FakeField = { value: "existing", checked: false, selected: false };
   const moves: Vector[] = []; const telemetry: HumanInputTelemetry[] = []; const keys: string[] = [];
   const locator = {
@@ -15,7 +16,10 @@ function fixture(options: { visible?: boolean; disabled?: boolean; covered?: boo
     boundingBox: async () => ({ x: 100, y: 100, width: 120, height: 40 }),
     evaluate: async () => !(options.covered ?? false),
     inputValue: async () => field.value,
-    isChecked: async () => field.checked,
+    isChecked: async () => {
+      if (field.checked && checkedReadDelay > 0) { checkedReadDelay -= 1; return false; }
+      return field.checked;
+    },
     locator: () => ({ evaluateAll: async () => [{ index: 1, value: "PT", text: "Portugal", disabled: false }].find((item) => item.value === "PT") }),
     selectOption: async ({ value }: { value: string }) => { field.value = value; field.selected = true; },
   } as unknown as Locator;
@@ -85,6 +89,14 @@ describe("FAST_DROP human input", () => {
     const value = fixture(); await value.input.selectOption(value.locator, ["PT"]);
     expect(value.field.value).toBe("PT"); expect(value.field.selected).toBe(true);
     expect(value.telemetry.at(-1)).toMatchObject({ action: "SELECT", method: "SELECT_OPTION_FALLBACK", fallback: true });
+  });
+
+  it("waits for a delayed checkout checkbox state before retrying the click", async () => {
+    const value = fixture({ checkedReadDelay: 3 });
+    await value.input.check(value.locator);
+    expect(value.field.checked).toBe(true);
+    expect(value.telemetry.at(-1)).toMatchObject({ action: "CHECK", method: "MOUSE" });
+    expect(value.telemetry.at(-1)?.fallback).not.toBe(true);
   });
 
   it("exposes deterministic range and path helpers", () => {

@@ -5,7 +5,7 @@ import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
 import { SensitiveValue } from "../ui/SensitiveValue";
-import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
+import { ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 
 type AssignmentColumn = { id: string; label: string };
 
@@ -81,11 +81,14 @@ export function Shipping({
             <h2>Addresses</h2>
             <p className="muted">Encrypted by Windows. Viewing requires explicit consent and expires automatically.</p>
           </div>
-          <div className="header-actions">
-            <ListFilter value={query} onChange={setQuery} label="addresses" hidden={shipping.length < FILTER_THRESHOLD} />
-            <button className="primary" disabled={busy || activeRun} onClick={onNew}>New address</button>
-          </div>
+          <button className="primary" disabled={busy || activeRun} onClick={onNew}>New address</button>
         </div>
+
+        {shipping.length > 0 && (
+          <div className="toolbar">
+            <ListFilter value={query} onChange={setQuery} label="addresses" />
+          </div>
+        )}
 
         {shipping.length === 0 ? (
           <div className="empty">

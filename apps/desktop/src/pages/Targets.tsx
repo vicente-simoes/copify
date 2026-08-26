@@ -5,7 +5,7 @@ import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
 import { StoreMark } from "../ui/StoreMark";
-import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
+import { ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 
 const FREEFORM: StoreManifest["variants"]["sizes"] = { kind: "freeform" };
 
@@ -105,11 +105,14 @@ export function Targets({
             <h2>Targets</h2>
             <p className="muted">What Copify watches for, and which variants it will accept.</p>
           </div>
-          <div className="header-actions">
-            <ListFilter value={query} onChange={setQuery} label="targets" hidden={targets.length < FILTER_THRESHOLD} />
-            <button className="primary" disabled={busy || activeRun} onClick={onNew}>New target</button>
-          </div>
+          <button className="primary" disabled={busy || activeRun} onClick={onNew}>New target</button>
         </div>
+
+        {targets.length > 0 && (
+          <div className="toolbar">
+            <ListFilter value={query} onChange={setQuery} label="targets" />
+          </div>
+        )}
 
         {targets.length === 0 ? (
           <div className="empty">
@@ -143,6 +146,7 @@ export function Targets({
                     <span className="row-meta">
                       {target.productKeywords.join(", ")}
                       {target.negativeKeywords.length ? ` · not ${target.negativeKeywords.join(", ")}` : ""}
+                      {target.directProductUrl ? " · direct product URL" : ""}
                     </span>
                     {check && <DetectionSummary check={check} />}
                   </div>
@@ -226,6 +230,18 @@ export function Targets({
               placeholder="Optional"
             />
           </Field>
+
+          {draft.storeId === "supreme-eu" && (
+            <Field label="Direct product URL (optional)">
+              <input
+                type="url"
+                value={draft.directProductUrl}
+                onChange={(event) => setDraft({ ...draft, directProductUrl: event.target.value })}
+                placeholder="https://eu.supreme.com/products/..."
+              />
+              <p className="field-note">Use a known Supreme product page when it is absent from the collection feed. Copify polls this small product page instead of discovering through the catalog.</p>
+            </Field>
+          )}
 
           <Field label="Colors, best first">
             <input

@@ -3,8 +3,8 @@ import { STORE_GENERAL, storeCurrencySchema } from "./stores";
 
 export * from "./stores";
 
-export const IPC_VERSION = 14 as const;
-export const SCHEMA_VERSION = 12 as const;
+export const IPC_VERSION = 16 as const;
+export const SCHEMA_VERSION = 14 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -14,14 +14,18 @@ export const storeIdSchema = z.string().trim().min(1).max(64);
 export type StoreId = z.infer<typeof storeIdSchema>;
 
 const priorityListSchema = z.array(z.string().trim().min(1).max(120)).max(40);
+const directProductUrlSchema = z.string().url().refine((value) => {
+  const url = new URL(value);
+  return url.protocol === "https:" && url.hostname === "eu.supreme.com" && url.pathname.startsWith("/products/");
+}, "Direct product URLs must be an HTTPS eu.supreme.com product page.");
 export const targetCurrencySchema = storeCurrencySchema;
 export const targetSchema = z.object({
   id: idSchema, name: z.string().trim().min(1).max(120), storeId: storeIdSchema, productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema,
-  preferredColors: priorityListSchema, sizePriority: priorityListSchema, currency: targetCurrencySchema, maxRetailMinor: z.number().int().min(0), quantity: z.number().int().min(1).max(10), enabled: z.boolean(),
+  directProductUrl: directProductUrlSchema.nullable().default(null), preferredColors: priorityListSchema, sizePriority: priorityListSchema, currency: targetCurrencySchema, maxRetailMinor: z.number().int().min(0), quantity: z.number().int().min(1).max(10), enabled: z.boolean(),
   latestCheck: z.lazy(() => targetCheckSchema).nullable(), createdAt: timestampSchema, updatedAt: timestampSchema
 });
 export type Target = z.infer<typeof targetSchema>;
-export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(120), storeId: storeIdSchema.default(STORE_GENERAL), productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema.default([]), preferredColors: priorityListSchema.default([]), sizePriority: priorityListSchema.default([]), currency: targetCurrencySchema.default("EUR"), maxRetailMinor: z.coerce.number().int().min(0), quantity: z.coerce.number().int().min(1).max(10).default(1), enabled: z.boolean().default(true) });
+export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(120), storeId: storeIdSchema.default(STORE_GENERAL), productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema.default([]), directProductUrl: directProductUrlSchema.nullable().optional().default(null), preferredColors: priorityListSchema.default([]), sizePriority: priorityListSchema.default([]), currency: targetCurrencySchema.default("EUR"), maxRetailMinor: z.coerce.number().int().min(0), quantity: z.coerce.number().int().min(1).max(10).default(1), enabled: z.boolean().default(true) });
 export type CreateTargetInput = z.input<typeof createTargetSchema>;
 export const updateTargetSchema = createTargetSchema.partial().refine((value) => Object.keys(value).length > 0, "Provide at least one field to update.");
 export type UpdateTargetInput = z.input<typeof updateTargetSchema>;
@@ -384,13 +388,14 @@ export const clipboardLeaseDenialReasonSchema = z.enum(["CLIPBOARD_NOT_EMPTY", "
 export type ClipboardLeaseDenialReason = z.infer<typeof clipboardLeaseDenialReasonSchema>;
 
 export const runnerCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("START"), version: z.literal(IPC_VERSION), profileId: idSchema, userDataDir: z.string().min(1), driver: runnerBrowserDriverSchema, proxy: runnerProxySchema.nullable(), probeUrl: z.string().url(), recording: runnerRecordingSchema.nullable() }),
+  z.object({ type: z.literal("START"), version: z.literal(IPC_VERSION), profileId: idSchema, userDataDir: z.string().min(1), driver: runnerBrowserDriverSchema, proxy: runnerProxySchema.nullable(), probeUrl: z.string().url(), recording: runnerRecordingSchema.nullable(), background: z.boolean().default(false) }),
   z.object({ type: z.literal("END_RUN"), version: z.literal(IPC_VERSION), runSessionId: idSchema }),
   z.object({ type: z.literal("ASSIST_TARGET"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, candidate: productCandidateSchema, variant: productVariantSchema, quantity: z.number().int().min(1).max(10), priceConstraint: z.object({ currency: targetCurrencySchema, maxRetailMinor: z.number().int().nonnegative() }), shipping: runnerShippingSchema }),
   z.object({ type: z.literal("RESUME_ASSIST"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
   z.object({ type: z.literal("CHECK_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("EMPTY_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("OPEN_WARM_DESTINATION"), version: z.literal(IPC_VERSION), url: z.string().url() }),
+  z.object({ type: z.literal("FOCUS_ASSIST_PAGE"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("PAUSE_AUTOMATION"), version: z.literal(IPC_VERSION), until: timestampSchema }),
   z.object({ type: z.literal("RESUME_AUTOMATION"), version: z.literal(IPC_VERSION) }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_GRANTED"), version: z.literal(IPC_VERSION), requestId: idSchema }),
@@ -440,7 +445,7 @@ export type BenchmarkStatus = z.infer<typeof benchmarkStatusSchema>;
 export const proxyBenchmarkSchema = z.object({ id: idSchema, routeKind: z.enum(["direct", "proxy"]), proxyProfileId: idSchema.nullable(), probeUrl: z.string().url(), startedAt: timestampSchema, completedAt: timestampSchema, attempts: z.number().int().min(1), successes: z.number().int().min(0), publicIp: z.string().nullable(), country: z.string().nullable(), city: z.string().nullable(), connectLatencyMs: z.number().nonnegative().nullable(), medianLatencyMs: z.number().nonnegative().nullable(), jitterMs: z.number().nonnegative().nullable(), failureRate: z.number().min(0).max(1), ipStable: z.boolean(), qualityScore: z.number().int().min(0).max(100), status: benchmarkStatusSchema, errorCode: z.string().nullable(), errorMessage: z.string().nullable(), samples: z.array(z.number().nonnegative()) });
 export type ProxyBenchmark = z.infer<typeof proxyBenchmarkSchema>;
 
-export const profileIpc = { list: "profiles:list", create: "profiles:create", update: "profiles:update", remove: "profiles:remove" } as const;
+export const profileIpc = { list: "profiles:list", create: "profiles:create", update: "profiles:update", remove: "profiles:remove", reorder: "profiles:reorder" } as const;
 export const targetIpc = { list: "targets:list", create: "targets:create", update: "targets:update", remove: "targets:remove", test: "targets:test", changed: "targets:changed" } as const;
 export const healthIpc = { get: "health:get", changed: "health:changed" } as const;
 export const warmingIpc = { list: "warming:list", start: "warming:start", update: "warming:update", openDestination: "warming:open-destination", complete: "warming:complete", changed: "warming:changed" } as const;
@@ -451,8 +456,13 @@ export const settingsIpc = { getNetworkProbe: "settings:get-network-probe", upda
 export const monitorIpc = { status: "monitor:status", setTurbo: "monitor:set-turbo", changed: "monitor:changed" } as const;
 export const usageIpc = { run: "usage:run", totals: "usage:totals" } as const;
 export type AppInfo = { version: string; electronVersion: string; chromeVersion: string | null; osVersion: string };
-export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", emptyCarts: "sessions:empty-carts", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
-export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", changed: "runs:changed" } as const;
+export const sessionIpc = { list: "sessions:list", open: "sessions:open", close: "sessions:close", restart: "sessions:restart", checkCoherence: "sessions:check-coherence", checkCoherenceAll: "sessions:check-coherence-all", openAll: "sessions:open-all", closeAll: "sessions:close-all", checkCart: "sessions:check-cart", emptyCart: "sessions:empty-cart", emptyCarts: "sessions:empty-carts", carts: "sessions:carts", cartChanged: "sessions:cart-changed", changed: "sessions:changed" } as const;
+export const simulatePaymentHandoffSchema = z.object({
+  profileId: idSchema,
+  phase: z.enum(["DETECTED", "RETURNED"]),
+});
+export type SimulatePaymentHandoffInput = z.infer<typeof simulatePaymentHandoffSchema>;
+export const runIpc = { list: "runs:list", get: "runs:get", start: "runs:start", end: "runs:end", resume: "runs:resume", remove: "runs:remove", simulatePaymentHandoff: "runs:simulate-payment-handoff", changed: "runs:changed" } as const;
 export const runSetupIpc = { list: "run-setups:list", create: "run-setups:create", remove: "run-setups:remove", changed: "run-setups:changed" } as const;
 export type ApiResult<T> = { ok: true; value: T } | { ok: false; error: string };
 export function defaultRoute(): SessionRoute { return { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }; }

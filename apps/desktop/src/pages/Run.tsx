@@ -20,12 +20,16 @@ function CheckRow({ check }: { check: PreflightCheck }) {
 function LiveBoard({
   detail,
   busy,
+  developmentMode,
   onResume,
+  onSimulatePaymentHandoff,
   onEnd,
 }: {
   detail: RunDetail | null;
   busy: boolean;
+  developmentMode: boolean;
   onResume: (profileId: string) => void;
+  onSimulatePaymentHandoff: (profileId: string, phase: "DETECTED" | "RETURNED") => void;
   onEnd: () => void;
 }) {
   const [monitor, setMonitor] = useState<MonitorRuntimeStatus | null>(null);
@@ -79,6 +83,7 @@ function LiveBoard({
                 {waiting && <span className="row-meta">{checkpointCopy(session.checkpointReason)}</span>}
                 {readyToConfirm && <span className="row-meta">Checkout is filled. Review payment and confirm manually in the browser.</span>}
                 {paymentHandoff && <span className="row-meta">PSD2 / 3DS authentication needs manual attention in this Chrome window.</span>}
+                {developmentMode && readyToConfirm && <span className="row-meta">Development only: simulate the PSD2 / 3DS alert without interacting with checkout or payment.</span>}
                 {session.finalError && (
                   <span className="error-detail">{session.finalError.code}: {session.finalError.message}</span>
                 )}
@@ -87,6 +92,13 @@ function LiveBoard({
                 <div className="row-actions">
                   <button className="primary" disabled={busy} onClick={() => onResume(session.browserProfileId)}>
                     {cartCheckpoint ? "Recheck cart" : "Resume"}
+                  </button>
+                </div>
+              )}
+              {developmentMode && (readyToConfirm || paymentHandoff) && (
+                <div className="row-actions">
+                  <button className="ghost" disabled={busy} onClick={() => onSimulatePaymentHandoff(session.browserProfileId, paymentHandoff ? "RETURNED" : "DETECTED")}>
+                    {paymentHandoff ? "End test 3DS handoff" : "Test PSD2 / 3DS alert"}
                   </button>
                 </div>
               )}
@@ -118,6 +130,7 @@ export function Run({
   targetId,
   acknowledged,
   busy,
+  developmentMode,
   onName,
   onLevel,
   onMode,
@@ -127,6 +140,7 @@ export function Run({
   onStart,
   onEnd,
   onResume,
+  onSimulatePaymentHandoff,
   onShow,
   onSaveSetup,
   onLoadSetup,
@@ -150,6 +164,7 @@ export function Run({
   targetId: string;
   acknowledged: boolean;
   busy: boolean;
+  developmentMode: boolean;
   onName: (value: string) => void;
   onLevel: (value: DiagnosticLevel) => void;
   onMode: (value: Mode) => void;
@@ -159,6 +174,7 @@ export function Run({
   onStart: () => void;
   onEnd: () => void;
   onResume: (profileId: string) => void;
+  onSimulatePaymentHandoff: (profileId: string, phase: "DETECTED" | "RETURNED") => void;
   onShow: (id: string) => void;
   onSaveSetup: () => void;
   onLoadSetup: (setup: RunSetup) => void;
@@ -167,7 +183,7 @@ export function Run({
   if (activeRun) {
     return (
       <div className="page-stack">
-        <LiveBoard detail={selected} busy={busy} onResume={onResume} onEnd={onEnd} />
+        <LiveBoard detail={selected} busy={busy} developmentMode={developmentMode} onResume={onResume} onSimulatePaymentHandoff={onSimulatePaymentHandoff} onEnd={onEnd} />
       </div>
     );
   }

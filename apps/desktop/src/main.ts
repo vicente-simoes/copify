@@ -4,8 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, appearanceSettingsSchema, chromeColorsSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
-  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, appearanceSettingsSchema, chromeColorsSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type CartStatus, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -31,7 +31,9 @@ const SENSITIVE_CLIPBOARD_TTL_MS = 60_000;
 type SensitiveRevealLease = ProxySecretReveal | ShippingSecretReveal;
 const sensitiveRevealLeases = new Map<string, SensitiveRevealLease>();
 
-if (process.platform === "win32") app.setAppUserModelId("com.copify.app");
+const APP_USER_MODEL_ID = "com.copify.app";
+
+if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
 
 function result<T>(action: () => T): ApiResult<T> { try { return { ok: true, value: action() }; } catch (error) { return { ok: false, error: message(error) }; } }
 async function resultAsync<T>(action: () => Promise<T>): Promise<ApiResult<T>> { try { return { ok: true, value: await action() }; } catch (error) { return { ok: false, error: message(error) }; } }
@@ -55,6 +57,11 @@ async function createWindow(): Promise<void> {
     titleBarStyle: "hidden", titleBarOverlay: { color: chrome.backgroundColor, symbolColor: chrome.symbolColor, height: TITLEBAR_HEIGHT },
     webPreferences: { preload: join(__dirname, "../preload/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false }
   });
+  // The packaged executable supplies the icon itself, but in `pnpm dev` Windows
+  // starts electron.exe. Set it explicitly on the window/taskbar button so the
+  // development shell does not fall back to Electron's generic atom icon.
+  mainWindow.setIcon(windowIconPath());
+  if (process.platform === "win32") mainWindow.setAppDetails({ appId: APP_USER_MODEL_ID, appIconPath: windowIconPath() });
   if (placement.maximized) mainWindow.maximize();
   trackPlacement(mainWindow);
   mainWindow.once("ready-to-show", () => mainWindow?.show());
@@ -131,6 +138,10 @@ function registerIpc(): void {
     const updated = await profiles.update(id, update, endpoint); if (update.proxyProfileId !== undefined || update.driver !== undefined) emitWarmingChanged(); return updated;
   }));
   ipcMain.handle(profileIpc.remove, async (_event, id: string): Promise<ApiResult<boolean>> => { if (activeRun?.profileSessions.has(id)) return { ok: false, error: "End the active run before removing a selected browser profile." }; await orchestrator.close(id); return resultAsync(() => profiles.remove(id)); });
+  ipcMain.handle(profileIpc.reorder, (_event, ids: unknown): Promise<ApiResult<BrowserProfile[]>> => resultAsync(() => {
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) throw new Error("The new browser order is not a list of profile ids.");
+    return profiles.reorder(ids as string[]);
+  }));
   ipcMain.handle(healthIpc.get, (_event, subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string): Promise<ApiResult<import("@copify/shared").BrowserHealthDetail>> => resultAsync(() => profiles.getBrowserHealth(subjectKind, subjectId)));
   ipcMain.handle(warmingIpc.list, (): Promise<ApiResult<ProfileWarmState[]>> => resultAsync(() => profiles.listProfileWarmStates()));
   ipcMain.handle(warmingIpc.start, (_event, browserProfileId: string, storeId: string): Promise<ApiResult<ProfileWarmState>> => resultAsync(async () => {
@@ -192,6 +203,8 @@ function registerIpc(): void {
   ipcMain.handle(sessionIpc.open, (_event, id: string): Promise<ApiResult<SessionSnapshot>> => resultAsync(() => openSession(id)));
   ipcMain.handle(sessionIpc.close, async (_event, id: string): Promise<ApiResult<SessionSnapshot>> => { await orchestrator.close(id); return { ok: true, value: orchestrator.snapshot(id) }; });
   ipcMain.handle(sessionIpc.restart, (_event, id: string): Promise<ApiResult<SessionSnapshot>> => resultAsync(() => restartSession(id)));
+  ipcMain.handle(sessionIpc.checkCoherence, (_event, id: string): Promise<ApiResult<SessionSnapshot>> => resultAsync(() => checkSessionCoherence(id)));
+  ipcMain.handle(sessionIpc.checkCoherenceAll, (): Promise<ApiResult<SessionSnapshot[]>> => resultAsync(() => checkAllSessionCoherence()));
   ipcMain.handle(sessionIpc.openAll, (): Promise<ApiResult<SessionSnapshot[]>> => resultAsync(async () => { if (activeRun) throw new Error("End the active run before opening all profiles."); const enabled = (await profiles.list()).filter((profile) => profile.enabled); await Promise.all(enabled.map(async (profile) => { try { await orchestrator.open(await launchSpec(profile)); } catch (error) { orchestrator.fail(profile.id, sessionFailure(error)); } })); return orchestrator.list(); }));
   ipcMain.handle(sessionIpc.closeAll, async (): Promise<ApiResult<SessionSnapshot[]>> => { await orchestrator.shutdown(); return { ok: true, value: orchestrator.list() }; });
   ipcMain.handle(sessionIpc.carts, (): ApiResult<CartStatus[]> => result(() => [...cartStatuses.values()]));
@@ -209,6 +222,7 @@ function registerIpc(): void {
   ipcMain.handle(runIpc.start, (_event, input: unknown): Promise<ApiResult<RunDetail>> => resultAsync(() => startRun(createRunSchema.parse(input))));
   ipcMain.handle(runIpc.end, (): Promise<ApiResult<RunDetail>> => resultAsync(() => endRun()));
   ipcMain.handle(runIpc.resume, (_event, profileId: string): Promise<ApiResult<boolean>> => resultAsync(() => resumeRunSession(profileId)));
+  ipcMain.handle(runIpc.simulatePaymentHandoff, (_event, input: unknown): Promise<ApiResult<boolean>> => resultAsync(() => simulatePaymentHandoff(simulatePaymentHandoffSchema.parse(input))));
   ipcMain.handle(runIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(() => removeRun(id)));
   ipcMain.handle(runSetupIpc.list, (): Promise<ApiResult<import("@copify/shared").RunSetup[]>> => resultAsync(() => profiles.listRunSetups()));
   ipcMain.handle(runSetupIpc.create, (_event, input: unknown): Promise<ApiResult<import("@copify/shared").RunSetup>> => resultAsync(async () => { const parsed = createRunSetupSchema.parse(input); await assertRunSetupReferences(parsed); const created = await profiles.createRunSetup(parsed); emitRunSetupsChanged(); return created; }));
@@ -266,7 +280,7 @@ async function removeRun(id: string): Promise<boolean> {
   if (activeRun?.detail.run.id === id) throw new Error("End the active run before deleting it."); const removed = await profiles.removeRun(id); if (removed) { const target = runDirectory(id); await rm(target, { recursive: true, force: true }); } emitRunsChanged(); return removed;
 }
 
-async function openSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.open(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
+async function openSession(id: string, background = false): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.open(await launchSpec(profile, background)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
 async function waitForSessionReady(id: string, timeoutMs = 20_000): Promise<SessionSnapshot> {
   const current = orchestrator.snapshot(id); if (current.state === "READY") return current; if (["ERROR", "CRASHED"].includes(current.state)) throw new Error(current.error?.message ?? "The browser failed to open.");
   return new Promise<SessionSnapshot>((resolvePromise, reject) => {
@@ -274,6 +288,19 @@ async function waitForSessionReady(id: string, timeoutMs = 20_000): Promise<Sess
     const changed = (snapshot: SessionSnapshot) => { if (snapshot.profileId !== id) return; if (snapshot.state === "READY") { clearTimeout(timeout); orchestrator.off("changed", changed); resolvePromise(snapshot); } else if (["ERROR", "CRASHED"].includes(snapshot.state)) { clearTimeout(timeout); orchestrator.off("changed", changed); reject(new Error(snapshot.error?.message ?? "The browser failed to open.")); } };
     orchestrator.on("changed", changed);
     timeout = setTimeout(() => { orchestrator.off("changed", changed); reject(new Error("The browser did not become ready in time.")); }, timeoutMs);
+  });
+}
+async function waitForSessionStopped(id: string, timeoutMs = 10_000): Promise<SessionSnapshot> {
+  const current = orchestrator.snapshot(id); if (current.state === "STOPPED") return current;
+  return new Promise<SessionSnapshot>((resolvePromise, reject) => {
+    let timeout: NodeJS.Timeout;
+    const changed = (snapshot: SessionSnapshot) => {
+      if (snapshot.profileId !== id) return;
+      if (snapshot.state === "STOPPED") { clearTimeout(timeout); orchestrator.off("changed", changed); resolvePromise(snapshot); }
+      else if (["ERROR", "CRASHED"].includes(snapshot.state)) { clearTimeout(timeout); orchestrator.off("changed", changed); reject(new Error(snapshot.error?.message ?? "The browser did not close cleanly.")); }
+    };
+    orchestrator.on("changed", changed);
+    timeout = setTimeout(() => { orchestrator.off("changed", changed); reject(new Error("The browser did not close after checking coherence.")); }, timeoutMs);
   });
 }
 function warmDestinationUrl(destination: WarmDestination, storefrontUrl?: string): string { if (destination === "STOREFRONT") { if (!storefrontUrl) throw new Error("The store has no warming URL."); return storefrontUrl; } return destination === "GOOGLE" ? "https://accounts.google.com/" : "https://shop.app/"; }
@@ -284,12 +311,34 @@ async function requestCartEmpty(id: string): Promise<CartStatus> {
   const wasActive = orchestrator.isActive(id);
   const checking: CartStatus = { profileId: id, status: "CHECKING", itemCount: null, checkedAt: null, message: "Removing cart items…" };
   cartStatuses.set(id, checking); mainWindow?.webContents.send(sessionIpc.cartChanged, checking);
-  await openSession(id);
+  await openSession(id, true);
   if (!wasActive) closeAfterCartCheck.add(id);
   orchestrator.emptyCart(id);
   return checking;
 }
 async function restartSession(id: string): Promise<SessionSnapshot> { const profile = await requireProfile(id); try { await orchestrator.restart(await launchSpec(profile)); } catch (error) { orchestrator.fail(id, sessionFailure(error)); throw error; } return orchestrator.snapshot(id); }
+async function checkSessionCoherence(id: string): Promise<SessionSnapshot> {
+  if (activeRun) throw new Error("End the active run before checking browser coherence.");
+  const profile = await requireProfile(id);
+  if (!profile.enabled) throw new Error("Disabled profiles cannot check coherence.");
+  if (profile.driver.kind !== "NATIVE_STEALTH") throw new Error("Coherence checks do not manage externally owned CDP browsers.");
+  if (orchestrator.isActive(id)) throw new Error("Close this browser before checking coherence. Its route, locale, and timezone are immutable while it is open.");
+  await openSession(id);
+  await waitForSessionReady(id);
+  const stopped = waitForSessionStopped(id);
+  await orchestrator.close(id);
+  return stopped;
+}
+async function checkAllSessionCoherence(): Promise<SessionSnapshot[]> {
+  if (activeRun) throw new Error("End the active run before checking browser coherence.");
+  const enabled = (await profiles.list()).filter((profile) => profile.enabled && profile.driver.kind === "NATIVE_STEALTH");
+  if (enabled.length === 0) throw new Error("There are no enabled browser profiles to check.");
+  if (enabled.some((profile) => orchestrator.isActive(profile.id))) throw new Error("Close all enabled browsers before checking coherence for all profiles.");
+  return Promise.all(enabled.map(async (profile) => {
+    try { return await checkSessionCoherence(profile.id); }
+    catch { return orchestrator.snapshot(profile.id); }
+  }));
+}
 async function requireProfile(id: string): Promise<BrowserProfile> { const profile = await profiles.get(id); if (!profile) throw new Error("Browser profile not found."); return profile; }
 async function listStores(): Promise<Store[]> { const settings = await profiles.listStoreSettings(); return listStoreManifests().map((manifest) => ({ ...manifest, enabled: settings[manifest.id] ?? true })); }
 function assertKnownStore(storeId: string | undefined): void { if (storeId !== undefined && !isKnownStore(storeId)) throw new Error("Unknown store."); }
@@ -360,13 +409,13 @@ function scheduleSensitiveClipboardClear(value: string): void {
   timer.unref();
 }
 function snapshotTarget(target: Target): TargetSnapshot { const { id, latestCheck: _latestCheck, createdAt: _createdAt, updatedAt: _updatedAt, ...value } = target; return { ...value, targetId: id, capturedAt: Date.now() }; }
-async function launchSpec(profile: BrowserProfile): Promise<SessionLaunchSpec> {
+async function launchSpec(profile: BrowserProfile, background = false): Promise<SessionLaunchSpec> {
   if (profile.driver.kind === "EXTERNAL_CDP") {
     if (profile.proxyProfileId) throw new Error("External CDP profiles cannot use a Copify-managed proxy. Configure the route in the external browser.");
     const stored = await profiles.getStoredBrowserProfile(profile.id); if (!stored?.externalCdpEndpointCiphertext) throw new Error("Configure a local external CDP endpoint before opening this browser profile.");
     return { profile, driver: { kind: "EXTERNAL_CDP", endpoint: await decryptSecret(stored.externalCdpEndpointCiphertext) }, proxy: null, probeUrl: await profiles.getNetworkProbeUrl(), recording: null };
   }
-  return { profile, driver: { kind: "NATIVE_STEALTH" }, proxy: profile.proxyProfileId ? await resolveProxy(profile.proxyProfileId) : null, probeUrl: await profiles.getNetworkProbeUrl(), recording: null };
+  return { profile, driver: { kind: "NATIVE_STEALTH" }, proxy: profile.proxyProfileId ? await resolveProxy(profile.proxyProfileId) : null, probeUrl: await profiles.getNetworkProbeUrl(), recording: null, background };
 }
 function initialRoute(proxy: RunnerProxy | null): SessionRoute { return proxy ? { kind: "proxy", proxyProfileId: proxy.proxyProfileId, proxyName: proxy.proxyName, protocol: proxy.protocol, verification: defaultRoute().verification } : defaultRoute(); }
 async function resolveProxy(id: string, allowDisabled = false): Promise<RunnerProxy> { const stored = await profiles.getStoredProxy(id); if (!stored) throw new Error("The assigned proxy profile no longer exists."); if (!allowDisabled && !stored.enabled) throw new Error("The assigned proxy profile is disabled."); const username = stored.usernameCiphertext ? await decryptSecret(stored.usernameCiphertext) : undefined; const password = stored.passwordCiphertext ? await decryptSecret(stored.passwordCiphertext) : undefined; return { proxyProfileId: stored.id, proxyName: stored.name, protocol: stored.protocol, host: stored.host, port: stored.port, ...(username ? { username } : {}), ...(password ? { password } : {}), expectedCountry: stored.expectedCountry, expectedCity: stored.expectedCity }; }
@@ -517,7 +566,7 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
     const active = activeRun; if (!active || event.runId !== active.detail.run.id) return; const session = active.profileSessions.get(event.profileId); if (!session) return; const profile = await profiles.get(event.profileId); const proxy = profile?.proxyProfileId ? await profiles.getProxy(profile.proxyProfileId) : undefined; const rate = proxy?.costPerGbMicrosUsd ?? null;
     await profiles.upsertRunNetworkUsage({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); emitMonitorChanged(); return;
   }
-  if (event.type === "PAYMENT_HANDOFF") { if (event.phase === "DETECTED") notifyPaymentHandoff(event.profileId); else mainWindow?.flashFrame(false); return; }
+  if (event.type === "PAYMENT_HANDOFF") { await handlePaymentHandoff(event.profileId, event.phase); return; }
   const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
   const session = active.profileSessions.get(event.profileId); if (!session) return;
   if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
@@ -530,6 +579,45 @@ function notifyPaymentHandoff(profileId: string): void {
   const active = activeRun; const name = active?.profileSessions.get(profileId)?.browserProfileName ?? "Checkout browser"; mainWindow?.show(); mainWindow?.focus(); mainWindow?.flashFrame(true);
   if (Notification.isSupported()) { const notification = new Notification({ title: "Payment authentication required", body: `${name} is waiting for PSD2 / 3DS approval. Complete it manually in Chrome.`, silent: false }); notification.on("click", () => { mainWindow?.show(); mainWindow?.focus(); }); notification.show(); }
   setTimeout(() => mainWindow?.flashFrame(false), 15_000).unref();
+}
+
+async function handlePaymentHandoff(profileId: string, phase: "DETECTED" | "RETURNED"): Promise<void> {
+  if (phase === "DETECTED") {
+    orchestrator.focusAssistPage(profileId);
+    notifyPaymentHandoff(profileId);
+  } else {
+    mainWindow?.flashFrame(false);
+  }
+}
+
+async function simulatePaymentHandoff(input: SimulatePaymentHandoffInput): Promise<boolean> {
+  if (app.isPackaged) throw new Error("Payment handoff simulation is available only in development builds.");
+  const active = activeRun;
+  if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("Start an assisted-checkout run before simulating a payment handoff.");
+  const session = active.profileSessions.get(input.profileId);
+  if (!session) throw new Error("The selected browser profile is not participating in this run.");
+  const expectedState = input.phase === "DETECTED" ? "READY_TO_CONFIRM" : "CHECKOUT_HANDOFF";
+  if (session.executionState !== expectedState) throw new Error(input.phase === "DETECTED" ? "A simulated handoff can start only after this session reaches READY_TO_CONFIRM." : "There is no simulated payment handoff to return from for this session.");
+
+  const nextState = input.phase === "DETECTED" ? "CHECKOUT_HANDOFF" : "READY_TO_CONFIRM";
+  const type = input.phase === "DETECTED" ? "PAYMENT_HANDOFF_DETECTED" : "PAYMENT_HANDOFF_RETURNED";
+  await profiles.addRunEvent({
+    id: randomUUID(),
+    runId: active.detail.run.id,
+    runSessionId: session.id,
+    wallTimeMs: Date.now(),
+    elapsedNs: elapsedSince(active),
+    type,
+    stateBefore: session.executionState,
+    stateAfter: nextState,
+    payload: { category: "PSD2_3DS", synthetic: true, message: "Development-only payment handoff simulation. No payment or checkout action was performed." },
+  });
+  await profiles.setRunSessionExecution(session.id, nextState);
+  session.executionState = nextState;
+  if (nextState === "READY_TO_CONFIRM") await promoteReadySession(active, session);
+  await handlePaymentHandoff(input.profileId, input.phase);
+  emitRunsChanged();
+  return true;
 }
 
 async function resumeRunSession(profileId: string): Promise<boolean> {

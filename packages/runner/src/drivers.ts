@@ -18,6 +18,7 @@ export type DriverLaunchInput = {
   driver: RunnerBrowserDriver;
   userDataDir: string;
   proxy: RunnerProxy | null;
+  background?: boolean;
   persistentOptions?: {
     recordHar?: { path: string; mode?: "full" | "minimal"; content?: "omit" | "embed" | "attach" };
     recordVideo?: { dir: string; size?: { width: number; height: number } };
@@ -48,7 +49,7 @@ export function buildNativeStealthArgs(extraArgs: readonly string[] = []): strin
   return args;
 }
 
-export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistentOptions: DriverLaunchInput["persistentOptions"] = {}, coherence?: NativeCoherenceOptions, proxyAuthExtensionDir?: string): NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> {
+export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistentOptions: DriverLaunchInput["persistentOptions"] = {}, coherence?: NativeCoherenceOptions, proxyAuthExtensionDir?: string, background = false): NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> {
   return {
     headless: false,
     executablePath: findChromeExecutable(),
@@ -56,6 +57,7 @@ export function nativeStealthLaunchOptions(proxy: RunnerProxy | null, persistent
       `--force-webrtc-ip-handling-policy=${coherence?.webRtcPolicy ?? (proxy ? "disable_non_proxied_udp" : "default_public_interface_only")}`,
       ...(coherence?.locale ? [`--lang=${coherence.locale}`] : []),
       ...(proxyAuthExtensionDir ? [`--load-extension=${proxyAuthExtensionDir}`] : []),
+      ...(background ? ["--start-minimized"] : []),
     ]),
     ignoreDefaultArgs: [...UNSAFE_OR_AUTOMATION_DEFAULT_ARGS],
     proxy: proxy ? toPlaywrightProxy(proxy) : undefined,
@@ -73,7 +75,7 @@ export class NativeStealthDriver implements BrowserDriver {
     const proxyAuthBridge = await createProxyAuthenticationBridge(input.proxy);
     let context: BrowserContext | undefined;
     try {
-      context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions, input.coherence, proxyAuthBridge?.extensionDir));
+      context = await chromium.launchPersistentContext(input.userDataDir, nativeStealthLaunchOptions(input.proxy, input.persistentOptions, input.coherence, proxyAuthBridge?.extensionDir, input.background));
       const launchedContext = context;
       // Chromium's launch-time proxy credentials are normally sufficient. Some
       // authenticated gateways still surface a native 407 dialog, however. Handle

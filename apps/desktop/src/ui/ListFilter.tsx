@@ -1,9 +1,8 @@
-/* Lists here are flat and unpaged. Below a dozen rows a filter is one more
-   control to skip past; above it, scanning stops working. The input therefore
-   appears only once a list is long enough to need it, which also keeps the
-   common three-profile setup exactly as it was. */
-
-export const FILTER_THRESHOLD = 8;
+/* Lists here are flat and unpaged, so the filter is the only way to narrow one.
+   It is always present: a control that appears once a list crosses some length
+   is a control nobody knows exists until it turns up, and the count it keys on
+   is invisible to the operator. A permanent box in a known place beats one that
+   comes and goes. */
 
 /** Case-insensitive substring across every field a row shows. */
 export function matchesQuery(query: string, ...fields: (string | null | undefined)[]): boolean {
@@ -12,8 +11,7 @@ export function matchesQuery(query: string, ...fields: (string | null | undefine
   return fields.some((field) => field?.toLowerCase().includes(needle));
 }
 
-export function ListFilter({ value, onChange, label, hidden }: { value: string; onChange: (value: string) => void; label: string; hidden?: boolean }) {
-  if (hidden) return null;
+export function ListFilter({ value, onChange, label }: { value: string; onChange: (value: string) => void; label: string }) {
   return (
     <input
       className="list-filter"

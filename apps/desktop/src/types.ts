@@ -19,6 +19,7 @@ export type TargetDraft = {
   name: string;
   productKeywords: string;
   negativeKeywords: string;
+  directProductUrl: string;
   preferredColors: string;
   sizePriority: string;
   currency: "EUR" | "GBP" | "USD";
@@ -55,6 +56,7 @@ export const blankTarget = (): TargetDraft => ({
   name: "",
   productKeywords: "",
   negativeKeywords: "",
+  directProductUrl: "",
   preferredColors: "",
   sizePriority: "",
   currency: "EUR",

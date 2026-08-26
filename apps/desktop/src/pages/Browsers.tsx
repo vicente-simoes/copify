@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import { type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type Store, type WarmDestination } from "@copify/shared";
 import { Menu, type MenuEntry } from "../ui/Menu";
+import { GripIcon } from "../ui/icons";
 import { Drawer } from "../ui/Drawer";
-import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
+import { ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 
 const STOPPED_SESSION = (profileId: string): SessionSnapshot => ({
   profileId,
@@ -57,13 +58,16 @@ export function Browsers({
   setProfileName,
   onCreate,
   onProfile,
+  onCheckCoherence,
   onUpdate,
   onRemoveProfile,
+  onReorder,
   onCheckCart,
   onEmptyCart,
   onEmptyCarts,
   onOpenAll,
   onCloseAll,
+  onCheckAllCoherence,
   onFailure,
 }: {
   profiles: BrowserProfile[];
@@ -79,17 +83,20 @@ export function Browsers({
   setProfileName: (value: string) => void;
   onCreate: () => void;
   onProfile: (id: string, action: (id: string) => Promise<{ ok: boolean; error?: string }>) => void;
+  onCheckCoherence: (id: string) => void;
   onUpdate: (
     id: string,
     input: { name?: string; enabled?: boolean; proxyProfileId?: string | null },
     success?: string,
   ) => void;
   onRemoveProfile: (profile: BrowserProfile) => void;
+  onReorder: (ordered: BrowserProfile[]) => void;
   onCheckCart: (id: string) => void;
   onEmptyCart: (id: string) => void;
   onEmptyCarts: () => void;
   onOpenAll: () => void;
   onCloseAll: () => void;
+  onCheckAllCoherence: () => void;
   onFailure: (message: string) => void;
 }) {
   const [healthDetail, setHealthDetail] = useState<BrowserHealthDetail | null>(null);
@@ -100,6 +107,11 @@ export function Browsers({
   const [warmBusy, setWarmBusy] = useState(false);
   const [warmError, setWarmError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // `armed` keeps a row undraggable until its handle is pressed, so selecting
+  // text or hitting a button in the row never starts a drag.
+  const [armed, setArmed] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; before: boolean } | null>(null);
   const nameInput = useRef<HTMLInputElement>(null);
   const showHealth = async (subjectKind: BrowserHealthSnapshot["subjectKind"], subjectId: string, title: string) => {
     const result = await window.copify.health.get(subjectKind, subjectId); if (result.ok) { setHealthTitle(title); setHealthDetail(result.value); }
@@ -123,6 +135,32 @@ export function Browsers({
   const openWarmDestination = async (destination: WarmDestination) => { if (!warmProfile || !warmStore) return; setWarmBusy(true); setWarmError(null); try { const result = await window.copify.warming.openDestination(warmProfile.id, warmStore.id, destination); if (!result.ok) setWarmError(result.error); } finally { setWarmBusy(false); } };
   const completeWarming = async () => { if (!warmProfile || !warmStore) return; setWarmBusy(true); setWarmError(null); try { const result = await window.copify.warming.complete(warmProfile.id, warmStore.id); if (result.ok) setWarmState(result.value); else setWarmError(result.error); } finally { setWarmBusy(false); } };
 
+  // Reordering rewrites the whole list, so it only makes sense while every
+  // profile is on screen. A filtered view hides the rows the order depends on.
+  const canReorder = profiles.length > 1 && query.trim() === "";
+  const endDrag = () => { setArmed(null); setDragging(null); setDropTarget(null); };
+  const commitOrder = (next: BrowserProfile[]) => {
+    if (next.every((profile, index) => profile.id === profiles[index]?.id)) return;
+    onReorder(next);
+  };
+  const moveTo = (sourceId: string, targetId: string, before: boolean) => {
+    const source = profiles.find((profile) => profile.id === sourceId);
+    if (!source || sourceId === targetId) return;
+    const next = profiles.filter((profile) => profile.id !== sourceId);
+    const index = next.findIndex((profile) => profile.id === targetId);
+    if (index < 0) return;
+    next.splice(before ? index : index + 1, 0, source);
+    commitOrder(next);
+  };
+  const moveBy = (profileId: string, delta: number) => {
+    const from = profiles.findIndex((profile) => profile.id === profileId);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= profiles.length) return;
+    const next = [...profiles];
+    next.splice(to, 0, ...next.splice(from, 1));
+    commitOrder(next);
+  };
+
   const activeCount = profiles.filter((profile) =>
     ["STARTING", "READY", "STOPPING"].includes((sessions[profile.id] ?? STOPPED_SESSION(profile.id)).state),
   ).length;
@@ -135,32 +173,43 @@ export function Browsers({
             <h2>Browsers</h2>
             <p className="muted">Each browser keeps its own Chrome profile and login state.</p>
           </div>
-          <div className="actions">
-            <form
-              className="compact-create"
-              onSubmit={(event) => { event.preventDefault(); onCreate(); }}
-            >
-              <input
-                ref={nameInput}
-                value={profileName}
-                onChange={(event) => setProfileName(event.target.value)}
-                maxLength={80}
-                placeholder="New browser name"
-              />
-              <button disabled={busy || !profileName.trim()} type="submit">Add</button>
-            </form>
-            <button
-              className="primary"
-              disabled={busy || !profiles.some((profile) => profile.enabled)}
-              onClick={onOpenAll}
-            >
-              Open all
-            </button>
-            <button disabled={busy || activeCount === 0} onClick={onCloseAll}>Close all</button>
-            {showCart && <button disabled={busy || !profiles.some((profile) => profile.enabled)} onClick={onEmptyCarts}>Empty carts</button>}
-            <ListFilter value={query} onChange={setQuery} label="browsers" hidden={profiles.length < FILTER_THRESHOLD} />
-          </div>
+          {/* The header states what the page is and how to add to it. */}
+          <form
+            className="compact-create"
+            onSubmit={(event) => { event.preventDefault(); onCreate(); }}
+          >
+            <input
+              ref={nameInput}
+              value={profileName}
+              onChange={(event) => setProfileName(event.target.value)}
+              maxLength={80}
+              placeholder="New browser name"
+            />
+            <button disabled={busy || !profileName.trim()} type="submit">Add</button>
+          </form>
         </div>
+
+        {/* The toolbar carries what you do with the browsers that already
+            exist: how the list is narrowed on the left, what happens to every
+            session on the right. It is absent only when there is nothing to
+            act on, where the empty state below speaks for the page instead. */}
+        {(profiles.length > 0 || watcherStores.length > 0) && (
+          <div className="toolbar">
+            <ListFilter value={query} onChange={setQuery} label="browsers" />
+            <div className="toolbar-actions">
+              <button
+                className="primary"
+                disabled={busy || !profiles.some((profile) => profile.enabled)}
+                onClick={onOpenAll}
+              >
+                Open all
+              </button>
+              <button disabled={busy || activeCount === 0} onClick={onCloseAll}>Close all</button>
+              {showCart && <button disabled={busy || !profiles.some((profile) => profile.enabled)} onClick={onEmptyCarts}>Empty carts</button>}
+              <button disabled={busy || activeRun || activeCount > 0 || !profiles.some((profile) => profile.enabled && profile.driver.kind === "NATIVE_STEALTH")} onClick={onCheckAllCoherence}>Check coherence all</button>
+            </div>
+          </div>
+        )}
 
         {profiles.length === 0 && watcherStores.length === 0 ? (
           <div className="empty">
@@ -172,6 +221,7 @@ export function Browsers({
         ) : (
           <div className={`rows browser-rows ${showCart ? "has-cart" : ""}`}>
             <div className="row row-head">
+              <span className="col-drag" />
               <span className="col-state">Status</span>
               <span className="col-name">Name</span>
               <span className="col-route">Route</span>
@@ -183,6 +233,7 @@ export function Browsers({
 
             {watcherStores.map((store) => (
               <div className="row browser-row" key={`watcher-${store.id}`}>
+                <span className="col-drag drag-pinned" title="The storefront watcher always stays at the top." />
                 <span className="state ready col-state">WATCHER</span>
                 <div className="col-name row-main"><span className="row-name">Storefront watcher</span><span className="row-meta">{store.name} · persistent direct profile</span></div>
                 <span className="col-route row-cell">Direct</span><span className="col-ip row-cell mono">—</span><span className="col-latency row-cell mono">—</span>
@@ -203,6 +254,7 @@ export function Browsers({
 
               const entries: MenuEntry[] = [
                 { kind: "item", label: "Details", onSelect: () => void showHealth("CHECKOUT", profile.id, profile.name) },
+                { kind: "item", label: "Check coherence", disabled: busy || activeRun || !profile.enabled || active || profile.driver.kind !== "NATIVE_STEALTH", onSelect: () => onCheckCoherence(profile.id) },
                 { kind: "item", label: warm?.status === "READY" ? "Warm profile again" : "Warm profile", disabled: busy || warmBusy || activeRun || !warmingStore || busyState, onSelect: () => void beginWarming(profile) },
                 { kind: "item", label: "Restart", disabled: busy || !profile.enabled || busyState, onSelect: () => onProfile(profile.id, window.copify.sessions.restart) },
                 { kind: "item", label: "Rename", disabled: busy || active, onSelect: () => {
@@ -238,7 +290,56 @@ export function Browsers({
               );
 
               return (
-                <div className={`row browser-row ${profile.enabled ? "" : "is-disabled"}`} key={profile.id}>
+                <div
+                  className={[
+                    "row browser-row",
+                    profile.enabled ? "" : "is-disabled",
+                    dragging === profile.id ? "is-dragging" : "",
+                    dropTarget?.id === profile.id ? (dropTarget.before ? "drop-before" : "drop-after") : "",
+                  ].filter(Boolean).join(" ")}
+                  key={profile.id}
+                  draggable={canReorder && armed === profile.id}
+                  onDragStart={(event) => {
+                    if (!canReorder || armed !== profile.id) { event.preventDefault(); return; }
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", profile.id);
+                    setDragging(profile.id);
+                  }}
+                  onDragOver={(event) => {
+                    if (!dragging || dragging === profile.id) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    const box = event.currentTarget.getBoundingClientRect();
+                    setDropTarget({ id: profile.id, before: event.clientY < box.top + box.height / 2 });
+                  }}
+                  onDrop={(event) => {
+                    if (!dragging || dragging === profile.id) return;
+                    event.preventDefault();
+                    const box = event.currentTarget.getBoundingClientRect();
+                    moveTo(dragging, profile.id, event.clientY < box.top + box.height / 2);
+                    endDrag();
+                  }}
+                  onDragEnd={endDrag}
+                >
+                  <span className="col-drag">
+                    <button
+                      type="button"
+                      className="drag-handle"
+                      aria-label={`Reorder ${profile.name}`}
+                      disabled={!canReorder}
+                      title={canReorder ? "Drag to reorder" : "Clear the filter to reorder browsers"}
+                      onPointerDown={() => setArmed(profile.id)}
+                      onPointerUp={() => setArmed(null)}
+                      onBlur={() => setArmed(null)}
+                      onKeyDown={(event) => {
+                        if (!canReorder) return;
+                        if (event.key === "ArrowUp") { event.preventDefault(); moveBy(profile.id, -1); }
+                        if (event.key === "ArrowDown") { event.preventDefault(); moveBy(profile.id, 1); }
+                      }}
+                    >
+                      <GripIcon className="icon" />
+                    </button>
+                  </span>
                   <span className={`state ${session.state.toLowerCase()} col-state`}>{session.state}</span>
 
                   <div className="col-name row-main">

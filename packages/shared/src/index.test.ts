@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IPC_VERSION, SCHEMA_VERSION, appearanceSettingsSchema, defaultAppearanceSettings, defaultThemeOverrides, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, shippingSecretRevealSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, SCHEMA_VERSION, appearanceSettingsSchema, defaultAppearanceSettings, defaultThemeOverrides, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, sessionIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -32,8 +32,8 @@ describe("store registry", () => {
 });
 
 describe("shared contracts", () => {
-  it("publishes the v0.10 IPC and SQLite contract versions", () => {
-    expect(IPC_VERSION).toBe(14); expect(SCHEMA_VERSION).toBe(12);
+  it("publishes the current IPC and SQLite contract versions", () => {
+    expect(IPC_VERSION).toBe(16); expect(SCHEMA_VERSION).toBe(14);
   });
   it("validates profile input", () => {
     expect(createBrowserProfileSchema.safeParse({ name: "  " }).success).toBe(false);
@@ -41,6 +41,21 @@ describe("shared contracts", () => {
   });
   it("rejects malformed runner messages", () => {
     expect(runnerCommandSchema.safeParse({ type: "START", version: 1 }).success).toBe(false);
+    expect(runnerCommandSchema.safeParse({ type: "FOCUS_ASSIST_PAGE", version: IPC_VERSION }).success).toBe(true);
+    const profileId = "00000000-0000-4000-8000-000000000001";
+    const command = runnerCommandSchema.parse({ type: "START", version: IPC_VERSION, profileId, userDataDir: "C:/profile", driver: { kind: "NATIVE_STEALTH" }, proxy: null, probeUrl: "https://ipwho.is/", recording: null });
+    if (command.type !== "START") throw new Error("Expected a START command.");
+    expect(command.background).toBe(false);
+  });
+  it("accepts only explicit development payment handoff simulation input", () => {
+    const profileId = "00000000-0000-4000-8000-000000000001";
+    expect(simulatePaymentHandoffSchema.safeParse({ profileId, phase: "DETECTED" }).success).toBe(true);
+    expect(simulatePaymentHandoffSchema.safeParse({ profileId, phase: "PAYMENT" }).success).toBe(false);
+    expect(simulatePaymentHandoffSchema.safeParse({ profileId: "not-a-uuid", phase: "RETURNED" }).success).toBe(false);
+  });
+  it("publishes the browser coherence-check IPC endpoint", () => {
+    expect(sessionIpc.checkCoherence).toBe("sessions:check-coherence");
+    expect(sessionIpc.checkCoherenceAll).toBe("sessions:check-coherence-all");
   });
   it("validates clipboard leases without accepting oversized or mismatched IPC versions", () => {
     const profileId = "00000000-0000-4000-8000-000000000001"; const requestId = "00000000-0000-4000-8000-000000000002";
@@ -63,6 +78,8 @@ describe("shared contracts", () => {
     expect(createTargetSchema.safeParse({ name: "Bad", productKeywords: [], maxRetailMinor: 1 }).success).toBe(false);
     expect(createTargetSchema.parse({ name: "Jacket", productKeywords: ["Leather Jacket"], maxRetailMinor: 20_000 })).toMatchObject({ storeId: "general", currency: "EUR", quantity: 1 });
     expect(createTargetSchema.parse({ name: "Jacket", storeId: "supreme-eu", productKeywords: ["Leather Jacket"], maxRetailMinor: 20_000 })).toMatchObject({ storeId: "supreme-eu" });
+    expect(createTargetSchema.parse({ name: "Jacket", storeId: "supreme-eu", productKeywords: ["Leather Jacket"], directProductUrl: "https://eu.supreme.com/products/leather-jacket?all=1", maxRetailMinor: 20_000 }).directProductUrl).toBe("https://eu.supreme.com/products/leather-jacket?all=1");
+    expect(createTargetSchema.safeParse({ name: "Jacket", storeId: "supreme-eu", productKeywords: ["Leather Jacket"], directProductUrl: "https://example.com/products/leather-jacket", maxRetailMinor: 20_000 }).success).toBe(false);
     expect(createTargetSchema.safeParse({ name: "Jacket", storeId: "", productKeywords: ["Leather Jacket"], maxRetailMinor: 20_000 }).success).toBe(false);
     const profileId = "00000000-0000-4000-8000-000000000001";
     expect(createRunSchema.parse({ name: "Observe", diagnosticLevel: "NORMAL", profileIds: [profileId] }).targetId).toBeNull();

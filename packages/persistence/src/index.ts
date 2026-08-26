@@ -156,11 +156,36 @@ export class ProfileRepository {
       );
       CREATE INDEX IF NOT EXISTS profile_warm_states_profile_idx ON profile_warm_states(browser_profile_id, updated_at DESC);`);
     }
-    this.sql.exec("PRAGMA user_version = 12;");
+    if (version < 13 && this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles'").get()) {
+      this.sql.exec("ALTER TABLE browser_profiles ADD COLUMN position INTEGER NOT NULL DEFAULT 0;");
+      // Seed the manual order from creation order so existing installs open on
+      // exactly the list they had before rows became draggable.
+      const statement = this.sql.prepare("UPDATE browser_profiles SET position=? WHERE id=?");
+      this.all("SELECT id FROM browser_profiles ORDER BY created_at ASC, id ASC").forEach((row, index) => statement.run(index, String(row.id)));
+    }
+    if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='targets'").get()) {
+      const hasDirectProductUrl = this.all("PRAGMA table_info(targets)").some((row) => String(row.name) === "direct_product_url");
+      if (!hasDirectProductUrl) this.sql.exec("ALTER TABLE targets ADD COLUMN direct_product_url TEXT;");
+    }
+    this.sql.exec("PRAGMA user_version = 14;");
   }
 
   async list(): Promise<BrowserProfile[]> {
-    return this.all("SELECT * FROM browser_profiles ORDER BY created_at ASC").map((row) => browserProfileSchema.parse(mapProfile(row)));
+    return this.all("SELECT * FROM browser_profiles ORDER BY position ASC, created_at ASC").map((row) => browserProfileSchema.parse(mapProfile(row)));
+  }
+
+  /** Applies a manual order; `ids` must name every profile exactly once. */
+  async reorder(ids: string[]): Promise<BrowserProfile[]> {
+    const existing = new Set(this.all("SELECT id FROM browser_profiles").map((row) => String(row.id)));
+    const unique = new Set(ids);
+    if (unique.size !== ids.length || ids.length !== existing.size || ids.some((id) => !existing.has(id))) {
+      throw new Error("The new browser order must list every browser exactly once.");
+    }
+    this.transaction(() => {
+      const statement = this.sql.prepare("UPDATE browser_profiles SET position=? WHERE id=?");
+      ids.forEach((id, index) => statement.run(index, id));
+    });
+    return this.list();
   }
 
   async get(id: string): Promise<BrowserProfile | undefined> {
@@ -181,8 +206,10 @@ export class ProfileRepository {
     try {
       this.transaction(() => {
         if (endpointSecretId && endpointCiphertext) this.insertSecret(endpointSecretId, endpointCiphertext, now);
-        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,created_at,updated_at) VALUES (?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?)")
-          .run(profile.id, profile.name, profile.userDataDir, null, null, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, now, now);
+        const last = this.getRow("SELECT MAX(position) AS position FROM browser_profiles");
+        const position = last?.position == null ? 0 : Number(last.position) + 1;
+        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,position,created_at,updated_at) VALUES (?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?,?)")
+          .run(profile.id, profile.name, profile.userDataDir, null, null, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, position, now, now);
       });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not create the browser profile."); }
     return profile;
@@ -341,14 +368,14 @@ export class ProfileRepository {
   async getTarget(id: string): Promise<Target | undefined> { const row = this.getRow("SELECT * FROM targets WHERE id = ?", [id]); return row ? targetSchema.parse(mapTarget(row)) : undefined; }
   async createTarget(input: CreateTargetInput): Promise<Target> {
     const parsed = createTargetSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
+    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,direct_product_url,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), parsed.directProductUrl, JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
     return (await this.getTarget(id))!;
   }
   async updateTarget(id: string, input: UpdateTargetInput): Promise<Target> {
     const parsed = updateTargetSchema.parse(input); const existing = await this.getTarget(id); if (!existing) throw new Error("Target not found."); const updated = targetSchema.parse({ ...existing, ...parsed, updatedAt: Date.now() });
-    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,enabled=?,updated_at=? WHERE id=?")
-      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
+    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,direct_product_url=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,enabled=?,updated_at=? WHERE id=?")
+      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), updated.directProductUrl, JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
     return (await this.getTarget(id))!;
   }
   async setTargetCheck(targetId: string, check: TargetCheck): Promise<Target> { const value = targetCheckSchema.parse(check); this.sql.prepare("UPDATE targets SET latest_check_json=?, updated_at=? WHERE id=?").run(JSON.stringify(value), Date.now(), targetId); const target = await this.getTarget(targetId); if (!target) throw new Error("Target not found."); return target; }
@@ -606,7 +633,7 @@ function mapRunSetup(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapTarget(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), directProductUrl: row.direct_product_url ?? null, preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSession(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), shippingProfile: row.shipping_profile_json ? JSON.parse(String(row.shipping_profile_json)) : { shippingProfileId: null, name: null, country: null, complete: false }, assistedEligible: Boolean(row.assisted_eligible), executionState: row.execution_state ?? "OBSERVING", checkpointReason: row.checkpoint_reason ?? null, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
-  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CreateBrowserProfileInput, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type Run, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -9,7 +9,8 @@ const api = {
     list: (): Promise<ApiResult<BrowserProfile[]>> => ipcRenderer.invoke(profileIpc.list),
     create: (input: CreateBrowserProfileInput): Promise<ApiResult<BrowserProfile>> => ipcRenderer.invoke(profileIpc.create, input),
     update: (id: string, input: UpdateBrowserProfileInput): Promise<ApiResult<BrowserProfile>> => ipcRenderer.invoke(profileIpc.update, id, input),
-    remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(profileIpc.remove, id)
+    remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(profileIpc.remove, id),
+    reorder: (ids: string[]): Promise<ApiResult<BrowserProfile[]>> => ipcRenderer.invoke(profileIpc.reorder, ids)
   },
   targets: {
     list: (): Promise<ApiResult<Target[]>> => ipcRenderer.invoke(targetIpc.list),
@@ -54,7 +55,7 @@ const api = {
     appInfo: (): Promise<ApiResult<AppInfo>> => ipcRenderer.invoke(settingsIpc.appInfo)
   },
   sessions: {
-    list: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.list), open: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.open, id), close: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.close, id), restart: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.restart, id), openAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.openAll), closeAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.closeAll), carts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.carts), checkCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.checkCart, id), emptyCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.emptyCart, id), emptyCarts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.emptyCarts),
+    list: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.list), open: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.open, id), close: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.close, id), restart: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.restart, id), checkCoherence: (id: string): Promise<ApiResult<SessionSnapshot>> => ipcRenderer.invoke(sessionIpc.checkCoherence, id), checkCoherenceAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.checkCoherenceAll), openAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.openAll), closeAll: (): Promise<ApiResult<SessionSnapshot[]>> => ipcRenderer.invoke(sessionIpc.closeAll), carts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.carts), checkCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.checkCart, id), emptyCart: (id: string): Promise<ApiResult<CartStatus>> => ipcRenderer.invoke(sessionIpc.emptyCart, id), emptyCarts: (): Promise<ApiResult<CartStatus[]>> => ipcRenderer.invoke(sessionIpc.emptyCarts),
     onChanged: (listener: (snapshot: SessionSnapshot) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, snapshot: SessionSnapshot) => listener(snapshot); ipcRenderer.on(sessionIpc.changed, callback); return () => ipcRenderer.removeListener(sessionIpc.changed, callback); }, onCartChanged: (listener: (status: CartStatus) => void): (() => void) => { const callback = (_event: Electron.IpcRendererEvent, status: CartStatus) => listener(status); ipcRenderer.on(sessionIpc.cartChanged, callback); return () => ipcRenderer.removeListener(sessionIpc.cartChanged, callback); }
   },
   runs: {
@@ -62,6 +63,7 @@ const api = {
     get: (id: string): Promise<ApiResult<RunDetail | null>> => ipcRenderer.invoke(runIpc.get, id),
     start: (input: CreateRunInput): Promise<ApiResult<RunDetail>> => ipcRenderer.invoke(runIpc.start, input),
     end: (): Promise<ApiResult<RunDetail>> => ipcRenderer.invoke(runIpc.end), resume: (profileId: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.resume, profileId),
+    simulatePaymentHandoff: (input: SimulatePaymentHandoffInput): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.simulatePaymentHandoff, input),
     remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(runIpc.remove, id),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(runIpc.changed, callback); return () => ipcRenderer.removeListener(runIpc.changed, callback); }
   },

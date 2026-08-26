@@ -150,6 +150,11 @@ export class SupremeHttpAdapter implements HttpStoreAdapter {
   private static readonly DISCOVERY_REFRESH_MS = 60_000;
   constructor(private readonly transport: MonitorTransport, private readonly route: MonitorRoute, private readonly policy: MonitorPolicy) {}
   async locateProducts(target: TargetSnapshot): Promise<{ candidates: ProductCandidate[]; response: MonitorResponse }> {
+    if (target.directProductUrl) {
+      const response = await this.checkedGet(target.directProductUrl);
+      const candidates = parseSupremeHtmlProducts(response.body, target).filter((candidate) => matchesTarget(candidate.name, target));
+      return { candidates: this.preferredColorCandidates(candidates, target), response };
+    }
     if (!this.knownCandidates.length || Date.now() - this.lastDiscoveryAt >= SupremeHttpAdapter.DISCOVERY_REFRESH_MS) {
       const response = await this.checkedGet(this.policy.endpoint);
       const candidates = parseSupremeHtmlProducts(response.body, target).filter((candidate) => matchesTarget(candidate.name, target));

@@ -5,7 +5,7 @@ import { parseProxyUrl } from "../proxy-url";
 import { Field } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { Drawer } from "../ui/Drawer";
-import { FILTER_THRESHOLD, ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
+import { ListFilter, NoMatches, matchesQuery } from "../ui/ListFilter";
 import { SensitiveValue } from "../ui/SensitiveValue";
 
 function score(benchmark?: ProxyBenchmark): string {
@@ -85,11 +85,14 @@ export function Proxies({
             <h2>Proxies</h2>
             <p className="muted">A browser uses your own connection unless you assign one.</p>
           </div>
-          <div className="header-actions">
-            <ListFilter value={query} onChange={setQuery} label="proxies" hidden={proxies.length < FILTER_THRESHOLD} />
-            <button disabled={busy} onClick={onNew}>New proxy</button>
-          </div>
+          <button disabled={busy} onClick={onNew}>New proxy</button>
         </div>
+
+        {proxies.length > 0 && (
+          <div className="toolbar">
+            <ListFilter value={query} onChange={setQuery} label="proxies" />
+          </div>
+        )}
 
         {proxies.length === 0 ? (
           <div className="empty">

@@ -74,6 +74,17 @@ export const MoreIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const GripIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx="6" cy="4" r="1" fill="currentColor" stroke="none" />
+    <circle cx="10" cy="4" r="1" fill="currentColor" stroke="none" />
+    <circle cx="6" cy="8" r="1" fill="currentColor" stroke="none" />
+    <circle cx="10" cy="8" r="1" fill="currentColor" stroke="none" />
+    <circle cx="6" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="10" cy="12" r="1" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
 export const CheckIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M3 8.4 6.2 11.5 13 4.8" />

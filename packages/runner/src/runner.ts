@@ -34,13 +34,14 @@ let paymentHandoffLatch: PaymentHandoffLatch | undefined;
 
 process.on("message", async (message: unknown) => {
   const command = runnerCommandSchema.safeParse(message); if (!command.success) return;
-  if (command.data.type === "START") await start(command.data.profileId, command.data.userDataDir, command.data.driver, command.data.proxy, command.data.probeUrl, command.data.recording);
+  if (command.data.type === "START") await start(command.data.profileId, command.data.userDataDir, command.data.driver, command.data.proxy, command.data.probeUrl, command.data.recording, command.data.background);
   if (command.data.type === "END_RUN") await endRun(command.data.runSessionId);
   if (command.data.type === "ASSIST_TARGET") await assistTarget(command.data);
   if (command.data.type === "RESUME_ASSIST") await resumeAssist(command.data.runId, command.data.runSessionId);
   if (command.data.type === "CHECK_CART") await checkCart(command.data.profileId);
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
   if (command.data.type === "OPEN_WARM_DESTINATION") await openWarmDestination(command.data.url);
+  if (command.data.type === "FOCUS_ASSIST_PAGE") await assistPage?.bringToFront().catch(() => undefined);
   if (command.data.type === "PAUSE_AUTOMATION") pauseAutomation(command.data.until);
   if (command.data.type === "RESUME_AUTOMATION") automationPausedUntil = null;
   if (command.data.type === "CLIPBOARD_LEASE_GRANTED") resolveClipboardLease(command.data.requestId, true);
@@ -48,7 +49,7 @@ process.on("message", async (message: unknown) => {
   if (command.data.type === "STOP") await stop();
 });
 
-async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null): Promise<void> {
+async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null, background: boolean): Promise<void> {
   if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
   try {
     await disableChromeTranslation(userDataDir);
@@ -61,7 +62,7 @@ async function start(id: string, userDataDir: string, driver: RunnerBrowserDrive
       }
     }
     const resolved = driver.kind === "NATIVE_STEALTH" ? await resolveNetworkCoherence(proxy, probeUrl) : undefined;
-    driverSession = await createBrowserDriver(driver).launch({ driver, userDataDir, proxy, persistentOptions, coherence: resolved?.launch });
+    driverSession = await createBrowserDriver(driver).launch({ driver, userDataDir, proxy, persistentOptions, coherence: resolved?.launch, background });
     context = driverSession.context; driverMetadata = driverSession.metadata;
     if (resolved) coherence = resolved.summary;
     else {

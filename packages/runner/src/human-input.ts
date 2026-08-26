@@ -159,8 +159,25 @@ export class HumanInput {
   async check(locator: Locator): Promise<void> {
     const started = this.dependencies.now();
     if (!await locator.isChecked()) await this.click(locator);
-    if (!await locator.isChecked()) throw new HumanInputError("The checkbox did not accept the click.");
-    this.dependencies.telemetry?.({ action: "CHECK", method: "MOUSE", durationMs: this.dependencies.now() - started });
+    if (await this.waitForChecked(locator)) {
+      this.dependencies.telemetry?.({ action: "CHECK", method: "MOUSE", durationMs: this.dependencies.now() - started });
+      return;
+    }
+
+    // Shopify can visually check the control before its checkout component has
+    // synchronized the input's checked property. Wait first, then make one
+    // deliberate retry rather than treating that transient state as failure.
+    await this.click(locator);
+    if (!await this.waitForChecked(locator)) throw new HumanInputError("The checkbox did not accept the click.");
+    this.dependencies.telemetry?.({ action: "CHECK", method: "MOUSE", durationMs: this.dependencies.now() - started, fallback: true });
+  }
+
+  private async waitForChecked(locator: Locator): Promise<boolean> {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (await locator.isChecked().catch(() => false)) return true;
+      if (attempt < 5) await this.dependencies.sleep(75);
+    }
+    return false;
   }
 
   private async focusAndClear(locator: Locator): Promise<void> {

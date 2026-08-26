@@ -19,7 +19,7 @@ const stopped = (profileId: string): SessionSnapshot => ({
 const benchmark = { id: id(9), qualityScore: 90, status: "PASS" } as unknown as ProxyBenchmark;
 
 const target = (over: Partial<Target> = {}): Target => ({
-  id: id(5), name: "Box Logo", storeId: "supreme-eu", productKeywords: ["Box Logo"], negativeKeywords: [],
+  id: id(5), name: "Box Logo", storeId: "supreme-eu", productKeywords: ["Box Logo"], negativeKeywords: [], directProductUrl: null,
   preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 20_000, quantity: 1,
   enabled: true, latestCheck: null, createdAt: 0, updatedAt: 0, ...over,
 });

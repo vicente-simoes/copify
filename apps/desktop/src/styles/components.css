@@ -19,6 +19,21 @@
 
 .actions, .header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
+/* A strip between the page header and its table. Controls that narrow the view
+   sit left, controls that act on every row sit right — so a control's position
+   says which kind it is. Without it a create field, a filter and three session
+   actions share one wrapping row and land wherever the width leaves them. */
+/* Deliberately asymmetric: the gap below is wider than the gap above, so the
+   strip reads as belonging to the header rather than to the first table row.
+   Both follow density, so a compact list tightens with everything else. */
+.toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 10px;
+  margin-top: var(--stack-gap);
+  margin-bottom: calc(var(--stack-gap) + 8px);
+}
+.toolbar-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+
 /* flex-end so the button sits on the input baseline rather than centring
    against the label-plus-input stack. */
 .inline-form {
@@ -387,6 +402,7 @@
 
 .browser-rows {
   grid-template-columns:
+    30px                  /* drag    */
     minmax(96px, 110px)   /* status  */
     minmax(0, 1fr)        /* name    */
     minmax(80px, 130px)   /* route   */
@@ -396,9 +412,32 @@
 }
 .browser-rows.has-cart {
   grid-template-columns:
-    minmax(96px, 110px) minmax(0, 1fr) minmax(80px, 130px)
+    30px minmax(96px, 110px) minmax(0, 1fr) minmax(80px, 130px)
     minmax(96px, 150px) minmax(60px, 76px) minmax(64px, 90px) minmax(92px, auto);
 }
+
+/* ---- reordering ---- */
+
+.col-drag { display: flex; align-items: center; justify-content: center; align-self: stretch; }
+/* Always visible rather than hover-only: a handle nobody can find is not a
+   handle. It stays quiet until the row is hovered, then reads as pressable. */
+.drag-handle {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 30px; min-width: 0; padding: 0;
+  background: transparent; border: 0; border-radius: var(--radius);
+  color: var(--fg-muted); cursor: grab;
+}
+.browser-row:hover .drag-handle { color: var(--fg); }
+.drag-handle:hover:not(:disabled) { background: var(--surface-hover); }
+.drag-handle:active:not(:disabled) { cursor: grabbing; }
+.drag-handle:disabled { cursor: default; color: var(--fg-dim); }
+.drag-handle .icon { width: 20px; height: 20px; }
+
+.browser-row.is-dragging { opacity: 0.45; }
+/* The insertion point is drawn as an edge on the row being hovered, which keeps
+   the list from reflowing while the pointer moves across it. */
+.browser-row.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+.browser-row.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
 
 .row-head {
   min-height: var(--control-height); padding-top: 0; padding-bottom: 6px;

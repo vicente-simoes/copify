@@ -214,9 +214,10 @@ function App() {
   const execute = async (
     operation: () => Promise<{ ok: boolean; error?: string }>,
     success?: string,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     setBusy(true);
     setNotice(null);
+    let completed = false;
     try {
       const response = await operation();
       if (!response.ok)
@@ -224,11 +225,15 @@ function App() {
           kind: "error",
           message: response.error ?? "Operation failed.",
         });
-      else if (success) setNotice({ kind: "info", message: success });
+      else {
+        completed = true;
+        if (success) setNotice({ kind: "info", message: success });
+      }
     } finally {
       setBusy(false);
       await reload();
     }
+    return completed;
   };
   const saveProxy = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -363,6 +368,7 @@ function App() {
       name: targetDraft.name.trim(),
       productKeywords: list(targetDraft.productKeywords),
       negativeKeywords: list(targetDraft.negativeKeywords),
+      directProductUrl: targetDraft.directProductUrl.trim() || null,
       preferredColors: list(targetDraft.preferredColors),
       sizePriority: list(targetDraft.sizePriority),
       currency: targetDraft.currency,
@@ -370,12 +376,13 @@ function App() {
       quantity: 1,
       enabled: targetDraft.enabled,
     };
-    await execute(
+    const saved = await execute(
       () =>
         editingTargetId
           ? window.copify.targets.update(editingTargetId, input)
           : window.copify.targets.create(input),
     );
+    if (!saved) return;
     setTargetDraft(blankTarget());
     setEditingTargetId(null);
     setTargetDrawerOpen(false);
@@ -389,6 +396,7 @@ function App() {
       name: target.name,
       productKeywords: target.productKeywords.join(", "),
       negativeKeywords: target.negativeKeywords.join(", "),
+      directProductUrl: target.directProductUrl ?? "",
       preferredColors: target.preferredColors.join(", "),
       sizePriority: target.sizePriority.join(", "),
       currency: target.currency,
@@ -485,6 +493,15 @@ function App() {
               onResume={(profileId) =>
                 void execute(() => window.copify.runs.resume(profileId))
               }
+              developmentMode={import.meta.env.DEV}
+              onSimulatePaymentHandoff={(profileId, phase) =>
+                void execute(
+                  () => window.copify.runs.simulatePaymentHandoff({ profileId, phase }),
+                  phase === "DETECTED"
+                    ? "Development 3DS handoff simulated. No payment was attempted."
+                    : "Development 3DS handoff cleared.",
+                )
+              }
               onShow={(id) => void showRun(id)}
               onSaveSetup={() => void saveRunSetup()}
               onLoadSetup={loadRunSetup}
@@ -515,6 +532,24 @@ function App() {
               })
             }
             onProfile={(id, action) => void execute(() => action(id))}
+            onCheckCoherence={(id) =>
+              void execute(
+                () => window.copify.sessions.checkCoherence(id),
+                "Coherence check completed. The browser has closed; review the route and coherence summary in its row.",
+              )
+            }
+            onCheckAllCoherence={() =>
+              void execute(
+                () => window.copify.sessions.checkCoherenceAll(),
+                "Coherence checks finished. All browsers have closed; review any failed rows.",
+              )
+            }
+            onReorder={(ordered) => {
+              // Paint the new order immediately; `execute` reloads from the
+              // repository afterwards and corrects the list if the write failed.
+              setProfiles(ordered);
+              void execute(() => window.copify.profiles.reorder(ordered.map((profile) => profile.id)));
+            }}
             onUpdate={(id, input, success) =>
               void execute(() => window.copify.profiles.update(id, input), success)
             }
