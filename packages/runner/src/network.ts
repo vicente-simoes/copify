@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { chromium, type BrowserContext } from "rebrowser-playwright";
 import { type GeoIdentitySnapshot, type ProfileCoherenceSummary, type ProxyBenchmark, type RunnerProxy, type SessionRoute } from "@copify/shared";
 
+export { CaptchaProviderError, diagnoseCaptchaProvider } from "./captcha-providers";
+
 type ProbePayload = { ip?: string; country?: string; country_code?: string; city?: string; success?: boolean };
 type Sample = { latencyMs: number; connectLatencyMs: number | null; payload: ProbePayload };
 

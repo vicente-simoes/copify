@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserContext, CDPSession, Locator, Page } from "rebrowser-playwright";
-import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
+import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type CaptchaChallenge, type CaptchaFailureCode, type CaptchaProviderKind, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
 import { routeFromIdentity, verifyRoute } from "./network";
 import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
 import { externalCoherence, resolveNetworkCoherence } from "./coherence";
 import { HumanInput, type ClipboardPasteClient, type HumanInputTelemetry } from "./human-input";
+import { extractCaptchaChallenge, hasCaptchaResponse, injectCaptchaToken, installCaptchaCallbackBridge, waitForLocalCaptcha } from "./captcha-page";
+import { CaptchaProviderError, solveCaptcha, type CaptchaCredentialLease } from "./captcha-providers";
 
 let context: BrowserContext | undefined;
 let profileId: string | undefined;
@@ -27,6 +29,8 @@ let coherence: ProfileCoherenceSummary | undefined;
 let automationPausedUntil: number | null = null;
 let humanInputs = new WeakMap<Page, HumanInput>();
 const pendingClipboardLeases = new Map<string, (granted: boolean) => void>();
+const pendingCaptchaCredentials = new Map<string, (credential: CaptchaCredentialLease | null) => void>();
+let captchaGeneration = 0; let captchaAttempt = 0; let retryCaptcha: { page: Page; challenge: CaptchaChallenge } | undefined;
 let heldClipboardLeaseId: string | undefined;
 let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
 let trafficReceivedBytes = 0; let trafficSentBytes = 0; let trafficCdpAttached = 0; let trafficFallbackSeen = false; let observedPages = new WeakSet<Page>(); let trafficSessions: CDPSession[] = [];
@@ -39,6 +43,8 @@ process.on("message", async (message: unknown) => {
   if (command.data.type === "END_RUN") await endRun(command.data.runSessionId);
   if (command.data.type === "ASSIST_TARGET") await assistTarget(command.data);
   if (command.data.type === "RESUME_ASSIST") await resumeAssist(command.data.runId, command.data.runSessionId);
+  if (command.data.type === "RETRY_CAPTCHA") await retryApiCaptcha(command.data.runId, command.data.runSessionId);
+  if (command.data.type === "CAPTCHA_CREDENTIAL_RESPONSE") { const resolve = pendingCaptchaCredentials.get(command.data.requestId); if (resolve) { pendingCaptchaCredentials.delete(command.data.requestId); resolve(command.data.credential); } }
   if (command.data.type === "CHECK_CART") await checkCart(command.data.profileId);
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
   if (command.data.type === "OPEN_WARM_DESTINATION") await openWarmDestination(command.data.url);
@@ -51,7 +57,7 @@ process.on("message", async (message: unknown) => {
 });
 
 async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null, background: boolean): Promise<void> {
-  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
+  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; captchaGeneration = captchaAttempt = 0; retryCaptcha = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); for (const resolve of pendingCaptchaCredentials.values()) resolve(null); pendingCaptchaCredentials.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
   try {
     await disableChromeTranslation(userDataDir);
     const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
@@ -64,7 +70,7 @@ async function start(id: string, userDataDir: string, driver: RunnerBrowserDrive
     }
     const resolved = driver.kind === "NATIVE_STEALTH" ? await resolveNetworkCoherence(proxy, probeUrl) : undefined;
     driverSession = await createBrowserDriver(driver).launch({ driver, userDataDir, proxy, persistentOptions, coherence: resolved?.launch, background });
-    context = driverSession.context; driverMetadata = driverSession.metadata;
+    context = driverSession.context; driverMetadata = driverSession.metadata; await installCaptchaCallbackBridge(context);
     if (resolved) coherence = resolved.summary;
     else {
       const page = context.pages()[0] ?? await context.newPage();
@@ -508,17 +514,89 @@ async function firstVisible(candidates: Locator[], timeout: number): Promise<Loc
 
 async function checkpoint(page: Page, emit = true): Promise<boolean> {
   const text = (await page.locator("body").innerText().catch(() => "")).slice(0, 20_000).toLowerCase();
-  const reason = /turnstile|captcha|recaptcha|hcaptcha/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
+  const detected = await extractCaptchaChallenge(page);
+  const reason = detected || /turnstile|captcha|recaptcha|hcaptcha/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
   if (!reason) return false;
+  if (reason === "CAPTCHA" && detected) {
+    if (await hasCaptchaResponse(page)) return false;
+    return !(await resolveCaptcha(page, detected.challenge));
+  }
   challengeCount += 1;
-  if (reason === "CAPTCHA") emitRun("CAPTCHA_CHALLENGE_DETECTED", { captchaKind: /turnstile/.test(text) ? "turnstile" : /hcaptcha/.test(text) ? "hcaptcha" : /recaptcha/.test(text) ? "recaptcha_v2" : "unknown" });
   if (emit) transition("CHECKPOINT", "CHECKPOINT_DETECTED", { reason }); await page.bringToFront(); return true;
+}
+
+async function resolveCaptcha(page: Page, challenge: CaptchaChallenge): Promise<boolean> {
+  if (!recording || !profileId) return false;
+  challengeCount += 1; captchaAttempt += 1; const attempt = captchaAttempt; const generation = ++captchaGeneration; const started = Date.now();
+  const runtime = recording.captcha; const provider = runtime.provider;
+  const fields = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ kind: challenge.kind, strategy: runtime.strategy, providerId: provider?.kind ?? null, providerLabel: provider?.label ?? null, attempt, durationMs: Date.now() - started, normalizedFailure: null, costMicrosUsd: null, costAuthority: "UNAVAILABLE", outcome: null, ...extra });
+  emitRun("CAPTCHA_CHALLENGE_DETECTED", fields());
+  await stopSensitiveCapture(); transition("CAPTCHA_SOLVING", "CAPTCHA_SOLVE_REQUESTED", fields());
+  if (runtime.strategy === "MANUAL_HARVESTER") return runLocalHarvester(page, challenge, generation, fields, null);
+  if (!provider) { emitRun("CAPTCHA_FAILOVER_TRIGGERED", fields({ normalizedFailure: "NOT_CONFIGURED", outcome: "HARVESTER", reason: "NOT_CONFIGURED" })); return runLocalHarvester(page, challenge, generation, fields, "NOT_CONFIGURED"); }
+  const controller = new AbortController();
+  const api = runApiSolve(page, challenge, generation, attempt, started, controller.signal, fields);
+  if (runtime.strategy === "API_SOLVER") {
+    const result = await api; if (result) return true;
+    retryCaptcha = { page, challenge }; transition("CHECKPOINT", "CAPTCHA_SOLVE_FAILED", fields({ normalizedFailure: lastCaptchaFailure, outcome: "CHECKPOINT_RETRYABLE", reason: "CAPTCHA_API_FAILED" })); await page.bringToFront(); return false;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedFallback = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), runtime.fallbackAfterMs); timer.unref?.(); });
+  const apiResult = await Promise.race([api, timedFallback]); if (timer) clearTimeout(timer);
+  if (apiResult) return true;
+  controller.abort("fallback"); captchaGeneration += 1;
+  emitRun("CAPTCHA_FAILOVER_TRIGGERED", fields({ normalizedFailure: lastCaptchaFailure, outcome: "HARVESTER", reason: lastCaptchaFailure ?? "FALLBACK_THRESHOLD" }));
+  return runLocalHarvester(page, challenge, captchaGeneration, fields, lastCaptchaFailure ?? "TIMEOUT");
+}
+
+let lastCaptchaFailure: CaptchaFailureCode | "NOT_CONFIGURED" | null = null;
+
+async function runApiSolve(page: Page, challenge: CaptchaChallenge, generation: number, attempt: number, started: number, signal: AbortSignal, fields: (extra?: Record<string, unknown>) => Record<string, unknown>): Promise<boolean> {
+  lastCaptchaFailure = null;
+  let credential: CaptchaCredentialLease | null = null;
+  try {
+    credential = await requestCaptchaCredential(recording!.captcha.provider!.kind); if (!credential) throw new CaptchaProviderError("AUTH_INVALID", "The active solver is not configured.");
+    const result = await solveCaptcha(challenge, credential, recording!.captcha.solveTimeoutMs, signal);
+    if (generation !== captchaGeneration || signal.aborted) return false;
+    emitRun("CAPTCHA_TOKEN_ACQUIRED", fields({ durationMs: Date.now() - started, costMicrosUsd: result.costMicrosUsd, costAuthority: result.costAuthority, outcome: "ACQUIRED" }));
+    const valid = await injectCaptchaToken(page, challenge.kind, result.token); result.token = "";
+    if (!valid) throw new CaptchaProviderError("INVALID_TOKEN", "The checkout did not accept the solver token.");
+    if (generation !== captchaGeneration) return false;
+    retryCaptcha = undefined; emitRun("CAPTCHA_TOKEN_VALIDATED", fields({ durationMs: Date.now() - started, costMicrosUsd: result.costMicrosUsd, costAuthority: result.costAuthority, outcome: "COMPLETED" }));
+    transition("CHECKOUT", "CAPTCHA_SOLVE_COMPLETED", fields({ durationMs: Date.now() - started, costMicrosUsd: result.costMicrosUsd, costAuthority: result.costAuthority, outcome: "COMPLETED" })); return true;
+  } catch (error) {
+    const failure = error instanceof CaptchaProviderError ? error.code : "UNKNOWN"; lastCaptchaFailure = failure;
+    if (failure !== "CANCELLED") emitRun("CAPTCHA_SOLVE_FAILED", fields({ durationMs: Date.now() - started, normalizedFailure: failure, outcome: "FAILED" }));
+    return false;
+  } finally { if (credential) credential.apiKey = ""; }
+}
+
+async function runLocalHarvester(page: Page, challenge: CaptchaChallenge, generation: number, fields: (extra?: Record<string, unknown>) => Record<string, unknown>, reason: string | null): Promise<boolean> {
+  emitRun("CAPTCHA_HARVESTER_OPENED", fields({ normalizedFailure: reason, outcome: "WAITING" })); await page.bringToFront();
+  const completed = await waitForLocalCaptcha(page);
+  if (!completed || generation !== captchaGeneration) { transition("CHECKPOINT", "CAPTCHA_SOLVE_FAILED", fields({ normalizedFailure: completed ? "CANCELLED" : "TIMEOUT", outcome: "FAILED", reason: "CAPTCHA_HARVESTER_FAILED" })); return false; }
+  retryCaptcha = undefined; emitRun("CAPTCHA_HARVESTER_COMPLETED", fields({ outcome: "COMPLETED" })); transition("CHECKOUT", "CAPTCHA_SOLVE_COMPLETED", fields({ outcome: "COMPLETED" })); return true;
+}
+
+async function requestCaptchaCredential(provider: CaptchaProviderKind): Promise<CaptchaCredentialLease | null> {
+  if (!recording || !profileId) return null; const requestId = randomUUID();
+  const promise = new Promise<CaptchaCredentialLease | null>((resolve) => pendingCaptchaCredentials.set(requestId, resolve));
+  send({ type: "CAPTCHA_CREDENTIAL_REQUEST", version: IPC_VERSION, profileId, runId: recording.runId, runSessionId: recording.runSessionId, requestId, provider });
+  const timer = setTimeout(() => { const resolve = pendingCaptchaCredentials.get(requestId); if (resolve) { pendingCaptchaCredentials.delete(requestId); resolve(null); } }, 5_000); timer.unref();
+  try { return await promise; } finally { clearTimeout(timer); }
+}
+
+async function retryApiCaptcha(runId: string, runSessionId: string): Promise<void> {
+  if (!recording || recording.runId !== runId || recording.runSessionId !== runSessionId || !retryCaptcha || recording.captcha.strategy !== "API_SOLVER") return;
+  const pending = retryCaptcha; retryCaptcha = undefined;
+  emitRun("CAPTCHA_SOLVE_RETRIED", { kind: pending.challenge.kind, strategy: recording.captcha.strategy, providerId: recording.captcha.provider?.kind ?? null, providerLabel: recording.captcha.provider?.label ?? null, attempt: captchaAttempt + 1, durationMs: 0, normalizedFailure: null, costMicrosUsd: null, costAuthority: "UNAVAILABLE", outcome: "RETRYING" });
+  await resolveCaptcha(pending.page, pending.challenge);
 }
 
 async function stopSensitiveCapture(): Promise<void> {
   if (tracingStoppedForPrivacy || !recording || !context) return; tracingStoppedForPrivacy = true;
   if (recording.diagnosticLevel !== "NORMAL") await context.tracing.stop().catch(() => undefined);
-  emitRun("SENSITIVE_CAPTURE_STOPPED", { message: "Tracing and automatic screenshots stopped before shipping autofill." });
+  emitRun("SENSITIVE_CAPTURE_STOPPED", { message: "Tracing and automatic screenshots stopped before sensitive checkout work." });
 }
 
 export async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void> {

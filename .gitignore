@@ -1,6 +1,8 @@
 node_modules/
 .pnpm-store/
 dist/
+dist-v013-gate/
+installer-gate-v013/
 out/
 .vite/
 browser-profiles/

@@ -8,6 +8,7 @@ import type {
   ProxyProfile,
   ProfileWarmState,
   RunDetail,
+  RunCaptchaOverride,
   RunSetup,
   SessionSnapshot,
   ShippingProfile,
@@ -69,6 +70,7 @@ function App() {
     "OBSERVATION",
   );
   const [runProfiles, setRunProfiles] = useState<string[]>([]);
+  const [runCaptchaOverrides, setRunCaptchaOverrides] = useState<RunCaptchaOverride[]>([]);
   const [runTargetId, setRunTargetId] = useState("");
   const [deepDebugAcknowledged, setDeepDebugAcknowledged] = useState(false);
   const [targets, setTargets] = useState<Target[]>([]);
@@ -309,6 +311,7 @@ function App() {
         diagnosticLevel: runLevel,
         executionMode: runMode,
         profileIds: runProfiles,
+        captchaOverrides: runCaptchaOverrides,
         targetId: runTargetId || null,
         deepDebugAcknowledged,
       });
@@ -321,12 +324,12 @@ function App() {
   };
   const saveRunSetup = async () => {
     await execute(
-      () => window.copify.runSetups.create({ name: runName.trim(), diagnosticLevel: runLevel, executionMode: runMode, profileIds: runProfiles, targetId: runTargetId || null }),
+      () => window.copify.runSetups.create({ name: runName.trim(), diagnosticLevel: runLevel, executionMode: runMode, profileIds: runProfiles, captchaOverrides: runCaptchaOverrides, targetId: runTargetId || null }),
       "Run setup saved.",
     );
   };
   const loadRunSetup = (setup: RunSetup) => {
-    setRunName(setup.name); setRunLevel(setup.diagnosticLevel); setRunMode(setup.executionMode); setRunProfiles(setup.profileIds); setRunTargetId(setup.targetId ?? "");
+    setRunName(setup.name); setRunLevel(setup.diagnosticLevel); setRunMode(setup.executionMode); setRunProfiles(setup.profileIds); setRunCaptchaOverrides(setup.captchaOverrides); setRunTargetId(setup.targetId ?? "");
     setDeepDebugAcknowledged(false);
     setNotice({ kind: "info", message: `Loaded “${setup.name}”. Review preflight, then start when ready.` });
   };
@@ -374,6 +377,7 @@ function App() {
       currency: targetDraft.currency,
       maxRetailMinor,
       quantity: 1,
+      captchaStrategy: targetDraft.captchaStrategy,
       enabled: targetDraft.enabled,
     };
     const saved = await execute(
@@ -401,6 +405,7 @@ function App() {
       sizePriority: target.sizePriority.join(", "),
       currency: target.currency,
       maxRetailPrice: fromMinor(target.maxRetailMinor),
+      captchaStrategy: target.captchaStrategy,
       enabled: target.enabled,
     });
   };
@@ -469,6 +474,7 @@ function App() {
               level={runLevel}
               mode={runMode}
               selectedProfiles={runProfiles}
+              captchaOverrides={runCaptchaOverrides}
               targetId={runTargetId}
               acknowledged={deepDebugAcknowledged}
               busy={busy}
@@ -476,11 +482,8 @@ function App() {
               onLevel={(value) => { setRunLevel(value); setDeepDebugAcknowledged(false); }}
               onMode={setRunMode}
               onTarget={setRunTargetId}
-              onToggle={(id) =>
-                setRunProfiles((current) =>
-                  current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
-                )
-              }
+              onToggle={(id) => setRunProfiles((current) => { const removing = current.includes(id); if (removing) setRunCaptchaOverrides((overrides) => overrides.filter((entry) => entry.browserProfileId !== id)); return removing ? current.filter((item) => item !== id) : [...current, id]; })}
+              onCaptchaOverride={(browserProfileId, captchaStrategy) => setRunCaptchaOverrides((current) => captchaStrategy === "INHERIT_TARGET" ? current.filter((entry) => entry.browserProfileId !== browserProfileId) : [...current.filter((entry) => entry.browserProfileId !== browserProfileId), { browserProfileId, captchaStrategy }])}
               onAck={setDeepDebugAcknowledged}
               onStart={() => void beginRun()}
               onEnd={() =>

@@ -7,12 +7,14 @@ import { BrowserDrivers } from "./LaunchModes";
 import { Appearance } from "./Appearance";
 import { StoreMark, hasStoreMark } from "../ui/StoreMark";
 import { Costs } from "./Costs";
+import { CaptchaSettingsPage } from "./CaptchaSettings";
 
-type Tab = "routes" | "monitor" | "costs" | "stores" | "advanced" | "appearance" | "about";
+type Tab = "routes" | "monitor" | "captcha" | "costs" | "stores" | "advanced" | "appearance" | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "routes", label: "Routes" },
   { id: "monitor", label: "Monitor" },
+  { id: "captcha", label: "CAPTCHA" },
   { id: "costs", label: "Costs & budgets" },
   { id: "stores", label: "Stores" },
   { id: "advanced", label: "Advanced" },
@@ -157,6 +159,8 @@ export function Settings(props: {
       })()}
 
       {tab === "costs" && <Costs proxies={props.proxies} />}
+
+      {tab === "captcha" && <CaptchaSettingsPage busy={props.busy} />}
 
       {tab === "stores" && (
         <section className="panel">

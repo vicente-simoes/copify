@@ -214,6 +214,12 @@ export function Targets({
             />
           </Field>
 
+          <Field label="CAPTCHA strategy">
+            <select value={draft.captchaStrategy} onChange={(event) => setDraft({ ...draft, captchaStrategy: event.target.value as TargetDraft["captchaStrategy"] })}>
+              <option value="INHERIT_APP">Inherit app setting</option><option value="MANUAL_HARVESTER">Local Harvester</option><option value="API_SOLVER">API only</option><option value="API_WITH_FALLBACK">API with local fallback</option>
+            </select>
+          </Field>
+
           <Field label="Must match">
             <input
               required

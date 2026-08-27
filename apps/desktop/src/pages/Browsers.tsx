@@ -86,7 +86,7 @@ export function Browsers({
   onCheckCoherence: (id: string) => void;
   onUpdate: (
     id: string,
-    input: { name?: string; enabled?: boolean; proxyProfileId?: string | null },
+    input: Pick<import("@copify/shared").UpdateBrowserProfileInput, "name" | "enabled" | "proxyProfileId" | "captchaStrategyOverride">,
     success?: string,
   ) => void;
   onRemoveProfile: (profile: BrowserProfile) => void;
@@ -271,6 +271,9 @@ export function Browsers({
                   disabled: busy || active || !item.enabled,
                   onSelect: () => onUpdate(profile.id, { proxyProfileId: item.id }, "Route updated."),
                 })),
+                { kind: "separator" },
+                { kind: "header", label: "CAPTCHA strategy" },
+                ...([{"value":"INHERIT_TARGET","label":"Inherit target"},{"value":"MANUAL_HARVESTER","label":"Local Harvester"},{"value":"API_SOLVER","label":"API only"},{"value":"API_WITH_FALLBACK","label":"API with fallback"}] as const).map((item): MenuEntry => ({ kind: "check", label: item.label, checked: profile.captchaStrategyOverride === item.value, disabled: busy || active, onSelect: () => onUpdate(profile.id, { captchaStrategyOverride: item.value }, "CAPTCHA strategy updated.") })),
               ];
 
               if (showCart) {

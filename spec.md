@@ -2,10 +2,10 @@
 
 **Document:** `spec.md`  
 **Product:** Copify  
-**Status:** Living specification — implemented through v0.12.0; v0.13 hybrid CAPTCHA work is next
+**Status:** Living specification — implemented through v0.13; v0.13.5 IP route qualification is next
 **Primary platform:** Windows  
 **Future platforms:** macOS, Linux  
-**Date:** 2026-08-25
+**Date:** 2026-08-27
 
 ---
 
@@ -579,9 +579,19 @@ The first practical benchmark should compare:
 - Session A: normal home network.
 - Session B: one Portuguese sticky residential route.
 - Session C: one Portuguese static/ISP route.
+- Session D: one non-Portuguese EU static/ISP candidate, initially Germany.
+
+The Portuguese home route is the control, not an assumed inferior option. The
+foreign-EU route is a hypothesis to measure, not a preferred production default.
+Copify must not infer Shopify or store origin geography from a CDN/edge IP, proxy
+country, community claim, or provider marketing. When practical, PT and DE ISP
+candidates should come from the same provider and plan so country/routing is the
+main changed variable.
 
 Candidate reputable providers discussed:
 
+- DataImpulse for the existing traffic-priced sticky-residential baseline.
+- IPRoyal where matched PT and DE static/ISP trial inventory is available.
 - Bright Data.
 - Decodo.
 - Oxylabs.
@@ -590,13 +600,22 @@ Provider branding must not be hardcoded into execution logic. All providers map 
 
 ### 11.6 Profile-proxy coherence engine
 
-Modern anti-fraud systems compare the public IP's GeoIP data against client-side browser attributes. Copify enforces 1:1 coherence:
+Network and challenge systems may compare the public IP's GeoIP data against
+client-side browser attributes. Copify enforces internal browser-route coherence:
 
 1. **Timezone Emulation:** Sets Chrome timezone via `--timezone=<ResolvedTimezone>` and Playwright `timezoneId` (e.g., `"Europe/Lisbon"`).
 2. **Locale & Language:** Sets `--lang=<Locale>` (e.g., `"pt-PT"`) and HTTP `Accept-Language` headers matching the proxy region.
 3. **Geolocation Coordinates:** Overrides geolocation coordinates (`context.setGeolocation`) to match the proxy city/region.
 4. **WebRTC Leak Prevention:** Launches Chrome with `--force-webrtc-ip-handling-policy=default_public_interface_only` to prevent local LAN IP leakage.
 5. **Strict 1:1 Affinity:** A profile should not switch between disparate countries (e.g., PT to US) to prevent cookie invalidation.
+
+Browser-route coherence is not a fraud-score guarantee. It does not make a
+foreign IP equivalent to a Portuguese order, does not change card-issuer or
+billing/shipping data, and does not claim to improve AVS. AVS compares submitted
+billing details with issuer-held billing details; it does not require billing and
+shipping addresses to be identical. Copify must report country mismatches
+factually and must never describe timezone, locale, or geolocation emulation as a
+way to erase them.
 
 ---
 
@@ -3073,6 +3092,8 @@ Success criteria:
 
 ### v0.13 — Hybrid CAPTCHA Engine & Strategy Routing
 
+**Implementation status:** Complete in the working tree; release/version bump pending explicit approval.
+
 Copify resolves supported checkout challenges locally by default while allowing
 operators to opt individual sessions into low-latency API solving. The engine is
 runner-local and reuses existing warmed contexts; it does not introduce a remote
@@ -3113,6 +3134,87 @@ Copify service or a second browser profile.
 - Solver keys, raw requests/responses, CAPTCHA tokens, and credential-bearing URLs
   are absent from renderer state, SQLite exports, run exports, traces, telemetry,
   screenshots, and logs.
+
+---
+
+### v0.13.5 — IP Route Qualification & Evidence-Based Selection
+
+Copify qualifies network routes before payment automation is introduced. The
+goal is not to declare one proxy category, country, or provider universally best;
+it is to establish which affordable routes are reliable for the operator, store,
+and current time window while preserving stable browser identity.
+
+#### Deliverables
+
+- Add a provider-agnostic **Route Qualification** workflow covering four initial
+  cohorts: Portuguese home/direct, Portuguese sticky residential, Portuguese
+  static ISP, and a foreign-EU static ISP candidate (Germany initially). Additional
+  countries remain ordinary candidates rather than store-specific code paths.
+- Benchmark the real configured storefront through each route using bounded,
+  checkout-safe requests. Record proxy tunnel/connect time, TLS time where
+  observable, time to first byte, total response time, p50/p95/p99, jitter,
+  success/failure rate, timeout rate, HTTP status classes, and challenge/rate-limit
+  observations. Never submit a cart, payment, or order as part of qualification.
+- Verify and persist redacted route identity: public exit IP, country/region,
+  ASN/organization, observed network classification, protocol, and observation
+  source/time. Third-party IP classifications may disagree and are evidence, not
+  a universal "fraud score."
+- Add an **IP Stability Test** spanning the configured pre-warm/run duration.
+  Detect an exit change behind unchanged credentials, record observed sticky TTL,
+  invalidate affected qualification results, and prevent a route whose remaining
+  observed lifetime cannot cover the snapshotted run window from being marked
+  checkout-ready.
+- Add a target-scoped qualification score weighted toward reliability, then
+  latency, jitter, IP stability, challenge/rate-limit observations, and effective
+  cost. Preserve the raw measurements and score inputs so a recommendation is
+  explainable. A faster foreign route does not win when its reliability or
+  qualification confidence is materially worse.
+- Add qualification confidence and freshness. Scores include sample count,
+  tested endpoints, observation windows, last-qualified time, and route identity.
+  A provider-forced exit change, country/ASN change, expired sticky window, or
+  configurable age threshold makes the qualification stale and requires retest.
+- Add a **Route Lab** UI in Settings for side-by-side cohort comparison, bounded
+  test execution, saved trial notes, cost per IP/GB/month, and an explicit
+  operator-controlled `QUALIFIED`, `REJECTED`, or `UNVERIFIED` decision. The UI
+  must distinguish observed facts from provider claims and Copify inferences.
+- Add a small-trial purchase policy to recommendations: Copify may recommend which
+  cohort to test next, but it never recommends bulk purchasing from reputation or
+  advertised location alone. Matched PT/DE inventory from one provider is
+  preferred for country A/B tests when available, without hardcoding that provider.
+- Snapshot the selected route's qualification record into each Run Session and
+  expose qualification age, confidence, cohort, stability, and score beside actual
+  run outcomes. Historical results may later refine cohort recommendations without
+  silently changing an armed Run.
+- Treat home/direct as a first-class route and cost baseline. Copify must not
+  require a proxy for top-tier readiness, and it must not assume that a German or
+  UK route is closer to a Shopify origin because storefront and checkout traffic
+  may be served through distributed edge infrastructure.
+- Keep browser-route coherence separate from payment-risk interpretation. Copify
+  reports IP/billing/shipping country differences but never claims that matching
+  timezone, locale, language, geolocation, EU membership, Schengen membership, or
+  currency removes those differences or guarantees order acceptance.
+
+#### Success criteria
+
+- An operator can compare PT home, PT sticky residential, PT static ISP, and DE
+  static ISP candidates over equivalent endpoints and observation windows without
+  modifying store adapters or execution logic.
+- A recommendation cannot become `QUALIFIED` from a single latency sample,
+  provider-advertised response time, community success report, country label, or
+  inferred server location. Missing sample depth remains visibly `UNVERIFIED`.
+- Re-running an equivalent test produces raw and aggregate metrics that can be
+  compared without overwriting prior evidence; p95/p99, failures, challenges,
+  stability, confidence, freshness, and cost remain visible beside median latency.
+- Forced sticky-IP rotation and unexpected country/ASN changes are detected,
+  invalidate the prior identity-bound qualification, and cannot mutate an active
+  checkout route.
+- An armed Run uses only its snapshotted qualification and route. New benchmarks,
+  price edits, provider metadata, and recommendation changes cannot alter it.
+- Qualification traffic is bounded, rate-aware, independently cancellable, and
+  disabled for a route while that route is executing an armed Run.
+- Proxy credentials, provider session tokens, full public IPs in renderer exports,
+  checkout data, addresses, and payment data never enter qualification logs,
+  diagnostics, telemetry, screenshots, or exported reports.
 
 ---
 
@@ -3548,7 +3650,7 @@ The first meaningful Copify milestone is reached when the following scenario wor
 
 ## 49. Immediate Implementation Order
 
-Next implementation steps (starting from current v0.7 state):
+Locked implementation sequence; v0.13 is the current completed milestone:
 
 ```text
 1. v0.8: Ghost-cursor Bezier mouse movement & drop-tuned click dwell
@@ -3561,11 +3663,12 @@ Next implementation steps (starting from current v0.7 state):
 8. v0.11: Historical drop metrics & post-run analytics
 9. v0.12: Cost accounting, budgets & provider reconciliation
 10. v0.13: Hybrid CAPTCHA engine, strategy routing & Local Harvester failover
-11. v0.14: Encrypted Payment Profiles, secure CSV/paste batch intake, Full Auto-Checkout & atomic checkout quotas
-12. v0.15: Capability Manifest v2, Release Calendar, cached feed adapters & one-click target arming
-13. v0.16: Typed low-copy variant IPC, protocol negotiation & Windows dispatch performance gates
-14. v0.17: Runtime proxy watchdog, ordered backups & session-only pre-checkout failover
-15. v1.0: Windows production release & installer
+11. v0.13.5: IP route qualification, PT/DE cohort lab, stability gates & evidence-based selection
+12. v0.14: Encrypted Payment Profiles, secure CSV/paste batch intake, Full Auto-Checkout & atomic checkout quotas
+13. v0.15: Capability Manifest v2, Release Calendar, cached feed adapters & one-click target arming
+14. v0.16: Typed low-copy variant IPC, protocol negotiation & Windows dispatch performance gates
+15. v0.17: Runtime proxy watchdog, ordered backups & session-only pre-checkout failover
+16. v1.0: Windows production release & installer
 ```
 
 ---
@@ -3618,6 +3721,17 @@ The following decisions are considered **locked unless new evidence justifies ch
 - Profiles maintain **strict 1:1 GeoIP coherence** with their assigned proxy routes (Timezone, Locale, Geolocation, WebRTC leak prevention).
 - Persistent profiles support **Profile Warming** (retaining Google human trust scores $\ge 0.9$ and Shop Pay authentication).
 - Proxies are modeled independently from browser profiles; a session uses one locally fixed network route for its lifetime, subject to the external provider's sticky-session TTL.
+- Route selection is evidence-based and target-scoped. Home/direct remains the
+  control; PT and foreign-EU proxy cohorts are qualified through bounded real-route
+  measurements, and no provider, proxy category, country, or assumed Shopify
+  origin is universally preferred.
+- Route qualification records identity-bound stability, reliability, latency,
+  jitter, challenge/rate-limit observations, cost, confidence, and freshness.
+  Provider claims, community reports, and third-party IP classifications remain
+  attributed evidence rather than facts or universal fraud scores.
+- Browser-route GeoIP coherence prevents internal browser contradictions but does
+  not erase IP/payment/address country differences or guarantee AVS, fraud, order,
+  or fulfillment outcomes.
 - Browser Profiles may declare ordered backup proxies. Automatic failover is a session-only same-profile relaunch before variant execution and never mutates an active checkout route or the saved primary assignment.
 - Copify supports both **Assisted Checkout** and **Full Auto-Checkout**, resolved and snapshotted per session.
 - CAPTCHA resolution is hybrid and local-first: manual Harvester, solver API, or API with automatic fallback, all using the runner's warmed context.

@@ -23,6 +23,7 @@
     "test:input": "set COPIFY_INPUT_SMOKE=1&& vitest run packages/runner/src/human-input.integration.test.ts",
     "test:monitor": "set COPIFY_MONITOR_SMOKE=1&& vitest run packages/runner/src/monitor.integration.test.ts",
     "test:direct-cart": "set COPIFY_DIRECT_CART_SMOKE=1&& vitest run packages/runner/src/direct-cart.integration.test.ts",
+    "test:captcha": "set COPIFY_CAPTCHA_SMOKE=1&& vitest run packages/runner/src/captcha-page.integration.test.ts",
     "test:watch": "vitest"
   },
   "build": {

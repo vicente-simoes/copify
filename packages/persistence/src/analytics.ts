@@ -58,16 +58,19 @@ export function deriveMetrics(detail: RunDetail): { run: RunMetrics; sessions: S
     const eligible = Boolean(first(events, "VARIANT_SELECTED"));
     const observedOutcome = detail.run.executionMode === "OBSERVATION" ? "OBSERVATION_ONLY" : session.status === "FAILED" ? "FAILED" : reachedReady ? "READY_TO_CONFIRM" : "ENDED_WITHOUT_READY";
     const challenges = events.filter((e) => e.type === "CAPTCHA_CHALLENGE_DETECTED");
+    const completedSolves = events.filter((e) => e.type === "CAPTCHA_SOLVE_COMPLETED");
+    const solveDurations = completedSolves.map((event) => Number(event.payload.durationMs)).filter((value) => Number.isFinite(value) && value >= 0);
+    const costs = events.filter((e) => e.type === "CAPTCHA_TOKEN_VALIDATED").map((event) => event.payload.costMicrosUsd).filter((value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
     return {
       derivationVersion: 1, runId: detail.run.id, runSessionId: session.id, browserProfileId: session.browserProfileId, browserProfileName: session.browserProfileName,
       proxyProfileId: session.route.kind === "proxy" ? session.route.proxyProfileId : null, proxyName: session.route.kind === "proxy" ? session.route.proxyName : "Direct", observedOutcome,
       detectToCartMs: duration(winner, cart, anomalies, "detectToCart"), cartToCheckoutMs: duration(cart, checkout, anomalies, "cartToCheckout"), human3dsDurationMs: handoffs.value, checkpointDurationMs: checkpoints.value,
-      checkpointCount: events.filter((e) => e.type === "CHECKPOINT_DETECTED").length, turnstileCount: challenges.filter((e) => e.payload.captchaKind === "turnstile").length,
+      checkpointCount: events.filter((e) => e.type === "CHECKPOINT_DETECTED").length, turnstileCount: challenges.filter((e) => e.payload.kind === "TURNSTILE" || e.payload.captchaKind === "turnstile").length,
       captchaChallengeCount: challenges.length, networkErrorCount: events.filter((e) => e.type === "NETWORK_FAILED").length,
       http4xxCount: events.filter((e) => e.type === "HTTP_STATUS" && Number(e.payload.status) >= 400 && Number(e.payload.status) < 500).length,
       http5xxCount: events.filter((e) => e.type === "HTTP_STATUS" && Number(e.payload.status) >= 500).length, failureCategory: classify(session, events),
       incompleteCheckpoint: checkpoints.incomplete, incomplete3ds: handoffs.incomplete, anomalies: [...anomalies, ...(eligible ? [] : ["not-checkout-eligible"])],
-      checkoutMode: null, captchaStrategy: null, captchaSolveDurationMs: null, captchaSolveCostMicrosUsd: null, captchaFailoverCount: 0,
+      checkoutMode: null, captchaStrategy: session.captchaStrategy, captchaSolveDurationMs: solveDurations.length ? solveDurations.reduce((sum, value) => sum + value, 0) : null, captchaSolveCostMicrosUsd: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null, captchaFailoverCount: events.filter((e) => e.type === "CAPTCHA_FAILOVER_TRIGGERED").length,
     };
   });
   return { run, sessions };

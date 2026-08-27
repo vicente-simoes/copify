@@ -12,7 +12,7 @@ class FakeRunner extends EventEmitter {
 
 function profile(): BrowserProfile {
   const id = randomUUID();
-  return { id, name: "Test", userDataDir: `C:/profiles/${id}`, proxyProfileId: null, shippingProfileId: null, driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 1, updatedAt: 1 };
+  return { id, name: "Test", userDataDir: `C:/profiles/${id}`, proxyProfileId: null, shippingProfileId: null, captchaStrategyOverride: "INHERIT_TARGET", driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 1, updatedAt: 1 };
 }
 const driver = { kind: "NATIVE_STEALTH" as const, ownsBrowser: true, browserVersion: "Chrome/1", stealthStatus: "PASS" as const, capabilities: { managedProxy: true, launchHarVideo: true } };
 const coherence = { status: "VERIFIED" as const, country: "PT", city: "Lisbon", locale: "pt-PT", timezoneId: "Europe/Lisbon", geolocationApplied: true, webRtcPolicy: "DEFAULT_PUBLIC_INTERFACE_ONLY" as const, source: "ROUTE_PROBE" as const, resolvedAt: 1, message: null };

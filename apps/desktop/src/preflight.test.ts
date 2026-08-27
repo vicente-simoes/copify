@@ -6,7 +6,7 @@ const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
 
 const profile = (over: Partial<BrowserProfile> = {}): BrowserProfile => ({
   id: id(1), name: "Home", userDataDir: "C:/x", proxyProfileId: null, shippingProfileId: null,
-  driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 0, updatedAt: 0, ...over,
+  captchaStrategyOverride: "INHERIT_TARGET", driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 0, updatedAt: 0, ...over,
 });
 
 const stopped = (profileId: string): SessionSnapshot => ({
@@ -20,7 +20,7 @@ const benchmark = { id: id(9), qualityScore: 90, status: "PASS" } as unknown as 
 
 const target = (over: Partial<Target> = {}): Target => ({
   id: id(5), name: "Box Logo", storeId: "supreme-eu", productKeywords: ["Box Logo"], negativeKeywords: [], directProductUrl: null,
-  preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 20_000, quantity: 1,
+  preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 20_000, quantity: 1, captchaStrategy: "INHERIT_APP",
   enabled: true, latestCheck: null, createdAt: 0, updatedAt: 0, ...over,
 });
 

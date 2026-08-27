@@ -24,6 +24,7 @@ export type TargetDraft = {
   sizePriority: string;
   currency: "EUR" | "GBP" | "USD";
   maxRetailPrice: string;
+  captchaStrategy: Target["captchaStrategy"];
   enabled: boolean;
 };
 export type ShippingDraft = {
@@ -61,6 +62,7 @@ export const blankTarget = (): TargetDraft => ({
   sizePriority: "",
   currency: "EUR",
   maxRetailPrice: "0.00",
+  captchaStrategy: "INHERIT_APP",
   enabled: true,
 });
 export const blankShipping = (): ShippingDraft => ({

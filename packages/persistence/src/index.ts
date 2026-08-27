@@ -3,10 +3,10 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, appearanceSettingsSchema, chromeColorsSchema, defaultAppearanceSettings, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, appearanceSettingsSchema, captchaProviderConfigSchema, captchaProviderDiagnosticSchema, captchaSettingsSchema, chromeColorsSchema, defaultAppearanceSettings, defaultCaptchaSettings, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
   analyticsFilterSchema, createRunAnnotationSchema, proxyProfileSchema, runAnnotationSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runMetricsSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, sessionMetricsSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type AppearanceSettings, type ChromeColors, type WindowBounds, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
-  type AnalyticsFilter, type AnalyticsResult, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot,
+  type AnalyticsFilter, type AnalyticsResult, type CaptchaProviderConfig, type CaptchaProviderDiagnostic, type CaptchaProviderKind, type CaptchaSettings, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot, type UpdateCaptchaSettingsInput,
   budgetStatusSchema, costBudgetSchema, costQuerySchema, costSummarySchema, createManualCostSnapshotSchema, estimateCostMicrosUsd, providerBalanceSnapshotSchema, providerUsageRecordSchema, resolveBudgetPeriod, resolveCostPeriod, upsertCostBudgetSchema,
   type BudgetStatus, type CostBudget, type CostQuery, type CostSummary, type CreateManualCostSnapshotInput, type ProviderBalanceSnapshot, type ProviderUsageRecord, type UpsertCostBudgetInput,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
@@ -23,7 +23,8 @@ export type EncryptedProxyCredentialUpdate = { username?: EncryptedCredential; p
 export type StoredProxy = ProxyProfile & { usernameCiphertext: Buffer | null; passwordCiphertext: Buffer | null };
 export type StoredShippingProfile = ShippingProfile & { detailsCiphertext: Buffer | null };
 export type StoredBrowserProfile = BrowserProfile & { externalCdpEndpointCiphertext: Buffer | null };
-type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "assistedEligible" | "executionState" | "checkpointReason">>;
+export type StoredCaptchaProvider = CaptchaProviderConfig & { apiKeyCiphertext: Buffer | null; lastDiagnostic: CaptchaProviderDiagnostic | null };
+type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "captchaStrategy" | "captchaProvider" | "assistedEligible" | "executionState" | "checkpointReason"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "captchaStrategy" | "captchaProvider" | "assistedEligible" | "executionState" | "checkpointReason">>;
 export type RecordedUsageSnapshot = RunNetworkUsage & { browserProfileId?: string | null; proxyProvider?: string | null; timezoneId?: string };
 export type ProviderImportRecord = Omit<ProviderUsageRecord, "id" | "authority" | "importBatchId" | "recordedAt">;
 
@@ -258,6 +259,24 @@ export class ProfileRepository {
         this.sql.prepare("UPDATE run_network_usage SET estimated_cost_micros_usd=? WHERE id=?").run(estimate, row.id);
       }
     }
+    if (version < 18) {
+      const addColumn = (table: string, column: string, definition: string): void => {
+        const columns = this.all(`PRAGMA table_info(${table})`);
+        if (columns.length && !columns.some((row) => String(row.name) === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${definition};`);
+      };
+      addColumn("targets", "captcha_strategy", "captcha_strategy TEXT NOT NULL DEFAULT 'INHERIT_APP'");
+      addColumn("browser_profiles", "captcha_strategy_override", "captcha_strategy_override TEXT NOT NULL DEFAULT 'INHERIT_TARGET'");
+      addColumn("run_sessions", "captcha_strategy", "captcha_strategy TEXT NOT NULL DEFAULT 'MANUAL_HARVESTER'");
+      addColumn("run_sessions", "captcha_provider_json", "captcha_provider_json TEXT");
+      addColumn("run_setups", "captcha_overrides_json", "captcha_overrides_json TEXT NOT NULL DEFAULT '[]'");
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS captcha_providers (
+        kind TEXT PRIMARY KEY NOT NULL, label TEXT NOT NULL, endpoint TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+        last_diagnostic_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS captcha_provider_credentials (
+        provider_kind TEXT PRIMARY KEY NOT NULL, api_key_secret_id TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );`);
+    }
     // Earlier v0.12 builds used the user-entered range end as a manual balance's
     // effective timestamp. A balance is observed when it is entered, so repair
     // those records once on open; this also makes today's current balance visible.
@@ -267,7 +286,7 @@ export class ProfileRepository {
     if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_usage_records'").get()) {
       this.sql.prepare("UPDATE provider_usage_records SET interval_end_at=recorded_at WHERE authority='MANUAL_CONFIRMED' AND interval_end_at>recorded_at").run();
     }
-    this.sql.exec("PRAGMA user_version = 17;");
+    this.sql.exec("PRAGMA user_version = 18;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -302,14 +321,14 @@ export class ProfileRepository {
   async create(input: CreateBrowserProfileInput, endpointCiphertext?: Buffer): Promise<BrowserProfile> {
     const parsed = createBrowserProfileSchema.parse(input); const id = randomUUID(); const now = Date.now();
     const endpointSecretId = endpointCiphertext ? randomUUID() : null;
-    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, driver: parsed.driver.kind === "EXTERNAL_CDP" ? { kind: "EXTERNAL_CDP", endpointConfigured: true } : { kind: "NATIVE_STEALTH" }, enabled: parsed.enabled, createdAt: now, updatedAt: now };
+    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, captchaStrategyOverride: parsed.captchaStrategyOverride, driver: parsed.driver.kind === "EXTERNAL_CDP" ? { kind: "EXTERNAL_CDP", endpointConfigured: true } : { kind: "NATIVE_STEALTH" }, enabled: parsed.enabled, createdAt: now, updatedAt: now };
     try {
       this.transaction(() => {
         if (endpointSecretId && endpointCiphertext) this.insertSecret(endpointSecretId, endpointCiphertext, now);
         const last = this.getRow("SELECT MAX(position) AS position FROM browser_profiles");
         const position = last?.position == null ? 0 : Number(last.position) + 1;
-        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,position,created_at,updated_at) VALUES (?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?,?)")
-          .run(profile.id, profile.name, profile.userDataDir, null, null, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, position, now, now);
+        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,captcha_strategy_override,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,position,created_at,updated_at) VALUES (?,?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?,?)")
+          .run(profile.id, profile.name, profile.userDataDir, null, null, profile.captchaStrategyOverride, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, position, now, now);
       });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not create the browser profile."); }
     return profile;
@@ -329,8 +348,8 @@ export class ProfileRepository {
     try {
       this.transaction(() => {
         this.updateSecret(existingRow.external_cdp_endpoint_secret_id, endpointSecretId, endpointUpdate, updated.updatedAt);
-        this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, driver_kind=?, external_cdp_endpoint_secret_id=?, proxy_profile_id=?, shipping_profile_id=?, updated_at=? WHERE id=?")
-          .run(updated.name, updated.enabled ? 1 : 0, updated.driver.kind, endpointSecretId, updated.proxyProfileId, updated.shippingProfileId, updated.updatedAt, id);
+        this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, driver_kind=?, external_cdp_endpoint_secret_id=?, proxy_profile_id=?, shipping_profile_id=?, captcha_strategy_override=?, updated_at=? WHERE id=?")
+          .run(updated.name, updated.enabled ? 1 : 0, updated.driver.kind, endpointSecretId, updated.proxyProfileId, updated.shippingProfileId, updated.captchaStrategyOverride, updated.updatedAt, id);
         if (parsed.proxyProfileId !== undefined || parsed.driver !== undefined) this.sql.prepare("UPDATE profile_warm_states SET status='REVIEW', updated_at=? WHERE browser_profile_id=?").run(updated.updatedAt, id);
       });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not update the browser profile."); }
@@ -468,14 +487,14 @@ export class ProfileRepository {
   async getTarget(id: string): Promise<Target | undefined> { const row = this.getRow("SELECT * FROM targets WHERE id = ?", [id]); return row ? targetSchema.parse(mapTarget(row)) : undefined; }
   async createTarget(input: CreateTargetInput): Promise<Target> {
     const parsed = createTargetSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,direct_product_url,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), parsed.directProductUrl, JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
+    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,direct_product_url,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,captcha_strategy,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), parsed.directProductUrl, JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.captchaStrategy, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
     return (await this.getTarget(id))!;
   }
   async updateTarget(id: string, input: UpdateTargetInput): Promise<Target> {
     const parsed = updateTargetSchema.parse(input); const existing = await this.getTarget(id); if (!existing) throw new Error("Target not found."); const updated = targetSchema.parse({ ...existing, ...parsed, updatedAt: Date.now() });
-    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,direct_product_url=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,enabled=?,updated_at=? WHERE id=?")
-      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), updated.directProductUrl, JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
+    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,direct_product_url=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,captcha_strategy=?,enabled=?,updated_at=? WHERE id=?")
+      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), updated.directProductUrl, JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.captchaStrategy, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
     return (await this.getTarget(id))!;
   }
   async setTargetCheck(targetId: string, check: TargetCheck): Promise<Target> { const value = targetCheckSchema.parse(check); this.sql.prepare("UPDATE targets SET latest_check_json=?, updated_at=? WHERE id=?").run(JSON.stringify(value), Date.now(), targetId); const target = await this.getTarget(targetId); if (!target) throw new Error("Target not found."); return target; }
@@ -489,8 +508,8 @@ export class ProfileRepository {
         .run(run.id, run.name, run.diagnosticLevel, run.executionMode, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, null, now, now);
       for (const session of sessions) {
         const value = runSessionSchema.parse({ ...session, runId: id });
-        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,shipping_profile_json,assisted_eligible,execution_state,checkpoint_reason,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
-          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), JSON.stringify(value.shippingProfile), value.assistedEligible ? 1 : 0, value.executionState, value.checkpointReason, value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
+        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,shipping_profile_json,captcha_strategy,captcha_provider_json,assisted_eligible,execution_state,checkpoint_reason,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), JSON.stringify(value.shippingProfile), value.captchaStrategy, value.captchaProvider ? JSON.stringify(value.captchaProvider) : null, value.assistedEligible ? 1 : 0, value.executionState, value.checkpointReason, value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
       }
     });
     return (await this.getRun(id))!;
@@ -515,6 +534,74 @@ export class ProfileRepository {
     const filtered = { ...value, proxyProfileIds: value.proxyProfileIds.filter((id) => existing.has(id)) };
     this.setJsonSetting("monitor_settings", filtered);
     return filtered;
+  }
+
+  async getCaptchaSettings(): Promise<CaptchaSettings> {
+    const defaults = defaultCaptchaSettings();
+    const row = this.getRow("SELECT value FROM app_settings WHERE key='captcha_settings'");
+    let base: Omit<CaptchaSettings, "providers"> = { appMode: defaults.appMode, activeProvider: defaults.activeProvider, solveTimeoutMs: defaults.solveTimeoutMs, fallbackAfterMs: defaults.fallbackAfterMs };
+    if (row) {
+      try {
+        const stored = JSON.parse(String(row.value)) as Partial<CaptchaSettings>;
+        base = captchaSettingsSchema.omit({ providers: true }).parse({ ...base, ...stored });
+      } catch { /* retain safe defaults */ }
+    }
+    const providers = this.all(`SELECT p.*, c.api_key_secret_id FROM captcha_providers p LEFT JOIN captcha_provider_credentials c ON c.provider_kind=p.kind ORDER BY p.created_at ASC`)
+      .map((provider) => { let lastDiagnostic: unknown = null; try { lastDiagnostic = provider.last_diagnostic_json ? JSON.parse(String(provider.last_diagnostic_json)) : null; } catch { /* ignored */ } return captchaProviderConfigSchema.parse({ kind: provider.kind, label: provider.label, endpoint: provider.endpoint ?? null, apiKeyConfigured: Boolean(provider.api_key_secret_id), enabled: Boolean(provider.enabled), lastDiagnostic, updatedAt: Number(provider.updated_at) }); });
+    const activeProvider = base.activeProvider && providers.some((provider) => provider.kind === base.activeProvider && provider.enabled) ? base.activeProvider : null;
+    return captchaSettingsSchema.parse({ ...base, activeProvider, providers });
+  }
+
+  async setCaptchaSettings(input: UpdateCaptchaSettingsInput): Promise<CaptchaSettings> {
+    const current = await this.getCaptchaSettings();
+    const next = captchaSettingsSchema.omit({ providers: true }).parse({ ...current, ...input });
+    if (next.activeProvider && !current.providers.some((provider) => provider.kind === next.activeProvider && provider.enabled)) throw new Error("The active CAPTCHA provider must be configured and enabled.");
+    this.setJsonSetting("captcha_settings", next);
+    return this.getCaptchaSettings();
+  }
+
+  async upsertCaptchaProvider(input: { kind: CaptchaProviderKind; label: string; endpoint: string | null; enabled: boolean }, apiKeyCiphertext?: EncryptedCredential): Promise<CaptchaSettings> {
+    const now = Date.now(); const existing = this.getRow("SELECT * FROM captcha_providers WHERE kind=?", [input.kind]);
+    const credential = this.getRow("SELECT api_key_secret_id FROM captcha_provider_credentials WHERE provider_kind=?", [input.kind]);
+    const nextSecretId = this.replaceSecret(credential?.api_key_secret_id, apiKeyCiphertext, now);
+    this.transaction(() => {
+      this.updateSecret(credential?.api_key_secret_id, nextSecretId, apiKeyCiphertext, now);
+      this.sql.prepare(`INSERT INTO captcha_providers (kind,label,endpoint,enabled,last_diagnostic_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(kind) DO UPDATE SET label=excluded.label,endpoint=excluded.endpoint,enabled=excluded.enabled,updated_at=excluded.updated_at`)
+        .run(input.kind, input.label, input.endpoint, input.enabled ? 1 : 0, existing?.last_diagnostic_json ?? null, existing ? Number(existing.created_at) : now, now);
+      if (nextSecretId) this.sql.prepare(`INSERT INTO captcha_provider_credentials (provider_kind,api_key_secret_id,updated_at) VALUES (?,?,?)
+        ON CONFLICT(provider_kind) DO UPDATE SET api_key_secret_id=excluded.api_key_secret_id,updated_at=excluded.updated_at`).run(input.kind, nextSecretId, now);
+      else this.sql.prepare("DELETE FROM captcha_provider_credentials WHERE provider_kind=?").run(input.kind);
+    });
+    return this.getCaptchaSettings();
+  }
+
+  async getStoredCaptchaProvider(kind: CaptchaProviderKind): Promise<StoredCaptchaProvider | undefined> {
+    const row = this.getRow(`SELECT p.*, c.api_key_secret_id, s.ciphertext AS api_key_ciphertext FROM captcha_providers p
+      LEFT JOIN captcha_provider_credentials c ON c.provider_kind=p.kind LEFT JOIN app_secrets s ON s.id=c.api_key_secret_id WHERE p.kind=?`, [kind]);
+    if (!row) return undefined;
+    let lastDiagnostic: CaptchaProviderDiagnostic | null = null;
+    try { lastDiagnostic = row.last_diagnostic_json ? captchaProviderDiagnosticSchema.parse(JSON.parse(String(row.last_diagnostic_json))) : null; } catch { /* corrupted diagnostics are ignored */ }
+    const config = captchaProviderConfigSchema.parse({ kind: row.kind, label: row.label, endpoint: row.endpoint ?? null, apiKeyConfigured: Boolean(row.api_key_secret_id), enabled: Boolean(row.enabled), lastDiagnostic, updatedAt: Number(row.updated_at) });
+    return { ...config, apiKeyCiphertext: toBuffer(row.api_key_ciphertext), lastDiagnostic };
+  }
+
+  async setCaptchaProviderDiagnostic(diagnostic: CaptchaProviderDiagnostic): Promise<void> {
+    const value = captchaProviderDiagnosticSchema.parse(diagnostic);
+    this.sql.prepare("UPDATE captcha_providers SET last_diagnostic_json=?,updated_at=? WHERE kind=?").run(JSON.stringify(value), Date.now(), value.provider);
+  }
+
+  async removeCaptchaProvider(kind: CaptchaProviderKind): Promise<CaptchaSettings> {
+    const before = await this.getCaptchaSettings();
+    const credential = this.getRow("SELECT api_key_secret_id FROM captcha_provider_credentials WHERE provider_kind=?", [kind]);
+    this.transaction(() => {
+      this.sql.prepare("DELETE FROM captcha_provider_credentials WHERE provider_kind=?").run(kind);
+      this.sql.prepare("DELETE FROM captcha_providers WHERE kind=?").run(kind);
+      if (credential?.api_key_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(credential.api_key_secret_id);
+    });
+    const settings = await this.getCaptchaSettings();
+    if (before.activeProvider === kind) return this.setCaptchaSettings({ ...settings, activeProvider: null });
+    return settings;
   }
 
   async getAppearanceSettings(): Promise<AppearanceSettings> {
@@ -566,8 +653,8 @@ export class ProfileRepository {
 
   async createRunSetup(input: CreateRunSetupInput): Promise<RunSetup> {
     const parsed = createRunSetupSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    try { this.sql.prepare("INSERT INTO run_setups (id,name,diagnostic_level,execution_mode,profile_ids_json,target_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
-      .run(id, parsed.name, parsed.diagnosticLevel, parsed.executionMode, JSON.stringify(parsed.profileIds), parsed.targetId, now, now); }
+    try { this.sql.prepare("INSERT INTO run_setups (id,name,diagnostic_level,execution_mode,profile_ids_json,captcha_overrides_json,target_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.diagnosticLevel, parsed.executionMode, JSON.stringify(parsed.profileIds), JSON.stringify(parsed.captchaOverrides), parsed.targetId, now, now); }
     catch (error) { throw new Error(isUniqueError(error) ? "A saved run setup with that name already exists." : "Could not save the run setup."); }
     return runSetupSchema.parse({ id, ...parsed, createdAt: now, updatedAt: now });
   }
@@ -901,7 +988,7 @@ export function openProfileRepository(databasePath: string, profilesRoot: string
 
 function mapProfile(row: Row): Record<string, unknown> {
   const kind = row.driver_kind === "EXTERNAL_CDP" ? "EXTERNAL_CDP" : "NATIVE_STEALTH";
-  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, captchaStrategyOverride: row.captcha_strategy_override ?? "INHERIT_TARGET", driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapWarmState(row: Row): Record<string, unknown> {
   return { id: row.id, browserProfileId: row.browser_profile_id, storeId: row.store_id, status: row.status, storefrontReady: Boolean(row.storefront_ready), googleReady: Boolean(row.google_ready), shopPayReady: Boolean(row.shop_pay_ready), storefrontCompletedAt: nullableNumber(row.storefront_completed_at), googleCompletedAt: nullableNumber(row.google_completed_at), shopPayCompletedAt: nullableNumber(row.shop_pay_completed_at), proxyProfileId: row.proxy_profile_id ?? null, driverKind: row.driver_kind, routePublicIp: row.route_public_ip ?? null, routeCountry: row.route_country ?? null, startedAt: Number(row.started_at), completedAt: row.completed_at == null ? null : Number(row.completed_at), updatedAt: Number(row.updated_at) };
@@ -919,13 +1006,13 @@ function mapRun(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode ?? "OBSERVATION", status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, discoverySnapshot: row.discovery_snapshot_json ? JSON.parse(String(row.discovery_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSetup(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), captchaOverrides: row.captcha_overrides_json ? JSON.parse(String(row.captcha_overrides_json)) : [], targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapTarget(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), directProductUrl: row.direct_product_url ?? null, preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), directProductUrl: row.direct_product_url ?? null, preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), captchaStrategy: row.captcha_strategy ?? "INHERIT_APP", enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSession(row: Row): Record<string, unknown> {
-  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), shippingProfile: row.shipping_profile_json ? JSON.parse(String(row.shipping_profile_json)) : { shippingProfileId: null, name: null, country: null, complete: false }, assistedEligible: Boolean(row.assisted_eligible), executionState: row.execution_state ?? "OBSERVING", checkpointReason: row.checkpoint_reason ?? null, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
+  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), shippingProfile: row.shipping_profile_json ? JSON.parse(String(row.shipping_profile_json)) : { shippingProfileId: null, name: null, country: null, complete: false }, captchaStrategy: row.captcha_strategy ?? "MANUAL_HARVESTER", captchaProvider: row.captcha_provider_json ? JSON.parse(String(row.captcha_provider_json)) : null, assistedEligible: Boolean(row.assisted_eligible), executionState: row.execution_state ?? "OBSERVING", checkpointReason: row.checkpoint_reason ?? null, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
 }
 function mapRunEvent(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, wallTimeMs: Number(row.wall_time_ms), elapsedNs: String(row.elapsed_ns), type: row.type, stateBefore: row.state_before ?? null, stateAfter: row.state_after ?? null, payload: JSON.parse(String(row.payload_json)) };

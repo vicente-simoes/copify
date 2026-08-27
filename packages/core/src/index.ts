@@ -49,6 +49,8 @@ export class SessionOrchestrator extends EventEmitter {
   endRun(profileId: string, runSessionId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "END_RUN", version: IPC_VERSION, runSessionId }); }
   assist(profileId: string, runId: string, runSessionId: string, candidate: ProductCandidate, variant: ProductVariant, quantity: number, priceConstraint: { currency: "EUR" | "GBP" | "USD"; maxRetailMinor: number }, shipping: RunnerShipping): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "ASSIST_TARGET", version: IPC_VERSION, runId, runSessionId, candidate, variant, quantity, priceConstraint, shipping }); }
   resumeAssist(profileId: string, runId: string, runSessionId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "RESUME_ASSIST", version: IPC_VERSION, runId, runSessionId }); }
+  retryCaptcha(profileId: string, runId: string, runSessionId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "RETRY_CAPTCHA", version: IPC_VERSION, runId, runSessionId }); }
+  provideCaptchaCredential(profileId: string, requestId: string, credential: Extract<RunnerCommand, { type: "CAPTCHA_CREDENTIAL_RESPONSE" }>["credential"], failure: Extract<RunnerCommand, { type: "CAPTCHA_CREDENTIAL_RESPONSE" }>["failure"]): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "CAPTCHA_CREDENTIAL_RESPONSE", version: IPC_VERSION, requestId, credential, failure }); }
   pauseAutomation(profileId: string, until: number): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "PAUSE_AUTOMATION", version: IPC_VERSION, until }); }
   resumeAutomation(profileId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "RESUME_AUTOMATION", version: IPC_VERSION }); }
   grantClipboardLease(profileId: string, requestId: string): void { const active = this.runners.get(profileId); if (active) this.send(active.child, { type: "CLIPBOARD_LEASE_GRANTED", version: IPC_VERSION, requestId }); }
@@ -64,7 +66,7 @@ export class SessionOrchestrator extends EventEmitter {
     if (event.type === "READY") { this.setState(profileId, "READY", null, event.route, event.driver, event.coherence); this.dispatchCartAction(profileId); }
     if (event.type === "STOPPED") this.setState(profileId, "STOPPED");
     if (event.type === "ERROR") this.setState(profileId, "ERROR", { code: event.code, message: event.message });
-    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "NETWORK_USAGE" || event.type === "PAYMENT_HANDOFF" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE") this.emit("runner-event", event);
+    if (event.type === "RUN_EVENT" || event.type === "RUN_ARTIFACT" || event.type === "RUN_ENDED" || event.type === "NETWORK_USAGE" || event.type === "PAYMENT_HANDOFF" || event.type === "CART_STATUS" || event.type === "HEALTH" || event.type === "CLIPBOARD_LEASE_REQUEST" || event.type === "CLIPBOARD_LEASE_RELEASE" || event.type === "CAPTCHA_CREDENTIAL_REQUEST") this.emit("runner-event", event);
   }
 
   private onRunnerExit(profileId: string, active: ActiveRunner): void {

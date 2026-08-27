@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { STORE_GENERAL, discoverySourceDescriptorSchema, discoverySourceSchema, storeCurrencySchema } from "./stores";
 import { estimateCostMicrosUsd } from "./costs";
+import { captchaProviderSnapshotSchema, captchaStrategyOverrideSchema, captchaStrategySchema, runCaptchaOverrideSchema, targetCaptchaStrategySchema } from "./captcha";
 
 export * from "./stores";
 export * from "./costs";
+export * from "./captcha";
 
-export const IPC_VERSION = 18 as const;
-export const SCHEMA_VERSION = 17 as const;
+export const IPC_VERSION = 19 as const;
+export const SCHEMA_VERSION = 18 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -23,11 +25,11 @@ const directProductUrlSchema = z.string().url().refine((value) => {
 export const targetCurrencySchema = storeCurrencySchema;
 export const targetSchema = z.object({
   id: idSchema, name: z.string().trim().min(1).max(120), storeId: storeIdSchema, productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema,
-  directProductUrl: directProductUrlSchema.nullable().default(null), preferredColors: priorityListSchema, sizePriority: priorityListSchema, currency: targetCurrencySchema, maxRetailMinor: z.number().int().min(0), quantity: z.number().int().min(1).max(10), enabled: z.boolean(),
+  directProductUrl: directProductUrlSchema.nullable().default(null), preferredColors: priorityListSchema, sizePriority: priorityListSchema, currency: targetCurrencySchema, maxRetailMinor: z.number().int().min(0), quantity: z.number().int().min(1).max(10), captchaStrategy: targetCaptchaStrategySchema.default("INHERIT_APP"), enabled: z.boolean(),
   latestCheck: z.lazy(() => targetCheckSchema).nullable(), createdAt: timestampSchema, updatedAt: timestampSchema
 });
 export type Target = z.infer<typeof targetSchema>;
-export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(120), storeId: storeIdSchema.default(STORE_GENERAL), productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema.default([]), directProductUrl: directProductUrlSchema.nullable().optional().default(null), preferredColors: priorityListSchema.default([]), sizePriority: priorityListSchema.default([]), currency: targetCurrencySchema.default("EUR"), maxRetailMinor: z.coerce.number().int().min(0), quantity: z.coerce.number().int().min(1).max(10).default(1), enabled: z.boolean().default(true) });
+export const createTargetSchema = z.object({ name: z.string().trim().min(1).max(120), storeId: storeIdSchema.default(STORE_GENERAL), productKeywords: priorityListSchema.min(1), negativeKeywords: priorityListSchema.default([]), directProductUrl: directProductUrlSchema.nullable().optional().default(null), preferredColors: priorityListSchema.default([]), sizePriority: priorityListSchema.default([]), currency: targetCurrencySchema.default("EUR"), maxRetailMinor: z.coerce.number().int().min(0), quantity: z.coerce.number().int().min(1).max(10).default(1), captchaStrategy: targetCaptchaStrategySchema.default("INHERIT_APP"), enabled: z.boolean().default(true) });
 export type CreateTargetInput = z.input<typeof createTargetSchema>;
 export const updateTargetSchema = createTargetSchema.partial().refine((value) => Object.keys(value).length > 0, "Provide at least one field to update.");
 export type UpdateTargetInput = z.input<typeof updateTargetSchema>;
@@ -123,11 +125,11 @@ export const browserDriverInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("EXTERNAL_CDP"), endpoint: externalCdpEndpointSchema.nullable().optional() }),
 ]);
 export type BrowserDriverInput = z.input<typeof browserDriverInputSchema>;
-export const browserProfileSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(80), userDataDir: z.string().min(1), proxyProfileId: idSchema.nullable(), shippingProfileId: idSchema.nullable(), driver: browserDriverConfigSchema.default({ kind: "NATIVE_STEALTH" }), enabled: z.boolean(), createdAt: timestampSchema, updatedAt: timestampSchema });
+export const browserProfileSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(80), userDataDir: z.string().min(1), proxyProfileId: idSchema.nullable(), shippingProfileId: idSchema.nullable(), captchaStrategyOverride: captchaStrategyOverrideSchema.default("INHERIT_TARGET"), driver: browserDriverConfigSchema.default({ kind: "NATIVE_STEALTH" }), enabled: z.boolean(), createdAt: timestampSchema, updatedAt: timestampSchema });
 export type BrowserProfile = z.infer<typeof browserProfileSchema>;
-export const createBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80), driver: browserDriverInputSchema.default({ kind: "NATIVE_STEALTH" }), enabled: z.boolean().default(true) });
+export const createBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80), driver: browserDriverInputSchema.default({ kind: "NATIVE_STEALTH" }), captchaStrategyOverride: captchaStrategyOverrideSchema.default("INHERIT_TARGET"), enabled: z.boolean().default(true) });
 export type CreateBrowserProfileInput = z.input<typeof createBrowserProfileSchema>;
-export const updateBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80).optional(), enabled: z.boolean().optional(), driver: browserDriverInputSchema.optional(), proxyProfileId: idSchema.nullable().optional(), shippingProfileId: idSchema.nullable().optional() }).refine((value) => value.name !== undefined || value.enabled !== undefined || value.driver !== undefined || value.proxyProfileId !== undefined || value.shippingProfileId !== undefined, { message: "Provide at least one field to update." });
+export const updateBrowserProfileSchema = z.object({ name: z.string().trim().min(1, "A profile name is required.").max(80).optional(), enabled: z.boolean().optional(), driver: browserDriverInputSchema.optional(), proxyProfileId: idSchema.nullable().optional(), shippingProfileId: idSchema.nullable().optional(), captchaStrategyOverride: captchaStrategyOverrideSchema.optional() }).refine((value) => Object.keys(value).length > 0, { message: "Provide at least one field to update." });
 export type UpdateBrowserProfileInput = z.input<typeof updateBrowserProfileSchema>;
 
 export const routeVerificationSchema = z.object({ status: z.enum(["PENDING", "VERIFIED", "WARNING", "FAILED"]), publicIp: z.string().nullable(), country: z.string().nullable(), city: z.string().nullable(), verifiedAt: timestampSchema.nullable(), message: z.string().nullable() });
@@ -149,7 +151,7 @@ export const sessionRouteSchema = z.discriminatedUnion("kind", [z.object({ kind:
 export type SessionRoute = z.infer<typeof sessionRouteSchema>;
 export const sessionStateSchema = z.enum(["STOPPED", "STARTING", "READY", "STOPPING", "CRASHED", "ERROR"]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
-export const sessionErrorCodeSchema = z.enum(["BROWSER_START_FAILED", "PROXY_CONNECTION_FAILED", "PROXY_AUTH_FAILED", "SECRET_STORAGE_UNAVAILABLE", "INVALID_DRIVER_ENDPOINT", "EXTERNAL_CDP_CONNECTION_FAILED", "DRIVER_CAPABILITY_UNAVAILABLE", "STEALTH_VERIFICATION_FAILED", "RUNNER_CRASHED", "RUN_INTERRUPTED", "INVALID_COMMAND", "RECORDING_FAILED", "NAVIGATION_TIMEOUT", "STORE_UNAVAILABLE", "VARIANT_NOT_AVAILABLE", "ATC_FAILED", "CHECKOUT_NAV_FAILED", "CHECKPOINT_DETECTED", "UNKNOWN"]);
+export const sessionErrorCodeSchema = z.enum(["BROWSER_START_FAILED", "PROXY_CONNECTION_FAILED", "PROXY_AUTH_FAILED", "SECRET_STORAGE_UNAVAILABLE", "INVALID_DRIVER_ENDPOINT", "EXTERNAL_CDP_CONNECTION_FAILED", "DRIVER_CAPABILITY_UNAVAILABLE", "STEALTH_VERIFICATION_FAILED", "RUNNER_CRASHED", "RUN_INTERRUPTED", "INVALID_COMMAND", "RECORDING_FAILED", "NAVIGATION_TIMEOUT", "STORE_UNAVAILABLE", "VARIANT_NOT_AVAILABLE", "ATC_FAILED", "CHECKOUT_NAV_FAILED", "CHECKPOINT_DETECTED", "CAPTCHA_SOLVER_FAILED", "UNKNOWN"]);
 export const sessionErrorSchema = z.object({ code: sessionErrorCodeSchema, message: z.string() });
 export type SessionError = z.infer<typeof sessionErrorSchema>;
 export const driverStealthStatusSchema = z.enum(["PASS", "FAIL", "EXTERNAL", "UNKNOWN"]);
@@ -369,7 +371,7 @@ export const diagnosticLevelSchema = z.enum(["NORMAL", "DIAGNOSTIC", "DEEP_DEBUG
 export type DiagnosticLevel = z.infer<typeof diagnosticLevelSchema>;
 export const runExecutionModeSchema = z.enum(["OBSERVATION", "ASSISTED_CHECKOUT"]);
 export type RunExecutionMode = z.infer<typeof runExecutionModeSchema>;
-export const runExecutionStateSchema = z.enum(["OBSERVING", "WAITING_FOR_TARGET", "PRODUCT_OPEN", "VARIANT_SELECTED", "CARTING", "CARTED", "CHECKOUT", "CHECKPOINT", "CHECKOUT_HANDOFF", "READY_TO_CONFIRM", "FAILED", "ENDED"]);
+export const runExecutionStateSchema = z.enum(["OBSERVING", "WAITING_FOR_TARGET", "PRODUCT_OPEN", "VARIANT_SELECTED", "CARTING", "CARTED", "CHECKOUT", "CAPTCHA_SOLVING", "CHECKPOINT", "CHECKOUT_HANDOFF", "READY_TO_CONFIRM", "FAILED", "ENDED"]);
 export type RunExecutionState = z.infer<typeof runExecutionStateSchema>;
 export const runStatusSchema = z.enum(["STARTING", "RECORDING", "COMPLETED", "FAILED"]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
@@ -381,7 +383,7 @@ export const runEnvironmentSchema = z.object({ appVersion: z.string(), schemaVer
 export type RunEnvironment = z.infer<typeof runEnvironmentSchema>;
 export const runSchema = z.object({ id: idSchema, name: z.string().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), status: runStatusSchema, startedAt: timestampSchema, endedAt: timestampSchema.nullable(), environment: runEnvironmentSchema, targetSnapshot: targetSnapshotSchema.nullable(), discoverySnapshot: discoverySnapshotSchema.nullable().default(null), createdAt: timestampSchema, updatedAt: timestampSchema });
 export type Run = z.infer<typeof runSchema>;
-export const runSessionSchema = z.object({ id: idSchema, runId: idSchema, browserProfileId: idSchema, browserProfileName: z.string(), route: sessionRouteSchema, shippingProfile: shippingProfileSnapshotSchema.default({ shippingProfileId: null, name: null, country: null, complete: false }), assistedEligible: z.boolean().default(false), executionState: runExecutionStateSchema.default("OBSERVING"), checkpointReason: z.string().nullable().default(null), status: runSessionStatusSchema, startedAt: timestampSchema, endedAt: timestampSchema.nullable(), finalError: sessionErrorSchema.nullable() });
+export const runSessionSchema = z.object({ id: idSchema, runId: idSchema, browserProfileId: idSchema, browserProfileName: z.string(), route: sessionRouteSchema, shippingProfile: shippingProfileSnapshotSchema.default({ shippingProfileId: null, name: null, country: null, complete: false }), captchaStrategy: captchaStrategySchema.default("MANUAL_HARVESTER"), captchaProvider: captchaProviderSnapshotSchema.default(null), assistedEligible: z.boolean().default(false), executionState: runExecutionStateSchema.default("OBSERVING"), checkpointReason: z.string().nullable().default(null), status: runSessionStatusSchema, startedAt: timestampSchema, endedAt: timestampSchema.nullable(), finalError: sessionErrorSchema.nullable() });
 export type RunSession = z.infer<typeof runSessionSchema>;
 export const runEventSchema = z.object({ id: idSchema, runId: idSchema, runSessionId: idSchema.nullable(), wallTimeMs: timestampSchema, elapsedNs: z.string().regex(/^\d+$/), type: z.string().min(1).max(80), stateBefore: z.string().nullable(), stateAfter: z.string().nullable(), payload: jsonRecordSchema });
 export type RunEvent = z.infer<typeof runEventSchema>;
@@ -431,13 +433,21 @@ export const reliabilityRowSchema = z.object({ id: z.string(), name: z.string(),
 export type ReliabilityRow = z.infer<typeof reliabilityRowSchema>;
 export const analyticsResultSchema = z.object({ runs: z.array(runSchema), runMetrics: z.array(runMetricsSchema), sessionMetrics: z.array(sessionMetricsSchema), profiles: z.array(reliabilityRowSchema), proxies: z.array(reliabilityRowSchema), annotations: z.array(runAnnotationSchema) });
 export type AnalyticsResult = z.infer<typeof analyticsResultSchema>;
-export const createRunSchema = z.object({ name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable().default(null), deepDebugAcknowledged: z.boolean().default(false) }).superRefine((value, context) => { if (value.diagnosticLevel === "DEEP_DEBUG" && !value.deepDebugAcknowledged) context.addIssue({ code: z.ZodIssueCode.custom, message: "Deep Debug requires acknowledgement because HAR and video can contain sensitive browser state.", path: ["deepDebugAcknowledged"] }); if (value.executionMode === "ASSISTED_CHECKOUT" && !value.targetId) context.addIssue({ code: z.ZodIssueCode.custom, message: "Assisted checkout requires a target.", path: ["targetId"] }); });
+export const createRunSchema = z.object({ name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema.default("OBSERVATION"), profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), captchaOverrides: z.array(runCaptchaOverrideSchema).max(20).default([]), targetId: idSchema.nullable().default(null), deepDebugAcknowledged: z.boolean().default(false) }).superRefine((value, context) => {
+  if (value.diagnosticLevel === "DEEP_DEBUG" && !value.deepDebugAcknowledged) context.addIssue({ code: z.ZodIssueCode.custom, message: "Deep Debug requires acknowledgement because HAR and video can contain sensitive browser state.", path: ["deepDebugAcknowledged"] });
+  if (value.executionMode === "ASSISTED_CHECKOUT" && !value.targetId) context.addIssue({ code: z.ZodIssueCode.custom, message: "Assisted checkout requires a target.", path: ["targetId"] });
+  const overrideIds = value.captchaOverrides.map((entry) => entry.browserProfileId);
+  if (new Set(overrideIds).size !== overrideIds.length) context.addIssue({ code: z.ZodIssueCode.custom, message: "Each profile may only have one CAPTCHA override.", path: ["captchaOverrides"] });
+  for (const [index, entry] of value.captchaOverrides.entries()) if (!value.profileIds.includes(entry.browserProfileId)) context.addIssue({ code: z.ZodIssueCode.custom, message: "CAPTCHA overrides must belong to a selected profile.", path: ["captchaOverrides", index, "browserProfileId"] });
+});
 export type CreateRunInput = z.input<typeof createRunSchema>;
-export const runSetupSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema, profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), targetId: idSchema.nullable(), createdAt: timestampSchema, updatedAt: timestampSchema });
+export const runSetupSchema = z.object({ id: idSchema, name: z.string().trim().min(1).max(120), diagnosticLevel: diagnosticLevelSchema, executionMode: runExecutionModeSchema, profileIds: z.array(idSchema).min(1).max(20).refine((ids) => new Set(ids).size === ids.length, "Each profile may only be selected once."), captchaOverrides: z.array(runCaptchaOverrideSchema).max(20).default([]), targetId: idSchema.nullable(), createdAt: timestampSchema, updatedAt: timestampSchema });
 export type RunSetup = z.infer<typeof runSetupSchema>;
-export const createRunSetupSchema = runSetupSchema.pick({ name: true, diagnosticLevel: true, executionMode: true, profileIds: true, targetId: true });
+export const createRunSetupSchema = runSetupSchema.pick({ name: true, diagnosticLevel: true, executionMode: true, profileIds: true, captchaOverrides: true, targetId: true });
 export type CreateRunSetupInput = z.input<typeof createRunSetupSchema>;
-export const runnerRecordingSchema = z.object({ runId: idSchema, runSessionId: idSchema, diagnosticLevel: diagnosticLevelSchema, assisted: z.boolean().default(false), artifactDir: z.string().min(1), startedAt: timestampSchema });
+export const runnerCaptchaRuntimeSchema = z.object({ strategy: captchaStrategySchema, provider: captchaProviderSnapshotSchema, solveTimeoutMs: z.number().int().min(5_000).max(120_000), fallbackAfterMs: z.number().int().min(1_000).max(30_000) });
+export type RunnerCaptchaRuntime = z.infer<typeof runnerCaptchaRuntimeSchema>;
+export const runnerRecordingSchema = z.object({ runId: idSchema, runSessionId: idSchema, diagnosticLevel: diagnosticLevelSchema, assisted: z.boolean().default(false), captcha: runnerCaptchaRuntimeSchema.default({ strategy: "MANUAL_HARVESTER", provider: null, solveTimeoutMs: 30_000, fallbackAfterMs: 5_000 }), artifactDir: z.string().min(1), startedAt: timestampSchema });
 export type RunnerRecording = z.infer<typeof runnerRecordingSchema>;
 
 export const clipboardLeaseDenialReasonSchema = z.enum(["CLIPBOARD_NOT_EMPTY", "CLIPBOARD_UNAVAILABLE", "QUEUE_TIMEOUT", "SESSION_ENDED"]);
@@ -448,6 +458,8 @@ export const runnerCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("END_RUN"), version: z.literal(IPC_VERSION), runSessionId: idSchema }),
   z.object({ type: z.literal("ASSIST_TARGET"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, candidate: productCandidateSchema, variant: productVariantSchema, quantity: z.number().int().min(1).max(10), priceConstraint: z.object({ currency: targetCurrencySchema, maxRetailMinor: z.number().int().nonnegative() }), shipping: runnerShippingSchema }),
   z.object({ type: z.literal("RESUME_ASSIST"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
+  z.object({ type: z.literal("RETRY_CAPTCHA"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
+  z.object({ type: z.literal("CAPTCHA_CREDENTIAL_RESPONSE"), version: z.literal(IPC_VERSION), requestId: idSchema, credential: z.object({ kind: z.enum(["CAPSOLVER", "CUSTOM_ASYNC", "CUSTOM_FAST_TOKEN"]), endpoint: z.string().url().nullable(), apiKey: z.string().min(1).max(1_024) }).nullable(), failure: z.enum(["NOT_CONFIGURED", "UNAVAILABLE", "CANCELLED"]).nullable() }),
   z.object({ type: z.literal("CHECK_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("EMPTY_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("OPEN_WARM_DESTINATION"), version: z.literal(IPC_VERSION), url: z.string().url() }),
@@ -467,6 +479,7 @@ export const runnerEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("RUN_EVENT"), version: z.literal(IPC_VERSION), profileId: idSchema, event: runEventSchema }),
   z.object({ type: z.literal("RUN_ARTIFACT"), version: z.literal(IPC_VERSION), profileId: idSchema, artifact: runArtifactSchema }),
   z.object({ type: z.literal("RUN_ENDED"), version: z.literal(IPC_VERSION), profileId: idSchema, runSessionId: idSchema }),
+  z.object({ type: z.literal("CAPTCHA_CREDENTIAL_REQUEST"), version: z.literal(IPC_VERSION), profileId: idSchema, runId: idSchema, runSessionId: idSchema, requestId: idSchema, provider: z.enum(["CAPSOLVER", "CUSTOM_ASYNC", "CUSTOM_FAST_TOKEN"]) }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_REQUEST"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema, value: z.string().min(1).max(512) }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_RELEASE"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema }),
   z.object({ type: z.literal("NETWORK_USAGE"), version: z.literal(IPC_VERSION), profileId: idSchema, runId: idSchema, runSessionId: idSchema, usage: networkUsageCounterSchema }),

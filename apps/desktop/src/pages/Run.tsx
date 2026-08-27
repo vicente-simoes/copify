@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isMonitorable, type BrowserProfile, type DiagnosticLevel, type MonitorRuntimeStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { isMonitorable, resolveCaptchaStrategy, type BrowserProfile, type CaptchaAppMode, type CaptchaStrategyOverride, type DiagnosticLevel, type MonitorRuntimeStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunCaptchaOverride, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 import { preflight, type PreflightCheck } from "../preflight";
 import { Field, Route } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
@@ -74,6 +74,8 @@ function LiveBoard({
           const readyToConfirm = session.executionState === "READY_TO_CONFIRM";
           const paymentHandoff = session.executionState === "CHECKOUT_HANDOFF";
           const cartCheckpoint = /^CART_/.test(session.checkpointReason ?? "");
+          const captchaRetry = session.checkpointReason === "CAPTCHA_API_FAILED";
+          const solverFailure = [...(detail?.events ?? [])].reverse().find((event) => event.runSessionId === session.id && event.type === "CAPTCHA_SOLVE_FAILED")?.payload.normalizedFailure;
           return (
             <div key={session.id} className={`row ${waiting || readyToConfirm || paymentHandoff ? "needs-action" : ""}`}>
               <span className={`state ${session.status.toLowerCase()}`}>{session.executionState}</span>
@@ -81,7 +83,9 @@ function LiveBoard({
                 <span className="row-name">{session.browserProfileName}</span>
                 {readyToConfirm && index === 0 && <span className="badge">live priority</span>}
                 <Route route={session.route} />
+                <span className="row-meta">CAPTCHA: {session.captchaStrategy.replaceAll("_", " ").toLowerCase()}{session.captchaProvider ? ` · ${session.captchaProvider.label}` : ""}</span>
                 {waiting && <span className="row-meta">{checkpointCopy(session.checkpointReason)}</span>}
+                {solverFailure ? <span className="error-detail">Solver: {String(solverFailure).replaceAll("_", " ").toLowerCase()}</span> : null}
                 {readyToConfirm && <span className="row-meta">Checkout is filled. Review payment and confirm manually in the browser.</span>}
                 {paymentHandoff && <span className="row-meta">PSD2 / 3DS authentication needs manual attention in this Chrome window.</span>}
                 {developmentMode && readyToConfirm && <span className="row-meta">Development only: simulate the PSD2 / 3DS alert without interacting with checkout or payment.</span>}
@@ -92,7 +96,7 @@ function LiveBoard({
               {waiting && (
                 <div className="row-actions">
                   <button className="primary" disabled={busy} onClick={() => onResume(session.browserProfileId)}>
-                    {cartCheckpoint ? "Recheck cart" : "Resume"}
+                    {captchaRetry ? "Retry API" : cartCheckpoint ? "Recheck cart" : "Resume"}
                   </button>
                 </div>
               )}
@@ -128,6 +132,7 @@ export function Run({
   level,
   mode,
   selectedProfiles,
+  captchaOverrides,
   targetId,
   acknowledged,
   busy,
@@ -137,6 +142,7 @@ export function Run({
   onMode,
   onTarget,
   onToggle,
+  onCaptchaOverride,
   onAck,
   onStart,
   onEnd,
@@ -162,6 +168,7 @@ export function Run({
   level: DiagnosticLevel;
   mode: Mode;
   selectedProfiles: string[];
+  captchaOverrides: RunCaptchaOverride[];
   targetId: string;
   acknowledged: boolean;
   busy: boolean;
@@ -171,6 +178,7 @@ export function Run({
   onMode: (value: Mode) => void;
   onTarget: (value: string) => void;
   onToggle: (id: string) => void;
+  onCaptchaOverride: (browserProfileId: string, strategy: CaptchaStrategyOverride) => void;
   onAck: (value: boolean) => void;
   onStart: () => void;
   onEnd: () => void;
@@ -182,6 +190,8 @@ export function Run({
   onRemoveSetup: (setup: RunSetup) => void;
 }) {
   const [view, setView] = useState<"runs" | "analytics">("runs");
+  const [captchaAppMode, setCaptchaAppMode] = useState<CaptchaAppMode>("manual_only");
+  useEffect(() => { void window.copify.captcha.settings().then((result) => { if (result.ok) setCaptchaAppMode(result.value.appMode); }); }, []);
   if (activeRun) {
     return (
       <div className="page-stack">
@@ -262,16 +272,13 @@ export function Run({
             <legend>Browsers</legend>
             {selectable.map((profile) => {
               const open = getSession(profile.id).state !== "STOPPED";
+              const override = captchaOverrides.find((entry) => entry.browserProfileId === profile.id)?.captchaStrategy ?? "INHERIT_TARGET";
+              const resolved = resolveCaptchaStrategy({ runOverride: override, profileOverride: profile.captchaStrategyOverride, targetStrategy: target?.captchaStrategy, appMode: captchaAppMode });
               return (
-                <label key={profile.id} className="check">
-                  <input
-                    type="checkbox"
-                    checked={selectedProfiles.includes(profile.id)}
-                    onChange={() => onToggle(profile.id)}
-                  />
-                  {profile.name}
-                  <span className="dim">{open ? " · open" : profile.proxyProfileId ? " · proxy" : " · direct"}</span>
-                </label>
+                <div key={profile.id} className="row">
+                  <label className="check row-main"><input type="checkbox" checked={selectedProfiles.includes(profile.id)} onChange={() => onToggle(profile.id)} />{profile.name}<span className="dim">{open ? " · open" : profile.proxyProfileId ? " · proxy" : " · direct"}</span></label>
+                  {selectedProfiles.includes(profile.id) ? <><select aria-label={`${profile.name} CAPTCHA override`} value={override} onChange={(event) => onCaptchaOverride(profile.id, event.target.value as CaptchaStrategyOverride)}><option value="INHERIT_TARGET">Inherit profile/target</option><option value="MANUAL_HARVESTER">Local Harvester</option><option value="API_SOLVER">API only</option><option value="API_WITH_FALLBACK">API with fallback</option></select><span className="badge">{resolved.replaceAll("_", " ").toLowerCase()}</span></> : null}
+                </div>
               );
             })}
             {selectable.length === 0 && <p className="muted">No enabled browsers yet.</p>}

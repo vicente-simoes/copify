@@ -3,6 +3,7 @@ import { blob, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 export const browserProfiles = sqliteTable("browser_profiles", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), userDataDir: text("user_data_dir").notNull(),
   proxyProfileId: text("proxy_profile_id"), shippingProfileId: text("shipping_profile_id"), launchMode: text("launch_mode").notNull().default("PLAYWRIGHT"),
+  captchaStrategyOverride: text("captcha_strategy_override").notNull().default("INHERIT_TARGET"),
   driverKind: text("driver_kind").notNull().default("NATIVE_STEALTH"), externalCdpEndpointSecretId: text("external_cdp_endpoint_secret_id"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   position: integer("position").notNull().default(0), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
@@ -16,6 +17,15 @@ export const proxyProfiles = sqliteTable("proxy_profiles", {
 
 export const appSecrets = sqliteTable("app_secrets", {
   id: text("id").primaryKey(), ciphertext: blob("ciphertext", { mode: "buffer" }).notNull(), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+});
+
+export const captchaProviders = sqliteTable("captcha_providers", {
+  kind: text("kind").primaryKey(), label: text("label").notNull(), endpoint: text("endpoint"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  lastDiagnosticJson: text("last_diagnostic_json"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+});
+
+export const captchaProviderCredentials = sqliteTable("captcha_provider_credentials", {
+  providerKind: text("provider_kind").primaryKey(), apiKeySecretId: text("api_key_secret_id").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
 export const shippingProfiles = sqliteTable("shipping_profiles", {
@@ -40,7 +50,7 @@ export const runs = sqliteTable("runs", {
 
 export const runSessions = sqliteTable("run_sessions", {
   id: text("id").primaryKey(), runId: text("run_id").notNull(), browserProfileId: text("browser_profile_id").notNull(), browserProfileName: text("browser_profile_name").notNull(),
-  routeJson: text("route_json").notNull(), shippingProfileJson: text("shipping_profile_json"), assistedEligible: integer("assisted_eligible", { mode: "boolean" }).notNull().default(false), executionState: text("execution_state").notNull().default("OBSERVING"), checkpointReason: text("checkpoint_reason"), status: text("status").notNull(), startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), finalErrorJson: text("final_error_json")
+  routeJson: text("route_json").notNull(), shippingProfileJson: text("shipping_profile_json"), captchaStrategy: text("captcha_strategy").notNull().default("MANUAL_HARVESTER"), captchaProviderJson: text("captcha_provider_json"), assistedEligible: integer("assisted_eligible", { mode: "boolean" }).notNull().default(false), executionState: text("execution_state").notNull().default("OBSERVING"), checkpointReason: text("checkpoint_reason"), status: text("status").notNull(), startedAt: integer("started_at").notNull(), endedAt: integer("ended_at"), finalErrorJson: text("final_error_json")
 });
 
 export const runEvents = sqliteTable("run_events", {
@@ -115,11 +125,11 @@ export const runAnnotations = sqliteTable("run_annotations", {
 
 export const runSetups = sqliteTable("run_setups", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), diagnosticLevel: text("diagnostic_level").notNull(), executionMode: text("execution_mode").notNull(),
-  profileIdsJson: text("profile_ids_json").notNull(), targetId: text("target_id"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+  profileIdsJson: text("profile_ids_json").notNull(), captchaOverridesJson: text("captcha_overrides_json").notNull().default("[]"), targetId: text("target_id"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });
 
 export const targets = sqliteTable("targets", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), storeId: text("store_id").notNull(), productKeywordsJson: text("product_keywords_json").notNull(), negativeKeywordsJson: text("negative_keywords_json").notNull(),
   directProductUrl: text("direct_product_url"), preferredColorsJson: text("preferred_colors_json").notNull(), sizePriorityJson: text("size_priority_json").notNull(), currency: text("currency").notNull(), maxRetailMinor: integer("max_retail_minor").notNull(), quantity: integer("quantity").notNull(),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true), latestCheckJson: text("latest_check_json"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
+  captchaStrategy: text("captcha_strategy").notNull().default("INHERIT_APP"), enabled: integer("enabled", { mode: "boolean" }).notNull().default(true), latestCheckJson: text("latest_check_json"), createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull()
 });

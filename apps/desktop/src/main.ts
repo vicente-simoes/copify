@@ -6,12 +6,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, analyticsFilterSchema, analyticsIpc, appearanceSettingsSchema, chromeColorsSchema, commitProviderImportSchema, costIpc, costQuerySchema, createBrowserProfileSchema, createManualCostSnapshotSchema, createProxyProfileSchema, createRunAnnotationSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, openProviderImportSchema, previewProviderImportSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, upsertCostBudgetSchema, usageIpc, warmingIpc, warmDestinationSchema,
-  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type ChromeColors, type WindowBounds, type BrowserProfile, type BudgetStatus, type CartStatus, type CostBudget, type CostSummary, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportPreview, type ReconciliationStatus, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+  IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, analyticsFilterSchema, analyticsIpc, appearanceSettingsSchema, captchaIpc, captchaProviderDiagnosticSchema, chromeColorsSchema, commitProviderImportSchema, costIpc, costQuerySchema, createBrowserProfileSchema, createManualCostSnapshotSchema, createProxyProfileSchema, createRunAnnotationSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, openProviderImportSchema, previewProviderImportSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveCaptchaStrategy, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateCaptchaSettingsSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, upsertCaptchaProviderSchema, upsertCostBudgetSchema, usageIpc, warmingIpc, warmDestinationSchema,
+  type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type CaptchaProviderDiagnostic, type CaptchaSettings, type ChromeColors, type WindowBounds, type BrowserProfile, type BudgetStatus, type CartStatus, type CostBudget, type CostSummary, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportPreview, type ReconciliationStatus, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
-import { benchmarkRoute } from "@copify/runner";
+import { CaptchaProviderError, benchmarkRoute, diagnoseCaptchaProvider } from "@copify/runner";
 import { ClipboardCoordinator } from "./clipboard-coordinator";
 import { canStartTargetMonitor } from "./run-monitor";
 import { formatProxyUrl } from "./proxy-url";
@@ -60,6 +60,7 @@ function emitHealthChanged(): void { mainWindow?.webContents.send(healthIpc.chan
 function emitMonitorChanged(): void { mainWindow?.webContents.send(monitorIpc.changed, monitorStatus); }
 function emitWarmingChanged(): void { void profiles.listProfileWarmStates().then((states) => mainWindow?.webContents.send(warmingIpc.changed, states)); }
 function emitCostsChanged(): void { mainWindow?.webContents.send(costIpc.changed); }
+function emitCaptchaChanged(): void { mainWindow?.webContents.send(captchaIpc.changed); }
 async function evaluateCostBudgets():Promise<BudgetStatus[]> {
   const statuses=await profiles.getBudgetStatuses();
   for(const status of statuses){ for(const threshold of status.budget.thresholds.filter((value)=>status.percent>=value)){ if(await profiles.markBudgetThreshold(status.budget.id,status.periodStartAt,threshold)){ if(Notification.isSupported())new Notification({title:`${status.budget.provider} budget ${threshold}%`,body:`${status.budget.cadence.toLowerCase()} proxy spend reached ${status.percent.toFixed(1)}%.`}).show(); } } }
@@ -217,6 +218,16 @@ function registerIpc(): void {
   ipcMain.handle(settingsIpc.getAppearance, (): Promise<ApiResult<AppearanceSettings>> => resultAsync(() => profiles.getAppearanceSettings()));
   ipcMain.handle(settingsIpc.updateAppearance, (_event, input: unknown): Promise<ApiResult<AppearanceSettings>> => resultAsync(() => profiles.setAppearanceSettings(appearanceSettingsSchema.parse(input))));
   ipcMain.handle(settingsIpc.applyChrome, (_event, input: unknown): ApiResult<boolean> => result(() => { applyChromeColors(chromeColorsSchema.parse(input)); return true; }));
+  ipcMain.handle(captchaIpc.settings, (): Promise<ApiResult<CaptchaSettings>> => resultAsync(() => profiles.getCaptchaSettings()));
+  ipcMain.handle(captchaIpc.updateSettings, (_event, input: unknown): Promise<ApiResult<CaptchaSettings>> => resultAsync(async () => { assertCaptchaSettingsMutable(); const updated = await profiles.setCaptchaSettings(updateCaptchaSettingsSchema.parse(input)); emitCaptchaChanged(); return updated; }));
+  ipcMain.handle(captchaIpc.upsertProvider, (_event, input: unknown): Promise<ApiResult<CaptchaSettings>> => resultAsync(async () => {
+    assertCaptchaSettingsMutable(); const parsed = upsertCaptchaProviderSchema.parse(input);
+    if (app.isPackaged && parsed.endpoint?.startsWith("http:")) throw new Error("Loopback HTTP CAPTCHA endpoints are development-only.");
+    const updated = await profiles.upsertCaptchaProvider({ kind: parsed.kind, label: parsed.label, endpoint: parsed.endpoint, enabled: parsed.enabled }, parsed.apiKey === undefined ? undefined : parsed.apiKey === null ? null : await encryptSecret(parsed.apiKey));
+    emitCaptchaChanged(); return updated;
+  }));
+  ipcMain.handle(captchaIpc.removeProvider, (_event, kind: import("@copify/shared").CaptchaProviderKind): Promise<ApiResult<CaptchaSettings>> => resultAsync(async () => { assertCaptchaSettingsMutable(); const updated = await profiles.removeCaptchaProvider(kind); emitCaptchaChanged(); return updated; }));
+  ipcMain.handle(captchaIpc.diagnose, (_event, kind: import("@copify/shared").CaptchaProviderKind): Promise<ApiResult<CaptchaProviderDiagnostic>> => resultAsync(async () => { assertCaptchaSettingsMutable(); const diagnostic = await diagnoseStoredCaptchaProvider(kind); await profiles.setCaptchaProviderDiagnostic(diagnostic); emitCaptchaChanged(); return diagnostic; }));
   ipcMain.handle(monitorIpc.status, (): ApiResult<MonitorRuntimeStatus> => result(() => monitorStatus));
   ipcMain.handle(monitorIpc.setTurbo, (_event, enabled: boolean): ApiResult<MonitorRuntimeStatus> => result(() => { if (!activeRun?.monitor || !trySendMonitorCommand(activeRun.monitor, { type: "SET_MONITOR_TURBO", version: IPC_VERSION, enabled: Boolean(enabled) })) throw new Error("There is no active target monitor."); return monitorStatus; }));
   ipcMain.handle(usageIpc.run, (_event, runId: string): Promise<ApiResult<RunNetworkUsage[]>> => resultAsync(() => profiles.listRunNetworkUsage(runId)));
@@ -283,15 +294,26 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
     const rotating = selected.find((profile) => profile.proxyProfileId && proxyById.get(profile.proxyProfileId)?.type === "residential-rotating");
     if (rotating) throw new Error(`${rotating.name} uses a rotating residential route. Assisted checkout requires a direct, sticky, or static route.`);
   }
+  const captchaSettings = await profiles.getCaptchaSettings();
+  const activeCaptchaProvider = captchaSettings.activeProvider ? captchaSettings.providers.find((provider) => provider.kind === captchaSettings.activeProvider && provider.enabled) ?? null : null;
+  const storedCaptchaProvider = activeCaptchaProvider ? await profiles.getStoredCaptchaProvider(activeCaptchaProvider.kind) : undefined;
+  const providerReady = Boolean(storedCaptchaProvider?.apiKeyCiphertext);
+  const captchaByProfile = new Map(selected.map((profile) => {
+    const runOverride = (input.captchaOverrides ?? []).find((entry) => entry.browserProfileId === profile.id)?.captchaStrategy;
+    const strategy = resolveCaptchaStrategy({ runOverride, profileOverride: profile.captchaStrategyOverride, targetStrategy: target?.captchaStrategy, appMode: captchaSettings.appMode });
+    return [profile.id, { strategy, provider: strategy !== "MANUAL_HARVESTER" && activeCaptchaProvider && providerReady ? { kind: activeCaptchaProvider.kind, label: activeCaptchaProvider.label } : null }] as const;
+  }));
+  const blocked = selected.find((profile) => captchaByProfile.get(profile.id)?.strategy === "API_SOLVER" && !captchaByProfile.get(profile.id)?.provider);
+  if (blocked) throw new Error(`${blocked.name} resolves to API-only CAPTCHA solving, but the active provider has no configured API key.`);
   const targetSnapshot = target ? snapshotTarget(target) : null;
   const specifications = await Promise.all(selected.map(async (profile) => ({ ...(await launchSpec(profile)), shipping: profile.shippingProfileId ? await profiles.getShippingProfile(profile.shippingProfileId) : undefined })));
-  const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, assistedEligible: input.executionMode === "ASSISTED_CHECKOUT" && Boolean(shipping?.enabled && shipping?.complete), executionState: input.executionMode === "ASSISTED_CHECKOUT" && shipping?.enabled && shipping.complete ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, status: "STARTING", startedAt, endedAt: null, finalError: null }));
+  const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, captchaStrategy: captchaByProfile.get(profile.id)!.strategy, captchaProvider: captchaByProfile.get(profile.id)!.provider, assistedEligible: input.executionMode === "ASSISTED_CHECKOUT" && Boolean(shipping?.enabled && shipping?.complete), executionState: input.executionMode === "ASSISTED_CHECKOUT" && shipping?.enabled && shipping.complete ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, status: "STARTING", startedAt, endedAt: null, finalError: null }));
   const environment = runEnvironment(); const detail = await profiles.createRun(input, environment, sessions, targetSnapshot);
   const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), monitorRouteProfiles: new Map() };
   const root = runDirectory(detail.run.id); await mkdir(root, { recursive: true }); await writeFile(join(root, "run.json"), JSON.stringify(detail.run, null, 2));
   await Promise.all(specifications.map(async ({ profile, driver, proxy }) => {
     const session = profileSessions.get(profile.id)!; const artifactDir = join(root, session.id); await mkdir(artifactDir, { recursive: true }); await writeFile(join(artifactDir, "manifest.json"), JSON.stringify({ runId: detail.run.id, runSessionId: session.id, profileId: profile.id, diagnosticLevel: input.diagnosticLevel }, null, 2));
-    try { await orchestrator.open({ profile, driver, proxy, probeUrl: await profiles.getNetworkProbeUrl(), recording: { runId: detail.run.id, runSessionId: session.id, diagnosticLevel: input.diagnosticLevel, assisted: input.executionMode === "ASSISTED_CHECKOUT", artifactDir, startedAt } }); if (input.executionMode === "ASSISTED_CHECKOUT" && !session.assistedEligible) await profiles.addRunEvent({ id: randomUUID(), runId: detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(activeRun!), type: "SHIPPING_PROFILE_UNAVAILABLE", stateBefore: "OBSERVING", stateAfter: "OBSERVING", payload: { message: "This session will observe because it has no enabled complete shipping profile." } }); } catch (error) { await recordSessionFailure(profile.id, session, sessionFailure(error)); }
+    try { await orchestrator.open({ profile, driver, proxy, probeUrl: await profiles.getNetworkProbeUrl(), recording: { runId: detail.run.id, runSessionId: session.id, diagnosticLevel: input.diagnosticLevel, assisted: input.executionMode === "ASSISTED_CHECKOUT", captcha: { strategy: session.captchaStrategy, provider: session.captchaProvider, solveTimeoutMs: captchaSettings.solveTimeoutMs, fallbackAfterMs: captchaSettings.fallbackAfterMs }, artifactDir, startedAt } }); if (input.executionMode === "ASSISTED_CHECKOUT" && !session.assistedEligible) await profiles.addRunEvent({ id: randomUUID(), runId: detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(activeRun!), type: "SHIPPING_PROFILE_UNAVAILABLE", stateBefore: "OBSERVING", stateAfter: "OBSERVING", payload: { message: "This session will observe because it has no enabled complete shipping profile." } }); } catch (error) { await recordSessionFailure(profile.id, session, sessionFailure(error)); }
   }));
   emitRunsChanged(); return (await profiles.getRun(detail.run.id))!;
 }
@@ -387,6 +409,20 @@ async function requireTarget(id: string): Promise<Target> { const target = await
 function assertTargetInactive(id: string): void { if (activeRun?.detail.run.targetSnapshot?.targetId === id) throw new Error("End the active run before changing its target."); }
 function assertShippingInactive(id: string): void { if ([...(activeRun?.profileSessions.values() ?? [])].some((session) => session.shippingProfile.shippingProfileId === id)) throw new Error("End the active run before changing its captured shipping profile."); }
 function assertSensitiveRevealAllowed(): void { if (activeRun) throw new Error("End the active run before revealing saved sensitive information."); }
+function assertCaptchaSettingsMutable(): void { if (activeRun) throw new Error("End the active run before changing or testing CAPTCHA settings."); }
+
+async function diagnoseStoredCaptchaProvider(kind: import("@copify/shared").CaptchaProviderKind): Promise<CaptchaProviderDiagnostic> {
+  const checkedAt = Date.now(); const stored = await profiles.getStoredCaptchaProvider(kind);
+  if (!stored?.enabled || !stored.apiKeyCiphertext) return captchaProviderDiagnosticSchema.parse({ provider: kind, status: "NOT_CONFIGURED", balanceMicrosUsd: null, checkedAt, message: "Configure and enable this provider before testing it." });
+  try {
+    const apiKey = await decryptSecret(stored.apiKeyCiphertext); const result = await diagnoseCaptchaProvider({ kind, endpoint: stored.endpoint, apiKey });
+    return captchaProviderDiagnosticSchema.parse({ provider: kind, status: "CONNECTED", balanceMicrosUsd: result.balanceMicrosUsd, checkedAt, message: "Connection and balance verified." });
+  } catch (error) {
+    const code = error instanceof CaptchaProviderError ? error.code : "SERVICE_UNAVAILABLE";
+    const status = code === "AUTH_INVALID" ? "AUTH_INVALID" : code === "INSUFFICIENT_CREDIT" ? "INSUFFICIENT_CREDIT" : code === "INVALID_RESPONSE" ? "INVALID_RESPONSE" : "UNAVAILABLE";
+    return captchaProviderDiagnosticSchema.parse({ provider: kind, status, balanceMicrosUsd: null, checkedAt, message: error instanceof Error ? error.message : "The provider diagnostic failed." });
+  }
+}
 async function confirmSensitiveReveal(kind: "proxy credentials" | "shipping address", name: string): Promise<boolean> {
   assertSensitiveRevealAllowed();
   const options: Electron.MessageBoxOptions = {
@@ -611,6 +647,7 @@ async function recordSessionFailure(profileId: string, session: RunSession, erro
 async function onRunnerEvent(event: RunnerEvent): Promise<void> {
   if (event.type === "CLIPBOARD_LEASE_REQUEST") { clipboardCoordinator.request(event); return; }
   if (event.type === "CLIPBOARD_LEASE_RELEASE") { clipboardCoordinator.release(event.profileId, event.requestId); return; }
+  if (event.type === "CAPTCHA_CREDENTIAL_REQUEST") { await provideCaptchaCredential(event); return; }
   if (event.type === "CART_STATUS") { const status: CartStatus = { profileId: event.profileId, ...event.status }; cartStatuses.set(event.profileId, status); mainWindow?.webContents.send(sessionIpc.cartChanged, status); if (closeAfterCartCheck.delete(event.profileId)) void orchestrator.close(event.profileId); return; }
   if (event.type === "HEALTH") {
     const active = activeRun; if (!active) return;
@@ -624,10 +661,27 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
   if (event.type === "PAYMENT_HANDOFF") { await handlePaymentHandoff(event.profileId, event.phase); return; }
   const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
   const session = active.profileSessions.get(event.profileId); if (!session) return;
-  if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
+  if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if (event.event.type === "CAPTCHA_HARVESTER_OPENED") notifyCaptchaHarvester(event.profileId, session.browserProfileName); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
   if (event.type === "RUN_ARTIFACT" && event.artifact.runId === active.detail.run.id) await profiles.addRunArtifact(event.artifact);
   if (event.type === "RUN_ENDED" && event.runSessionId === session.id) { if (session.status !== "FAILED") session.status = "ENDED"; await profiles.setRunSession(session.id, session.status); active.pendingEnd.delete(session.id); if (active.pendingEnd.size === 0) active.resolveEnd?.(); }
   emitRunsChanged();
+}
+
+async function provideCaptchaCredential(event: Extract<RunnerEvent, { type: "CAPTCHA_CREDENTIAL_REQUEST" }>): Promise<void> {
+  const active = activeRun; const session = active?.profileSessions.get(event.profileId);
+  if (!active || active.detail.run.id !== event.runId || session?.id !== event.runSessionId || session.captchaProvider?.kind !== event.provider || session.captchaStrategy === "MANUAL_HARVESTER") { orchestrator.provideCaptchaCredential(event.profileId, event.requestId, null, "CANCELLED"); return; }
+  const stored = await profiles.getStoredCaptchaProvider(event.provider);
+  if (!stored?.enabled || !stored.apiKeyCiphertext) { orchestrator.provideCaptchaCredential(event.profileId, event.requestId, null, "NOT_CONFIGURED"); return; }
+  try {
+    const apiKey = await decryptSecret(stored.apiKeyCiphertext);
+    orchestrator.provideCaptchaCredential(event.profileId, event.requestId, { kind: stored.kind, endpoint: stored.endpoint, apiKey }, null);
+  } catch { orchestrator.provideCaptchaCredential(event.profileId, event.requestId, null, "UNAVAILABLE"); }
+}
+
+function notifyCaptchaHarvester(profileId: string, profileName: string): void {
+  orchestrator.focusAssistPage(profileId); mainWindow?.flashFrame(true);
+  if (Notification.isSupported()) { const notification = new Notification({ title: "CAPTCHA needs you", body: `${profileName} is showing the original challenged checkout page. Complete it once and Copify will resume automatically.` }); notification.on("click", () => orchestrator.focusAssistPage(profileId)); notification.show(); }
+  setTimeout(() => mainWindow?.flashFrame(false), 15_000).unref();
 }
 
 function notifyPaymentHandoff(profileId: string): void {
@@ -676,7 +730,9 @@ async function simulatePaymentHandoff(input: SimulatePaymentHandoffInput): Promi
 }
 
 async function resumeRunSession(profileId: string): Promise<boolean> {
-  const active = activeRun; if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("There is no active assisted run."); const session = active.profileSessions.get(profileId); if (!session || session.executionState !== "CHECKPOINT") throw new Error("This session is not waiting at a resumable checkpoint."); const cartCheckpoint = /^(CART_NOT_EMPTY|CART_STATE_UNKNOWN|CART_CONTENT_CHANGED)$/.test(session.checkpointReason ?? ""); const nextState = cartCheckpoint ? (session.checkpointReason === "CART_CONTENT_CHANGED" ? "CARTED" : "PRODUCT_OPEN") : "CHECKOUT"; orchestrator.resumeAssist(profileId, active.detail.run.id, session.id); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKPOINT_RESUMED", stateBefore: "CHECKPOINT", stateAfter: nextState, payload: { reason: session.checkpointReason } }); await profiles.setRunSessionExecution(session.id, nextState); session.executionState = nextState; emitRunsChanged(); return true;
+  const active = activeRun; if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("There is no active assisted run."); const session = active.profileSessions.get(profileId); if (!session || session.executionState !== "CHECKPOINT") throw new Error("This session is not waiting at a resumable checkpoint.");
+  if (session.checkpointReason === "CAPTCHA_API_FAILED") { orchestrator.retryCaptcha(profileId, active.detail.run.id, session.id); return true; }
+  const cartCheckpoint = /^(CART_NOT_EMPTY|CART_STATE_UNKNOWN|CART_CONTENT_CHANGED)$/.test(session.checkpointReason ?? ""); const nextState = cartCheckpoint ? (session.checkpointReason === "CART_CONTENT_CHANGED" ? "CARTED" : "PRODUCT_OPEN") : "CHECKOUT"; orchestrator.resumeAssist(profileId, active.detail.run.id, session.id); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKPOINT_RESUMED", stateBefore: "CHECKPOINT", stateAfter: nextState, payload: { reason: session.checkpointReason } }); await profiles.setRunSessionExecution(session.id, nextState); session.executionState = nextState; emitRunsChanged(); return true;
 }
 
 app.whenReady().then(async () => {

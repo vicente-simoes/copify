@@ -22,7 +22,7 @@ describe.skipIf(!enabled)("authorized/local HTTP monitor smoke", () => {
 describe.skipIf(process.env.COPIFY_SUPREME_LIVE !== "1")("Supreme public HTML monitor smoke", () => {
   it("retrieves and parses the supported collection page", async () => {
     const response = await new CrawleeJsonTransport().get("https://eu.supreme.com/collections/all", { kind: "DIRECT", id: "direct" }, 20_000);
-    const products = parseSupremeHtmlProducts(response.body, { targetId: "00000000-0000-4000-8000-000000000001", name: "Live smoke", storeId: "supreme-eu", productKeywords: ["a"], negativeKeywords: [], directProductUrl: null, preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 1_000_000, quantity: 1, enabled: true, capturedAt: 1 });
+    const products = parseSupremeHtmlProducts(response.body, { targetId: "00000000-0000-4000-8000-000000000001", name: "Live smoke", storeId: "supreme-eu", productKeywords: ["a"], negativeKeywords: [], directProductUrl: null, preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 1_000_000, quantity: 1, captchaStrategy: "INHERIT_APP", enabled: true, capturedAt: 1 });
     expect(response.status).toBe(200); expect(response.bytes).toBeLessThan(200_000); expect(products.length).toBeGreaterThan(0); expect(products.some((product) => product.variants.length > 0)).toBe(true);
   }, 30_000);
 });
