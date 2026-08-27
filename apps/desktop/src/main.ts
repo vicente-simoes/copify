@@ -2,12 +2,16 @@ import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   IPC_VERSION, SCHEMA_VERSION, WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, analyticsFilterSchema, analyticsIpc, appearanceSettingsSchema, captchaIpc, captchaProviderDiagnosticSchema, chromeColorsSchema, commitProviderImportSchema, costIpc, costQuerySchema, createBrowserProfileSchema, createManualCostSnapshotSchema, createProxyProfileSchema, createRunAnnotationSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultRoute, estimateProxyCostMicrosUsd, getStoreManifest, healthIpc, idleCaptchaLabStatus, isKnownStore, isMonitorable, listStoreManifests, monitorEventSchema, monitorIpc, monitorSettingsSchema, networkProbeSettingsSchema, openProviderImportSchema, previewProviderImportSchema, profileIpc, proxyIpc, proxySecretRevealSchema, resolveCaptchaStrategy, resolveMonitorBehavior, runIpc, runSetupIpc, runnerShippingSchema, secretCopyFieldSchema, settingsIpc, sessionIpc, shippingIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, startCaptchaLabSchema, storeIpc, supportsAssistedCheckout, targetIpc, updateBrowserProfileSchema, updateCaptchaSettingsSchema, updateProfileWarmStateSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema, upsertCaptchaProviderSchema, upsertCostBudgetSchema, usageIpc, warmingIpc, warmDestinationSchema,
   type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthSnapshot, type CaptchaLabStatus, type CaptchaProviderDiagnostic, type CaptchaSettings, type ChromeColors, type WindowBounds, type BrowserProfile, type BudgetStatus, type CartStatus, type CostBudget, type CostSummary, type CreateProxyProfileInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorCommand, type MonitorEvent, type MonitorPolicy, type MonitorRoute, type MonitorRuntimeStatus, type MonitorSettings, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportPreview, type ReconciliationStatus, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type RunDetail, type RunEnvironment, type RunEvent, type RunNetworkUsage, type RunSession, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunnerShipping, type SecretCopyField, type SessionError, type SessionRoute, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type StartCaptchaLabInput, type Store, type Target, type TargetCheck, type TargetSnapshot, type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type WarmDestination
+} from "@copify/shared";
+import {
+  commitPaymentBatchSchema, createPaymentProfileSchema, paymentBatchPreviewSchema, paymentCardSecretSchema, paymentIpc, previewPaymentPasteSchema, supportsCheckoutMode, updatePaymentProfileSchema,
+  type CreatePaymentProfileInput, type PaymentBatchCommitResult, type PaymentBatchPreview, type PaymentCardSecret, type PaymentProfile, type UpdatePaymentProfileInput,
 } from "@copify/shared";
 import { openProfileRepository, type EncryptedProxyCredentialUpdate, type EncryptedProxyCredentials, type ProfileRepository } from "@copify/persistence";
 import { SessionOrchestrator, nodeRunnerFactory, type SessionLaunchSpec } from "@copify/core";
@@ -16,16 +20,22 @@ import { ClipboardCoordinator } from "./clipboard-coordinator";
 import { canStartTargetMonitor } from "./run-monitor";
 import { formatProxyUrl } from "./proxy-url";
 import { ProviderImportCoordinator } from "./cost-import";
+import { CheckoutQuota } from "./checkout-quota";
+import { parsePaymentImport, type PendingPaymentRow } from "./payment-import";
 
 let mainWindow: BrowserWindow | undefined;
 let profiles: ProfileRepository;
 let orchestrator: SessionOrchestrator;
 let clipboardCoordinator: ClipboardCoordinator;
 const providerImports = new ProviderImportCoordinator();
+const PAYMENT_BATCH_TTL_MS = 120_000;
+type PendingPaymentBatch = { expiresAt: number; rows: PendingPaymentRow[] };
+const pendingPaymentBatches = new Map<string, PendingPaymentBatch>();
+let actionablePaymentHandoff: string | null = null; const paymentHandoffQueue: string[] = [];
 let benchmarkRunning = false;
 let budgetEvaluationTimer: NodeJS.Timeout | undefined;
 let runsRoot = "";
-type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; monitorRouteProfiles: Map<string, ProxyProfile> };
+type ActiveRun = { detail: RunDetail; profileSessions: Map<string, RunSession>; assistedShipping: Map<string, string>; assistedDispatched: boolean; assistedActivated: Set<string>; priorityProfileId: string | null; pendingAssist?: TargetCheck; ending: boolean; pendingEnd: Set<string>; resolveEnd?: () => void; monitor?: ChildProcess; monitorRouteProfiles: Map<string, ProxyProfile>; quota: CheckoutQuota };
 let activeRun: ActiveRun | undefined;
 type ActiveCaptchaLab = { runId: string; runSessionId: string; profileId: string; provider: NonNullable<CaptchaLabStatus["provider"]> | null };
 let activeCaptchaLab: ActiveCaptchaLab | undefined;
@@ -59,6 +69,7 @@ function emitRunsChanged(): void { void profiles.listRuns().then((runs) => mainW
 function emitRunSetupsChanged(): void { void profiles.listRunSetups().then((setups) => mainWindow?.webContents.send(runSetupIpc.changed, setups)); }
 function emitTargetsChanged(): void { void profiles.listTargets().then((targets) => mainWindow?.webContents.send(targetIpc.changed, targets)); }
 function emitShippingChanged(): void { void profiles.listShippingProfiles().then((shipping) => mainWindow?.webContents.send(shippingIpc.changed, shipping)); }
+function emitPaymentsChanged(): void { void profiles.listPaymentProfiles().then((payments) => mainWindow?.webContents.send(paymentIpc.changed, payments)); }
 function emitHealthChanged(): void { mainWindow?.webContents.send(healthIpc.changed); }
 function emitMonitorChanged(): void { mainWindow?.webContents.send(monitorIpc.changed, monitorStatus); }
 function emitWarmingChanged(): void { void profiles.listProfileWarmStates().then((states) => mainWindow?.webContents.send(warmingIpc.changed, states)); }
@@ -89,6 +100,7 @@ async function createWindow(): Promise<void> {
   // starts electron.exe. Set it explicitly on the window/taskbar button so the
   // development shell does not fall back to Electron's generic atom icon.
   mainWindow.setIcon(windowIconPath());
+  mainWindow.webContents.once("destroyed",()=>pendingPaymentBatches.clear());
   if (process.platform === "win32") mainWindow.setAppDetails({ appId: APP_USER_MODEL_ID, appIconPath: windowIconPath() });
   if (placement.maximized) mainWindow.maximize();
   trackPlacement(mainWindow);
@@ -201,6 +213,15 @@ function registerIpc(): void {
   ipcMain.handle(shippingIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<ShippingProfile>> => resultAsync(async () => { assertShippingInactive(id); const parsed = updateShippingProfileSchema.parse(input); const updated = await profiles.updateShippingProfile(id, parsed, parsed.details === undefined ? undefined : parsed.details === null ? null : await encryptSecret(JSON.stringify(parsed.details))); emitShippingChanged(); return updated; }));
   ipcMain.handle(shippingIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertShippingInactive(id); const removed = await profiles.removeShippingProfile(id); emitShippingChanged(); return removed; }));
 
+  ipcMain.handle(paymentIpc.list, (): Promise<ApiResult<PaymentProfile[]>> => resultAsync(() => profiles.listPaymentProfiles()));
+  ipcMain.handle(paymentIpc.create, (_event, input: unknown): Promise<ApiResult<PaymentProfile>> => resultAsync(async () => { assertPaymentMutable(); const parsed = createPaymentProfileSchema.parse(input); const created = await profiles.createPaymentProfile(parsed, await encryptSecret(JSON.stringify(paymentSecret(parsed)))); emitPaymentsChanged(); return created; }));
+  ipcMain.handle(paymentIpc.update, (_event, id: string, input: unknown): Promise<ApiResult<PaymentProfile>> => resultAsync(async () => { assertPaymentMutable(); const parsed = updatePaymentProfileSchema.parse(input); const existing = await profiles.getPaymentProfile(id); if (!existing) throw new Error("Payment profile not found."); let ciphertext: Buffer | undefined; if (parsed.replacement) { const replacement = createPaymentProfileSchema.parse({ ...parsed.replacement, name: existing.name, tags: existing.tags }); ciphertext = await encryptSecret(JSON.stringify(paymentSecret(replacement))); } const updated = await profiles.updatePaymentProfile(id, parsed, ciphertext); emitPaymentsChanged(); return updated; }));
+  ipcMain.handle(paymentIpc.remove, (_event, id: string): Promise<ApiResult<boolean>> => resultAsync(async () => { assertPaymentMutable(); const removed = await profiles.removePaymentProfile(id); emitPaymentsChanged(); return removed; }));
+  ipcMain.handle(paymentIpc.previewCsv, (): Promise<ApiResult<PaymentBatchPreview | null>> => resultAsync(async () => { assertPaymentMutable(); const selected = await dialog.showOpenDialog(mainWindow!, { title: "Import Payment Profiles", properties: ["openFile"], filters: [{ name: "CSV", extensions: ["csv"] }] }); if (selected.canceled || !selected.filePaths[0]) return null; const content = await readFile(selected.filePaths[0], "utf8"); if (content.length > 1_000_000) throw new Error("The payment CSV is larger than 1 MB."); return openPaymentBatch(content); }));
+  ipcMain.handle(paymentIpc.previewPaste, (_event, input: unknown): Promise<ApiResult<PaymentBatchPreview>> => resultAsync(async () => { assertPaymentMutable(); const { text } = previewPaymentPasteSchema.parse(input); return openPaymentBatch(text); }));
+  ipcMain.handle(paymentIpc.commitBatch, (_event, input: unknown): Promise<ApiResult<PaymentBatchCommitResult>> => resultAsync(async () => commitPaymentBatch(input)));
+  ipcMain.handle(paymentIpc.cancelBatch, (_event, token: string): ApiResult<boolean> => result(() => pendingPaymentBatches.delete(token)));
+
   ipcMain.handle(proxyIpc.list, (): Promise<ApiResult<ProxyProfile[]>> => resultAsync(() => profiles.listProxies()));
   ipcMain.handle(proxyIpc.reveal, (_event, id: string): Promise<ApiResult<ProxySecretReveal | null>> => resultAsync(() => revealProxyProfile(id)));
   ipcMain.handle(proxyIpc.copyRevealed, (_event, token: string, field: unknown): Promise<ApiResult<boolean>> => resultAsync(() => copyRevealedSecret(token, field, "PROXY")));
@@ -295,12 +316,19 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   if (selected.some((profile) => orchestrator.isActive(profile.id))) throw new Error("Selected profiles must be closed before starting a run.");
   const target = input.targetId ? await requireTarget(input.targetId) : null;
   if (target && !target.enabled) throw new Error("Select an enabled target for monitoring."); if (target && !isMonitorable(target.storeId)) throw new Error("This target has no store adapter yet.");
-  if (input.executionMode === "ASSISTED_CHECKOUT" && target && !supportsAssistedCheckout(target.storeId)) throw new Error("This store does not support assisted checkout.");
-  if (input.executionMode === "ASSISTED_CHECKOUT") {
+  const checkoutEnabled = input.executionMode === "CHECKOUT";
+  if (checkoutEnabled && !target) throw new Error("Checkout requires a target.");
+  if (checkoutEnabled) {
     const proxyById = new Map((await profiles.listProxies()).map((proxy) => [proxy.id, proxy]));
     const rotating = selected.find((profile) => profile.proxyProfileId && proxyById.get(profile.proxyProfileId)?.type === "residential-rotating");
-    if (rotating) throw new Error(`${rotating.name} uses a rotating residential route. Assisted checkout requires a direct, sticky, or static route.`);
+    if (rotating) throw new Error(`${rotating.name} uses a rotating residential route. Checkout requires a direct, sticky, or static route.`);
   }
+  const overrideByProfile = new Map((input.sessionOverrides ?? []).map((override) => [override.browserProfileId,override]));
+  if(overrideByProfile.size!==(input.sessionOverrides??[]).length||[...overrideByProfile.keys()].some((id)=>!selected.some((profile)=>profile.id===id)))throw new Error("Run session overrides must uniquely reference selected browsers.");
+  const checkoutByProfile = new Map(selected.map((profile) => { const override=overrideByProfile.get(profile.id)?.checkoutMode; const mode=override&&override!=="INHERIT_TARGET"?override:profile.checkoutModeOverride!=="INHERIT_TARGET"?profile.checkoutModeOverride:target?.checkoutMode??"ASSISTED"; return [profile.id,mode] as const; }));
+  if (checkoutEnabled && target) { const unsupported=selected.find((profile)=>!supportsCheckoutMode(target.storeId,checkoutByProfile.get(profile.id)!)); if(unsupported)throw new Error(`${unsupported.name} resolves to a checkout mode unsupported by this store.`); }
+  const hasFullAuto=checkoutEnabled&&selected.some((profile)=>checkoutByProfile.get(profile.id)==="FULL_AUTO");
+  if(hasFullAuto&&input.purchaseMode==="LIVE"&&!input.fullAutoAcknowledged)throw new Error("Live Full Auto-Checkout requires a fresh acknowledgement.");
   const captchaSettings = await profiles.getCaptchaSettings();
   const activeCaptchaProvider = captchaSettings.activeProvider ? captchaSettings.providers.find((provider) => provider.kind === captchaSettings.activeProvider && provider.enabled) ?? null : null;
   const storedCaptchaProvider = activeCaptchaProvider ? await profiles.getStoredCaptchaProvider(activeCaptchaProvider.kind) : undefined;
@@ -313,14 +341,14 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
   const blocked = selected.find((profile) => captchaByProfile.get(profile.id)?.strategy === "API_SOLVER" && !captchaByProfile.get(profile.id)?.provider);
   if (blocked) throw new Error(`${blocked.name} resolves to API-only CAPTCHA solving, but the active provider has no configured API key.`);
   const targetSnapshot = target ? snapshotTarget(target) : null;
-  const specifications = await Promise.all(selected.map(async (profile) => ({ ...(await launchSpec(profile)), shipping: profile.shippingProfileId ? await profiles.getShippingProfile(profile.shippingProfileId) : undefined })));
-  const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping }) => ({ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, captchaStrategy: captchaByProfile.get(profile.id)!.strategy, captchaProvider: captchaByProfile.get(profile.id)!.provider, assistedEligible: input.executionMode === "ASSISTED_CHECKOUT" && Boolean(shipping?.enabled && shipping?.complete), executionState: input.executionMode === "ASSISTED_CHECKOUT" && shipping?.enabled && shipping.complete ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, status: "STARTING", startedAt, endedAt: null, finalError: null }));
+  const specifications = await Promise.all(selected.map(async (profile) => { const override=overrideByProfile.get(profile.id); const paymentId=override?.paymentProfileId!==undefined?override.paymentProfileId:profile.paymentProfileId; const payment=paymentId?await profiles.getPaymentProfile(paymentId):undefined; if(paymentId&&!payment)throw new Error(`${profile.name}'s selected Payment Profile no longer exists.`); const warm=target?await profiles.getProfileWarmState(profile.id,target.storeId):undefined; const shopPayReady=Boolean(warm?.status==="READY"&&warm.shopPayReady&&warm.shopPayCompletedAt&&Date.now()-warm.shopPayCompletedAt<=86_400_000); if(payment?.kind==="GATEWAY_TOKEN")throw new Error(`${profile.name} uses a gateway token, which is reserved for v0.19.`); if(checkoutEnabled&&checkoutByProfile.get(profile.id)==="FULL_AUTO"&&!shopPayReady){if(!payment?.configured)throw new Error(`${profile.name} needs a configured Payment Profile or recently verified Shop Pay readiness.`);const stored=await profiles.getStoredPaymentProfile(payment.id);if(!stored?.payloadCiphertext)throw new Error(`${profile.name}'s Payment Profile is unavailable.`);paymentCardSecretSchema.parse(JSON.parse(await decryptSecret(stored.payloadCiphertext)));} return { ...(await launchSpec(profile)), shipping: profile.shippingProfileId ? await profiles.getShippingProfile(profile.shippingProfileId) : undefined, payment, shopPayReady }; }));
+  const startedAt = Date.now(); const sessions: RunSession[] = specifications.map(({ profile, proxy, shipping, payment, shopPayReady }) => { const checkoutMode=checkoutByProfile.get(profile.id)!; const eligible=checkoutEnabled&&Boolean(shipping?.enabled&&shipping.complete); const path=checkoutMode==="FULL_AUTO"?(shopPayReady?"SHOP_PAY":payment?.configured?"PAYMENT_PROFILE":"NONE"):"NONE"; return { id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: initialRoute(proxy), shippingProfile: { shippingProfileId: shipping?.id ?? null, name: shipping?.name ?? null, country: shipping?.country ?? null, complete: Boolean(shipping?.enabled && shipping?.complete) }, paymentProfile:{paymentProfileId:payment?.id??null,label:payment?`${payment.brand??payment.kind} •••• ${payment.last4??""}`.trim():shopPayReady?"Authenticated Shop Pay":null,kind:payment?.kind??null,configured:Boolean(payment?.configured),path}, checkoutMode, captchaStrategy: captchaByProfile.get(profile.id)!.strategy, captchaProvider: captchaByProfile.get(profile.id)!.provider, assistedEligible: eligible, executionState: eligible ? "WAITING_FOR_TARGET" : "OBSERVING", checkpointReason: null, quotaOutcome:"NONE",orderIndex:null,status: "STARTING", startedAt, endedAt: null, finalError: null }; });
   const environment = runEnvironment(); const detail = await profiles.createRun(input, environment, sessions, targetSnapshot);
-  const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), monitorRouteProfiles: new Map() };
+  const profileSessions = new Map(detail.sessions.map((session) => [session.browserProfileId, session])); const assistedShipping = new Map(detail.sessions.filter((session) => session.assistedEligible && session.shippingProfile.shippingProfileId).map((session) => [session.browserProfileId, session.shippingProfile.shippingProfileId!])); activeRun = { detail, profileSessions, assistedShipping, assistedDispatched: false, assistedActivated: new Set(), priorityProfileId: null, ending: false, pendingEnd: new Set(), monitorRouteProfiles: new Map(), quota:new CheckoutQuota(detail.run.maxCheckouts) };
   const root = runDirectory(detail.run.id); await mkdir(root, { recursive: true }); await writeFile(join(root, "run.json"), JSON.stringify(detail.run, null, 2));
   await Promise.all(specifications.map(async ({ profile, driver, proxy }) => {
     const session = profileSessions.get(profile.id)!; const artifactDir = join(root, session.id); await mkdir(artifactDir, { recursive: true }); await writeFile(join(artifactDir, "manifest.json"), JSON.stringify({ runId: detail.run.id, runSessionId: session.id, profileId: profile.id, diagnosticLevel: input.diagnosticLevel }, null, 2));
-    try { await orchestrator.open({ profile, driver, proxy, probeUrl: await profiles.getNetworkProbeUrl(), recording: { runId: detail.run.id, runSessionId: session.id, diagnosticLevel: input.diagnosticLevel, assisted: input.executionMode === "ASSISTED_CHECKOUT", captcha: { strategy: session.captchaStrategy, provider: session.captchaProvider, solveTimeoutMs: captchaSettings.solveTimeoutMs, fallbackAfterMs: captchaSettings.fallbackAfterMs }, artifactDir, startedAt } }); if (input.executionMode === "ASSISTED_CHECKOUT" && !session.assistedEligible) await profiles.addRunEvent({ id: randomUUID(), runId: detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(activeRun!), type: "SHIPPING_PROFILE_UNAVAILABLE", stateBefore: "OBSERVING", stateAfter: "OBSERVING", payload: { message: "This session will observe because it has no enabled complete shipping profile." } }); } catch (error) { await recordSessionFailure(profile.id, session, sessionFailure(error)); }
+    try { await orchestrator.open({ profile, driver, proxy, probeUrl: await profiles.getNetworkProbeUrl(), recording: { runId: detail.run.id, runSessionId: session.id, diagnosticLevel: input.diagnosticLevel, checkoutMode:session.checkoutMode,purchaseMode:input.purchaseMode??"DRY_RUN",captcha: { strategy: session.captchaStrategy, provider: session.captchaProvider, solveTimeoutMs: captchaSettings.solveTimeoutMs, fallbackAfterMs: captchaSettings.fallbackAfterMs }, artifactDir, startedAt } }); if (checkoutEnabled && !session.assistedEligible) await profiles.addRunEvent({ id: randomUUID(), runId: detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(activeRun!), type: "SHIPPING_PROFILE_UNAVAILABLE", stateBefore: "OBSERVING", stateAfter: "OBSERVING", payload: { message: "This session will observe because it has no enabled complete shipping profile." } }); } catch (error) { await recordSessionFailure(profile.id, session, sessionFailure(error)); }
   }));
   emitRunsChanged(); return (await profiles.getRun(detail.run.id))!;
 }
@@ -328,6 +356,8 @@ async function startRun(input: CreateRunInput): Promise<RunDetail> {
 async function assertRunSetupReferences(input: CreateRunSetupInput): Promise<void> {
   const available = await profiles.list();
   if (input.profileIds.some((id) => !available.some((profile) => profile.id === id))) throw new Error("One or more selected browser profiles no longer exist.");
+  const paymentIds=(input.sessionOverrides??[]).flatMap((entry)=>entry.paymentProfileId?[entry.paymentProfileId]:[]); const knownPayments=await profiles.listPaymentProfiles();
+  if(paymentIds.some((id)=>!knownPayments.some((payment)=>payment.id===id&&payment.configured&&payment.kind!=="GATEWAY_TOKEN")))throw new Error("One or more selected Payment Profiles are unavailable.");
   if (input.targetId) await requireTarget(input.targetId);
 }
 
@@ -343,7 +373,7 @@ async function endRun(): Promise<RunDetail> {
   if (active.pendingEnd.size === 0) active.resolveEnd?.();
   await Promise.race([wait, new Promise<void>((resolve) => setTimeout(resolve, 10_000))]);
   for (const session of active.profileSessions.values()) if (session.status !== "FAILED") { session.status = "ENDED"; await profiles.setRunSession(session.id, "ENDED"); }
-  await profiles.setRunStatus(active.detail.run.id, "COMPLETED", true); const completed = (await profiles.getRun(active.detail.run.id))!; await profiles.materializeRunMetrics(completed.run.id); activeRun = undefined; emitRunsChanged(); return completed;
+  await profiles.setRunStatus(active.detail.run.id, "COMPLETED", true); const completed = (await profiles.getRun(active.detail.run.id))!; await profiles.materializeRunMetrics(completed.run.id); activeRun = undefined; actionablePaymentHandoff=null;paymentHandoffQueue.length=0; emitRunsChanged(); return completed;
 }
 
 async function removeRun(id: string): Promise<boolean> {
@@ -435,7 +465,7 @@ async function startCaptchaLab(input: StartCaptchaLabInput): Promise<CaptchaLabS
   captchaLabStatus = { state: "STARTING", browserProfileId: profile.id, fixture: input.fixture, strategy: input.strategy, provider, message: "Launching the isolated browser runner…", startedAt: Date.now(), events: [] }; emitCaptchaLabChanged();
   try {
     const specification = await launchSpec(profile);
-    specification.recording = { runId, runSessionId, diagnosticLevel: "NORMAL", assisted: false, captcha: { strategy: input.strategy, provider, solveTimeoutMs: settings.solveTimeoutMs, fallbackAfterMs: settings.fallbackAfterMs }, artifactDir: join(app.getPath("temp"), "copify-captcha-lab", runId), startedAt: Date.now() };
+    specification.recording = { runId, runSessionId, diagnosticLevel: "NORMAL", checkoutMode:"ASSISTED",purchaseMode:"DRY_RUN",captcha: { strategy: input.strategy, provider, solveTimeoutMs: settings.solveTimeoutMs, fallbackAfterMs: settings.fallbackAfterMs }, artifactDir: join(app.getPath("temp"), "copify-captcha-lab", runId), startedAt: Date.now() };
     await orchestrator.open(specification); await waitForSessionReady(profile.id, 60_000);
     captchaLabStatus = { ...captchaLabStatus, state: "READY", message: "Browser ready. Opening the allow-listed public fixture…" }; emitCaptchaLabChanged();
     orchestrator.testCaptcha(profile.id, runId, runSessionId, input.fixture);
@@ -548,6 +578,10 @@ async function encryptCreateCredentials(input: CreateProxyProfileInput): Promise
 async function encryptUpdateCredentials(input: UpdateProxyProfileInput): Promise<EncryptedProxyCredentialUpdate> { return { ...(input.username === undefined ? {} : { username: input.username === null ? null : await encryptSecret(input.username) }), ...(input.password === undefined ? {} : { password: input.password === null ? null : await encryptSecret(input.password) }) }; }
 async function encryptSecret(value: string): Promise<Buffer> { if (!await safeStorage.isAsyncEncryptionAvailable()) throw new Error("Secure OS credential storage is unavailable. Credentials were not saved."); return safeStorage.encryptStringAsync(value); }
 async function decryptSecret(value: Buffer): Promise<string> { if (!await safeStorage.isAsyncEncryptionAvailable()) throw new Error("Secure OS credential storage is unavailable."); return (await safeStorage.decryptStringAsync(value)).result; }
+function paymentSecret(input: CreatePaymentProfileInput): PaymentCardSecret { const parsed = createPaymentProfileSchema.parse(input); return paymentCardSecretSchema.parse({ version: 1, kind: parsed.kind, pan: parsed.cardNumber, expiryMonth: parsed.expiryMonth, expiryYear: parsed.expiryYear, cvv: parsed.cvv, cardholderName: parsed.cardholderName, billing: parsed.billing }); }
+function assertPaymentMutable(): void { if (activeRun) throw new Error("End the active run before changing Payment Profiles."); }
+async function openPaymentBatch(text: string): Promise<PaymentBatchPreview> { for (const [token,batch] of pendingPaymentBatches) if (batch.expiresAt <= Date.now()) pendingPaymentBatches.delete(token); const rows = parsePaymentImport(text, await profiles.listPaymentProfiles()); if (rows.length > 500) throw new Error("A payment batch may contain at most 500 rows."); const token = randomUUID(); const expiresAt = Date.now() + PAYMENT_BATCH_TTL_MS; pendingPaymentBatches.set(token,{expiresAt,rows}); return paymentBatchPreviewSchema.parse({token,expiresAt,rows:rows.map((row)=>row.preview)}); }
+async function commitPaymentBatch(input: unknown): Promise<PaymentBatchCommitResult> { assertPaymentMutable(); const value=commitPaymentBatchSchema.parse(input); const batch=pendingPaymentBatches.get(value.token); pendingPaymentBatches.delete(value.token); if(!batch||batch.expiresAt<=Date.now())throw new Error("That payment import expired. Preview it again."); const selected=value.selections.map((selection)=>{const row=batch.rows.find((candidate)=>candidate.rowNumber===selection.rowNumber);if(!row?.input||row.preview.errors.length)throw new Error(`Row ${selection.rowNumber} is not valid.`);if(row.preview.warnings.length&&!selection.includeWarnings)throw new Error(`Row ${selection.rowNumber} has warnings that require explicit inclusion.`);return {row,selection};}); const encrypted=[] as {input:CreatePaymentProfileInput;ciphertext:Buffer}[]; for(const {row} of selected)encrypted.push({input:row.input!,ciphertext:await encryptSecret(JSON.stringify(paymentSecret(row.input!)))}); const created=await profiles.createPaymentProfilesAtomic(encrypted,selected.flatMap(({selection},entryIndex)=>selection.browserProfileId?[{entryIndex,browserProfileId:selection.browserProfileId}]:[])); emitPaymentsChanged(); return {profiles:created,assignedBrowserProfileIds:selected.flatMap(({selection})=>selection.browserProfileId?[selection.browserProfileId]:[])}; }
 function sessionFailure(error: unknown): SessionError { const text = message(error); return { code: /credential storage/i.test(text) ? "SECRET_STORAGE_UNAVAILABLE" : /external CDP endpoint/i.test(text) ? "INVALID_DRIVER_ENDPOINT" : /disabled|assigned proxy|proxy profile/i.test(text) ? "PROXY_CONNECTION_FAILED" : "UNKNOWN", message: text }; }
 function runEnvironment(): RunEnvironment { return { appVersion: app.getVersion(), schemaVersion: SCHEMA_VERSION, osVersion: `${process.platform} ${process.getSystemVersion?.() ?? process.version}`, chromeVersion: process.versions.chrome ?? null, playwrightVersion: "rebrowser-playwright 1.52.0", capturedAt: Date.now() }; }
 function runDirectory(id: string): string { const root = resolve(runsRoot); const candidate = resolve(root, id); if (!candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid run artifact path."); return candidate; }
@@ -634,7 +668,7 @@ async function onMonitorEvent(value: unknown): Promise<void> {
   }
   if (event.type !== "MONITOR_EVENT" || !active || event.runId !== active.detail.run.id) return;
   await appendMonitorEvent(active.detail.run.id, event.eventType, event.check, null);
-  if (active.detail.run.executionMode === "ASSISTED_CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) {
+  if (active.detail.run.executionMode === "CHECKOUT" && !active.assistedDispatched && event.check?.decision.kind === "VARIANT_SELECTED" && event.check.decision.candidate && event.check.decision.selectedVariant) {
     active.assistedDispatched = true;
     active.pendingAssist = event.check;
     await dispatchAssistedTarget(active, event.check);
@@ -649,7 +683,16 @@ async function dispatchAssistedTarget(active: ActiveRun, check: TargetCheck): Pr
   if (!candidate || !variant || !target) return;
   await Promise.all([...active.assistedShipping.entries()].map(async ([profileId, shippingId]) => {
     const runSession = active.profileSessions.get(profileId); if (!runSession || runSession.status === "FAILED" || active.assistedActivated.has(profileId) || orchestrator.snapshot(profileId).state !== "READY") return;
-    try { const shipping = await resolveShipping(shippingId); orchestrator.assist(profileId, active.detail.run.id, runSession.id, candidate, variant, target.quantity, { currency: target.currency, maxRetailMinor: target.maxRetailMinor }, shipping); active.assistedActivated.add(profileId); await profiles.setRunSessionExecution(runSession.id, "PRODUCT_OPEN"); }
+    try {
+      const shipping = await resolveShipping(shippingId);
+      orchestrator.assist(profileId, active.detail.run.id, runSession.id, candidate, variant, { currency: target.currency, maxRetailMinor: target.maxRetailMinor }, shipping, {
+        checkoutMode: runSession.checkoutMode,
+        purchaseMode: active.detail.run.purchaseMode === "LIVE" ? "LIVE" : "DRY_RUN",
+        paymentProfile: runSession.paymentProfile,
+      });
+      active.assistedActivated.add(profileId);
+      await profiles.setRunSessionExecution(runSession.id, "PRODUCT_OPEN");
+    }
     catch (error) { await profiles.setRunSessionExecution(runSession.id, "FAILED"); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: runSession.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "ASSIST_FAILED", stateBefore: "WAITING_FOR_TARGET", stateAfter: "FAILED", payload: { code: "SECRET_STORAGE_UNAVAILABLE", message: "Shipping details could not be loaded for assisted checkout." } }); }
   }));
 }
@@ -677,6 +720,7 @@ async function onSessionChanged(snapshot: SessionSnapshot): Promise<void> {
 }
 async function recordSessionFailure(profileId: string, session: RunSession, error: SessionError): Promise<void> {
   const active = activeRun; if (!active || session.status === "FAILED") return;
+  active.quota.releaseUnsubmittedForSession(session.id);
   session.status = "FAILED"; session.finalError = error; session.executionState = "FAILED";
   await profiles.setRunSession(session.id, "FAILED", undefined, error);
   await profiles.setRunSessionExecution(session.id, "FAILED");
@@ -686,7 +730,7 @@ async function recordSessionFailure(profileId: string, session: RunSession, erro
     const nextReady = [...active.profileSessions.values()].find((candidate) => candidate.status !== "FAILED" && candidate.executionState === "READY_TO_CONFIRM");
     if (nextReady) await promoteReadySession(active, nextReady);
   }
-  if (active.detail.run.executionMode === "ASSISTED_CHECKOUT" && active.assistedDispatched) {
+  if (active.detail.run.executionMode === "CHECKOUT" && active.assistedDispatched) {
     const survivors = [...active.profileSessions.entries()].filter(([id, candidate]) => id !== profileId && candidate.status !== "FAILED" && candidate.status !== "ENDED");
     await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: null, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: survivors.length ? "SESSION_FAILOVER" : "CHECKOUT_SESSIONS_EXHAUSTED", stateBefore: null, stateAfter: null, payload: survivors.length ? { failedProfileId: profileId, continuingProfileIds: survivors.map(([id]) => id) } : { failedProfileId: profileId, message: "No checkout session remains available." } });
   }
@@ -718,11 +762,57 @@ async function onRunnerEvent(event: RunnerEvent): Promise<void> {
     await profiles.recordUsageSnapshot({ id: randomUUID(), runId: event.runId, usageKey: `browser:${event.runSessionId}`, source: "BROWSER", runSessionId: event.runSessionId, browserProfileId:event.profileId, storeId: active.detail.run.targetSnapshot?.storeId ?? null, proxyProfileId: proxy?.id ?? null, proxyProvider:proxy?.provider??null, proxyName: proxy?.name ?? (session.route.kind === "direct" ? "Direct" : null), discoverySource: null, ...event.usage, costPerGbMicrosUsd: rate, estimatedCostMicrosUsd: estimateProxyCostMicrosUsd(event.usage.receivedBytes, event.usage.sentBytes, rate), updatedAt: Date.now() }); await evaluateCostBudgets();emitCostsChanged(); emitMonitorChanged(); return;
   }
   if (event.type === "PAYMENT_HANDOFF") { await handlePaymentHandoff(event.profileId, event.phase); return; }
-  const active = activeRun; if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
+  const active = activeRun;
+  if (event.type === "PAYMENT_SECRET_REQUEST") {
+    const session = active?.profileSessions.get(event.profileId);
+    if (!active || event.runId !== active.detail.run.id || session?.id !== event.runSessionId || session.paymentProfile.paymentProfileId !== event.paymentProfileId || session.paymentProfile.path !== "PAYMENT_PROFILE") { orchestrator.providePaymentSecret(event.profileId, event.requestId, null, "CANCELLED"); return; }
+    try {
+      const stored = await profiles.getStoredPaymentProfile(event.paymentProfileId);
+      if (!stored?.payloadCiphertext) { orchestrator.providePaymentSecret(event.profileId, event.requestId, null, "NOT_CONFIGURED"); return; }
+      const secret = paymentCardSecretSchema.parse(JSON.parse(await decryptSecret(stored.payloadCiphertext)));
+      orchestrator.providePaymentSecret(event.profileId, event.requestId, secret, null);
+    } catch { orchestrator.providePaymentSecret(event.profileId, event.requestId, null, "UNAVAILABLE"); }
+    return;
+  }
+  if (event.type === "CHECKOUT_SLOT_REQUEST") {
+    const session = active?.profileSessions.get(event.profileId);
+    if (!active || event.runId !== active.detail.run.id || session?.id !== event.runSessionId) { orchestrator.denyCheckoutSlot(event.profileId, event.requestId, 0, 0); return; }
+    const reservation = active.quota.reserve(session.id);
+    if (!reservation.granted) {
+      session.quotaOutcome = "LIMIT_REACHED"; session.executionState = "CHECKOUT_LIMIT_REACHED";
+      await profiles.setRunSessionQuota(session.id, "LIMIT_REACHED"); await profiles.setRunSessionExecution(session.id, "CHECKOUT_LIMIT_REACHED");
+      await profiles.addRunEvent({ id: randomUUID(), runId: event.runId, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKOUT_LIMIT_REACHED", stateBefore: "READY_TO_SUBMIT", stateAfter: "CHECKOUT_LIMIT_REACHED", payload: reservation.snapshot });
+      orchestrator.denyCheckoutSlot(event.profileId, event.requestId, reservation.snapshot.succeeded, typeof reservation.snapshot.limit === "number" ? reservation.snapshot.limit : 0);
+    } else {
+      session.quotaOutcome = reservation.reservationId ? "RESERVED" : "BYPASSED"; await profiles.setRunSessionQuota(session.id, session.quotaOutcome);
+      await profiles.addRunEvent({ id: randomUUID(), runId: event.runId, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKOUT_SLOT_RESERVED", stateBefore: "READY_TO_SUBMIT", stateAfter: "READY_TO_SUBMIT", payload: reservation.snapshot });
+      orchestrator.grantCheckoutSlot(event.profileId, event.requestId, reservation.reservationId, reservation.snapshot.limit);
+    }
+    emitRunsChanged(); return;
+  }
+  if (event.type === "PAYMENT_SUBMISSION_RESULT") {
+    const session = active?.profileSessions.get(event.profileId);
+    if (!active || event.runId !== active.detail.run.id || session?.id !== event.runSessionId) return;
+    if (event.outcome === "SUCCESS") {
+      const completed = active.quota.succeed(event.reservationId); session.quotaOutcome = "SUCCEEDED"; session.orderIndex = completed.orderIndex; session.executionState = "SUCCESS";
+      await profiles.setRunSessionQuota(session.id, "SUCCEEDED", completed.orderIndex); await profiles.setRunSessionExecution(session.id, "SUCCESS");
+      await profiles.addRunEvent({ id: randomUUID(), runId: event.runId, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKOUT_SUCCESS", stateBefore: "SUBMITTED", stateAfter: "SUCCESS", payload: { orderIndex: completed.orderIndex, durationMs: event.durationMs } });
+      orchestrator.recordCheckoutSuccess(event.profileId, event.requestId, completed.orderIndex);
+    } else if (event.outcome === "REJECTED") {
+      const snapshot = active.quota.reject(event.reservationId); session.quotaOutcome = "RELEASED"; await profiles.setRunSessionQuota(session.id, "RELEASED");
+      await profiles.addRunEvent({ id: randomUUID(), runId: event.runId, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKOUT_SLOT_RELEASED", stateBefore: null, stateAfter: null, payload: { ...snapshot, code: event.code, durationMs: event.durationMs } });
+    } else {
+      const snapshot = active.quota.retainAmbiguous(event.reservationId); session.quotaOutcome = "AMBIGUOUS"; session.executionState = "CHECKPOINT"; session.checkpointReason = "PAYMENT_RESULT_AMBIGUOUS";
+      await profiles.setRunSessionQuota(session.id, "AMBIGUOUS"); await profiles.setRunSessionExecution(session.id, "CHECKPOINT", "PAYMENT_RESULT_AMBIGUOUS");
+      await profiles.addRunEvent({ id: randomUUID(), runId: event.runId, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "PAYMENT_RESULT_AMBIGUOUS", stateBefore: "SUBMITTED", stateAfter: "CHECKPOINT", payload: { ...snapshot, durationMs: event.durationMs } });
+    }
+    emitRunsChanged(); return;
+  }
+  if (!active || (event.type !== "RUN_EVENT" && event.type !== "RUN_ARTIFACT" && event.type !== "RUN_ENDED")) return;
   const session = active.profileSessions.get(event.profileId); if (!session) return;
-  if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if(event.event.type==="CAPTCHA_TOKEN_ACQUIRED"){await evaluateCostBudgets();emitCostsChanged();} if (event.event.type === "CAPTCHA_HARVESTER_OPENED") notifyCaptchaHarvester(event.profileId, session.browserProfileName); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
+  if (event.type === "RUN_EVENT" && event.event.runId === active.detail.run.id) { await profiles.addRunEvent(event.event); if(event.event.type==="PAYMENT_SUBMISSION_DISPATCHED"){const reservationId=typeof event.event.payload.reservationId==="string"?event.event.payload.reservationId:null;active.quota.markSubmitted(reservationId);session.quotaOutcome="SUBMITTED";await profiles.setRunSessionQuota(session.id,"SUBMITTED");} if(event.event.type==="CAPTCHA_TOKEN_ACQUIRED"){await evaluateCostBudgets();emitCostsChanged();} if (event.event.type === "CAPTCHA_HARVESTER_OPENED") notifyCaptchaHarvester(event.profileId, session.browserProfileName); if (event.event.stateAfter) { const state = event.event.stateAfter as RunSession["executionState"]; await profiles.setRunSessionExecution(session.id, state, state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null); session.executionState = state; session.checkpointReason = state === "CHECKPOINT" ? String(event.event.payload.reason ?? "CHECKPOINT") : null; if (state === "READY_TO_CONFIRM") await promoteReadySession(active, session); if (state === "FAILED") await recordSessionFailure(event.profileId, session, { code: "UNKNOWN", message: String(event.event.payload.message ?? "Assisted checkout failed.") }); } }
   if (event.type === "RUN_ARTIFACT" && event.artifact.runId === active.detail.run.id) await profiles.addRunArtifact(event.artifact);
-  if (event.type === "RUN_ENDED" && event.runSessionId === session.id) { if (session.status !== "FAILED") session.status = "ENDED"; await profiles.setRunSession(session.id, session.status); active.pendingEnd.delete(session.id); if (active.pendingEnd.size === 0) active.resolveEnd?.(); }
+  if (event.type === "RUN_ENDED" && event.runSessionId === session.id) { active.quota.releaseUnsubmittedForSession(session.id); if (session.status !== "FAILED") session.status = "ENDED"; await profiles.setRunSession(session.id, session.status); active.pendingEnd.delete(session.id); if (active.pendingEnd.size === 0) active.resolveEnd?.(); }
   emitRunsChanged();
 }
 
@@ -759,17 +849,19 @@ function notifyPaymentHandoff(profileId: string): void {
 
 async function handlePaymentHandoff(profileId: string, phase: "DETECTED" | "RETURNED"): Promise<void> {
   if (phase === "DETECTED") {
+    if(actionablePaymentHandoff&&actionablePaymentHandoff!==profileId){if(!paymentHandoffQueue.includes(profileId))paymentHandoffQueue.push(profileId);return;}
+    actionablePaymentHandoff=profileId;
     orchestrator.focusAssistPage(profileId);
     notifyPaymentHandoff(profileId);
   } else {
-    mainWindow?.flashFrame(false);
+    if(actionablePaymentHandoff===profileId)actionablePaymentHandoff=null; const next=paymentHandoffQueue.shift(); if(next)await handlePaymentHandoff(next,"DETECTED"); else mainWindow?.flashFrame(false);
   }
 }
 
 async function simulatePaymentHandoff(input: SimulatePaymentHandoffInput): Promise<boolean> {
   if (app.isPackaged) throw new Error("Payment handoff simulation is available only in development builds.");
   const active = activeRun;
-  if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("Start an assisted-checkout run before simulating a payment handoff.");
+  if (!active || active.detail.run.executionMode !== "CHECKOUT") throw new Error("Start a checkout run before simulating a payment handoff.");
   const session = active.profileSessions.get(input.profileId);
   if (!session) throw new Error("The selected browser profile is not participating in this run.");
   const expectedState = input.phase === "DETECTED" ? "READY_TO_CONFIRM" : "CHECKOUT_HANDOFF";
@@ -797,8 +889,9 @@ async function simulatePaymentHandoff(input: SimulatePaymentHandoffInput): Promi
 }
 
 async function resumeRunSession(profileId: string): Promise<boolean> {
-  const active = activeRun; if (!active || active.detail.run.executionMode !== "ASSISTED_CHECKOUT") throw new Error("There is no active assisted run."); const session = active.profileSessions.get(profileId); if (!session || session.executionState !== "CHECKPOINT") throw new Error("This session is not waiting at a resumable checkpoint.");
+  const active = activeRun; if (!active || active.detail.run.executionMode !== "CHECKOUT") throw new Error("There is no active checkout run."); const session = active.profileSessions.get(profileId); if (!session || session.executionState !== "CHECKPOINT") throw new Error("This session is not waiting at a resumable checkpoint.");
   if (session.checkpointReason === "CAPTCHA_API_FAILED") { orchestrator.retryCaptcha(profileId, active.detail.run.id, session.id); return true; }
+  if(session.checkpointReason==="INTERACTIVE_3DS_REQUIRED")await handlePaymentHandoff(profileId,"RETURNED");
   const cartCheckpoint = /^(CART_NOT_EMPTY|CART_STATE_UNKNOWN|CART_CONTENT_CHANGED)$/.test(session.checkpointReason ?? ""); const nextState = cartCheckpoint ? (session.checkpointReason === "CART_CONTENT_CHANGED" ? "CARTED" : "PRODUCT_OPEN") : "CHECKOUT"; orchestrator.resumeAssist(profileId, active.detail.run.id, session.id); await profiles.addRunEvent({ id: randomUUID(), runId: active.detail.run.id, runSessionId: session.id, wallTimeMs: Date.now(), elapsedNs: elapsedSince(active), type: "CHECKPOINT_RESUMED", stateBefore: "CHECKPOINT", stateAfter: nextState, payload: { reason: session.checkpointReason } }); await profiles.setRunSessionExecution(session.id, nextState); session.executionState = nextState; emitRunsChanged(); return true;
 }
 
@@ -817,4 +910,4 @@ app.whenReady().then(async () => {
   orchestrator.on("changed", (snapshot: SessionSnapshot) => { void onSessionChanged(snapshot); }); orchestrator.on("runner-event", (event: RunnerEvent) => { void onRunnerEvent(event); }); registerIpc(); applyApplicationMenu(); await createWindow(); await evaluateCostBudgets();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
-app.on("before-quit", (event) => { flushPlacement(); if (!orchestrator) return; event.preventDefault(); clipboardCoordinator?.cancelAll(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });
+app.on("before-quit", (event) => { flushPlacement(); pendingPaymentBatches.clear(); if (!orchestrator) return; event.preventDefault(); clipboardCoordinator?.cancelAll(); if (activeRun) stopMonitor(activeRun); void orchestrator.shutdown().finally(() => { profiles?.close(); app.exit(0); }); });

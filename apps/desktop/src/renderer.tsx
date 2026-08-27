@@ -4,12 +4,15 @@ import type {
   BrowserProfile,
   CartStatus,
   DiagnosticLevel,
+  CreatePaymentProfileInput,
+  PaymentProfile,
   ProxyBenchmark,
   ProxyProfile,
   ProfileWarmState,
   RunDetail,
   RunCaptchaOverride,
   RunSetup,
+  RunSessionOverride,
   SessionSnapshot,
   ShippingProfile,
   Store,
@@ -34,6 +37,7 @@ import { Targets } from "./pages/Targets";
 import { Browsers } from "./pages/Browsers";
 import { Shipping } from "./pages/Shipping";
 import { Settings } from "./pages/Settings";
+import { Payments } from "./pages/Payments";
 
 
 function App() {
@@ -66,11 +70,14 @@ function App() {
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
   const [runName, setRunName] = useState("");
   const [runLevel, setRunLevel] = useState<DiagnosticLevel>("NORMAL");
-  const [runMode, setRunMode] = useState<"OBSERVATION" | "ASSISTED_CHECKOUT">(
+  const [runMode, setRunMode] = useState<"OBSERVATION" | "CHECKOUT">(
     "OBSERVATION",
   );
   const [runProfiles, setRunProfiles] = useState<string[]>([]);
   const [runCaptchaOverrides, setRunCaptchaOverrides] = useState<RunCaptchaOverride[]>([]);
+  const [runSessionOverrides, setRunSessionOverrides] = useState<RunSessionOverride[]>([]);
+  const [purchaseMode, setPurchaseMode] = useState<"DRY_RUN" | "LIVE">("DRY_RUN");
+  const [fullAutoAcknowledged, setFullAutoAcknowledged] = useState(false);
   const [runTargetId, setRunTargetId] = useState("");
   const [deepDebugAcknowledged, setDeepDebugAcknowledged] = useState(false);
   const [targets, setTargets] = useState<Target[]>([]);
@@ -85,6 +92,7 @@ function App() {
     useState<ShippingDraft>(blankShipping());
   const [editingShippingId, setEditingShippingId] = useState<string | null>(null);
   const [shippingDrawerOpen, setShippingDrawerOpen] = useState(false);
+  const [paymentProfiles, setPaymentProfiles] = useState<PaymentProfile[]>([]);
   const reload = async (): Promise<void> => {
     const [
       profileResult,
@@ -95,6 +103,7 @@ function App() {
       runSetupResult,
       targetResult,
       shippingResult,
+      paymentResult,
       cartResult,
       storeResult,
       warmingResult,
@@ -107,6 +116,7 @@ function App() {
       window.copify.runSetups.list(),
       window.copify.targets.list(),
       window.copify.shipping.list(),
+      window.copify.payments.list(),
       window.copify.sessions.carts(),
       window.copify.stores.list(),
       window.copify.warming.list(),
@@ -123,6 +133,7 @@ function App() {
     setProxies(proxyResult.value);
     if (targetResult.ok) setTargets(targetResult.value);
     if (shippingResult.ok) setShippingProfiles(shippingResult.value);
+    if (paymentResult.ok) setPaymentProfiles(paymentResult.value);
     if (storeResult.ok) setStores(storeResult.value);
     if (warmingResult.ok) setWarmStates(warmingResult.value);
     if (cartResult.ok) setCartStatuses(Object.fromEntries(cartResult.value.map((item) => [item.profileId, item])));
@@ -176,6 +187,7 @@ function App() {
     const offCarts = window.copify.sessions.onCartChanged((status) => setCartStatuses((current) => ({ ...current, [status.profileId]: status })));
     const offTargets = window.copify.targets.onChanged(() => void reload());
     const offShipping = window.copify.shipping.onChanged(() => void reload());
+    const offPayments = window.copify.payments.onChanged(() => void reload());
     const offWarming = window.copify.warming.onChanged((states) => setWarmStates(states));
     return () => {
       offSessions();
@@ -184,6 +196,7 @@ function App() {
       offCarts();
       offTargets();
       offShipping();
+      offPayments();
       offWarming();
     };
   }, []);
@@ -312,6 +325,9 @@ function App() {
         executionMode: runMode,
         profileIds: runProfiles,
         captchaOverrides: runCaptchaOverrides,
+        sessionOverrides: runSessionOverrides,
+        purchaseMode,
+        fullAutoAcknowledged,
         targetId: runTargetId || null,
         deepDebugAcknowledged,
       });
@@ -324,12 +340,13 @@ function App() {
   };
   const saveRunSetup = async () => {
     await execute(
-      () => window.copify.runSetups.create({ name: runName.trim(), diagnosticLevel: runLevel, executionMode: runMode, profileIds: runProfiles, captchaOverrides: runCaptchaOverrides, targetId: runTargetId || null }),
+      () => window.copify.runSetups.create({ name: runName.trim(), diagnosticLevel: runLevel, executionMode: runMode, profileIds: runProfiles, sessionOverrides:runSessionOverrides,captchaOverrides: runCaptchaOverrides, targetId: runTargetId || null }),
       "Run setup saved.",
     );
   };
   const loadRunSetup = (setup: RunSetup) => {
-    setRunName(setup.name); setRunLevel(setup.diagnosticLevel); setRunMode(setup.executionMode); setRunProfiles(setup.profileIds); setRunCaptchaOverrides(setup.captchaOverrides); setRunTargetId(setup.targetId ?? "");
+    setRunName(setup.name); setRunLevel(setup.diagnosticLevel); setRunMode(setup.executionMode); setRunProfiles(setup.profileIds); setRunSessionOverrides(setup.sessionOverrides); setRunCaptchaOverrides(setup.captchaOverrides); setRunTargetId(setup.targetId ?? "");
+    setPurchaseMode("DRY_RUN"); setFullAutoAcknowledged(false);
     setDeepDebugAcknowledged(false);
     setNotice({ kind: "info", message: `Loaded “${setup.name}”. Review preflight, then start when ready.` });
   };
@@ -376,7 +393,9 @@ function App() {
       sizePriority: list(targetDraft.sizePriority),
       currency: targetDraft.currency,
       maxRetailMinor,
-      quantity: 1,
+      quantity: 1 as const,
+      checkoutMode: targetDraft.checkoutMode,
+      maxCheckouts: targetDraft.maxCheckouts === "UNLIMITED" ? "UNLIMITED" as const : Number(targetDraft.maxCheckouts),
       captchaStrategy: targetDraft.captchaStrategy,
       enabled: targetDraft.enabled,
     };
@@ -406,6 +425,8 @@ function App() {
       currency: target.currency,
       maxRetailPrice: fromMinor(target.maxRetailMinor),
       captchaStrategy: target.captchaStrategy,
+      checkoutMode: target.checkoutMode,
+      maxCheckouts: String(target.maxCheckouts),
       enabled: target.enabled,
     });
   };
@@ -463,6 +484,7 @@ function App() {
               targets={targets}
               proxies={proxies}
               shipping={shippingProfiles}
+              payments={paymentProfiles}
               warmStates={warmStates}
               latest={latest}
               getSession={session}
@@ -475,6 +497,9 @@ function App() {
               mode={runMode}
               selectedProfiles={runProfiles}
               captchaOverrides={runCaptchaOverrides}
+              sessionOverrides={runSessionOverrides}
+              purchaseMode={purchaseMode}
+              fullAutoAcknowledged={fullAutoAcknowledged}
               targetId={runTargetId}
               acknowledged={deepDebugAcknowledged}
               busy={busy}
@@ -482,8 +507,11 @@ function App() {
               onLevel={(value) => { setRunLevel(value); setDeepDebugAcknowledged(false); }}
               onMode={setRunMode}
               onTarget={setRunTargetId}
-              onToggle={(id) => setRunProfiles((current) => { const removing = current.includes(id); if (removing) setRunCaptchaOverrides((overrides) => overrides.filter((entry) => entry.browserProfileId !== id)); return removing ? current.filter((item) => item !== id) : [...current, id]; })}
+              onToggle={(id) => setRunProfiles((current) => { const removing = current.includes(id); if (removing) {setRunCaptchaOverrides((overrides) => overrides.filter((entry) => entry.browserProfileId !== id));setRunSessionOverrides((overrides)=>overrides.filter((entry)=>entry.browserProfileId!==id));} return removing ? current.filter((item) => item !== id) : [...current, id]; })}
               onCaptchaOverride={(browserProfileId, captchaStrategy) => setRunCaptchaOverrides((current) => captchaStrategy === "INHERIT_TARGET" ? current.filter((entry) => entry.browserProfileId !== browserProfileId) : [...current.filter((entry) => entry.browserProfileId !== browserProfileId), { browserProfileId, captchaStrategy }])}
+              onSessionOverride={(browserProfileId,patch) => setRunSessionOverrides((current)=>{const existing=current.find(entry=>entry.browserProfileId===browserProfileId)??{browserProfileId,checkoutMode:"INHERIT_TARGET" as const,captchaStrategy:"INHERIT_TARGET" as const,paymentProfileId:undefined};const next={...existing,...patch};return [...current.filter(entry=>entry.browserProfileId!==browserProfileId),next];})}
+              onPurchaseMode={(value) => { setPurchaseMode(value); setFullAutoAcknowledged(false); }}
+              onFullAutoAck={setFullAutoAcknowledged}
               onAck={setDeepDebugAcknowledged}
               onStart={() => void beginRun()}
               onEnd={() =>
@@ -721,6 +749,18 @@ function App() {
                   }),
               )
             }
+          />
+        )}
+        {workspace === "payments" && (
+          <Payments
+            profiles={profiles}
+            payments={paymentProfiles}
+            activeRun={Boolean(activeRunId)}
+            busy={busy}
+            onCreate={(input: CreatePaymentProfileInput) => execute(() => window.copify.payments.create(input), "Payment Profile saved.")}
+            onUpdate={(id,input) => execute(() => window.copify.payments.update(id,input), "Payment Profile updated.")}
+            onRemove={async (payment) => { if (await confirm({ title: `Remove "${payment.name}"?`, body: "Browser assignments are cleared. Saved card details cannot be recovered.", confirmLabel: "Remove", danger: true })) void execute(() => window.copify.payments.remove(payment.id)); }}
+            onAssign={(profileId, paymentProfileId) => void execute(() => window.copify.profiles.update(profileId, { paymentProfileId: paymentProfileId || null }))}
           />
         )}
         </ErrorBoundary>

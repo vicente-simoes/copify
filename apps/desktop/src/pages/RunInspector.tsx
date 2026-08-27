@@ -97,7 +97,7 @@ export function RunInspector({ detail, onBack, onDelete }: { detail: RunDetail; 
               {new Date(detail.run.startedAt).toLocaleString()}
               {duration === null ? " · in progress" : ` · ${formatDuration(duration)}`}
               {" · "}
-              {detail.run.executionMode === "ASSISTED_CHECKOUT" ? "assisted" : "observe"}
+              {detail.run.executionMode === "CHECKOUT" ? "checkout" : "observe"}
               {" · "}
               {detail.run.diagnosticLevel.toLowerCase().replace("_", " ")}
             </p>

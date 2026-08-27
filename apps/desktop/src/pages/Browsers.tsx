@@ -86,7 +86,7 @@ export function Browsers({
   onCheckCoherence: (id: string) => void;
   onUpdate: (
     id: string,
-    input: Pick<import("@copify/shared").UpdateBrowserProfileInput, "name" | "enabled" | "proxyProfileId" | "captchaStrategyOverride">,
+    input: Pick<import("@copify/shared").UpdateBrowserProfileInput, "name" | "enabled" | "proxyProfileId" | "captchaStrategyOverride" | "checkoutModeOverride">,
     success?: string,
   ) => void;
   onRemoveProfile: (profile: BrowserProfile) => void;
@@ -274,6 +274,9 @@ export function Browsers({
                 { kind: "separator" },
                 { kind: "header", label: "CAPTCHA strategy" },
                 ...([{"value":"INHERIT_TARGET","label":"Inherit target"},{"value":"MANUAL_HARVESTER","label":"Local Harvester"},{"value":"API_SOLVER","label":"API only"},{"value":"API_WITH_FALLBACK","label":"API with fallback"}] as const).map((item): MenuEntry => ({ kind: "check", label: item.label, checked: profile.captchaStrategyOverride === item.value, disabled: busy || active, onSelect: () => onUpdate(profile.id, { captchaStrategyOverride: item.value }, "CAPTCHA strategy updated.") })),
+                { kind: "separator" },
+                { kind: "header", label: "Checkout mode" },
+                ...([{"value":"INHERIT_TARGET","label":"Inherit target"},{"value":"ASSISTED","label":"Assisted"},{"value":"FULL_AUTO","label":"Full Auto"}] as const).map((item): MenuEntry => ({ kind: "check", label: item.label, checked: profile.checkoutModeOverride === item.value, disabled: busy || active, onSelect: () => onUpdate(profile.id, { checkoutModeOverride: item.value }, "Checkout mode updated.") })),
               ];
 
               if (showCart) {

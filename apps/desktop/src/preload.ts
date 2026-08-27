@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  analyticsIpc, captchaIpc, costIpc, healthIpc, monitorIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
-  type AnalyticsFilter, type AnalyticsResult, type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type CaptchaLabStatus, type CaptchaProviderDiagnostic, type CaptchaProviderKind, type CaptchaSettings, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CostBudget, type CostQuery, type CostSummary, type CreateBrowserProfileInput, type CreateManualCostSnapshotInput, type CreateProxyProfileInput, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportMapping, type ProviderImportPreview, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type ReconciliationStatus, type Run, type RunAnnotation, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type StartCaptchaLabInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateCaptchaSettingsInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type UpsertCaptchaProviderInput, type UpsertCostBudgetInput, type WarmDestination
+  analyticsIpc, captchaIpc, costIpc, healthIpc, monitorIpc, paymentIpc, profileIpc, proxyIpc, runIpc, runSetupIpc, settingsIpc, sessionIpc, shippingIpc, storeIpc, targetIpc, usageIpc, warmingIpc,
+  type AnalyticsFilter, type AnalyticsResult, type ApiResult, type AppInfo, type AppearanceSettings, type BrowserHealthDetail, type CaptchaLabStatus, type CaptchaProviderDiagnostic, type CaptchaProviderKind, type CaptchaSettings, type ChromeColors, type BrowserHealthSnapshot, type BrowserProfile, type CartStatus, type CommitPaymentBatchInput, type CostBudget, type CostQuery, type CostSummary, type CreateBrowserProfileInput, type CreateManualCostSnapshotInput, type CreatePaymentProfileInput, type CreateProxyProfileInput, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type MonitorRuntimeStatus, type MonitorSettings, type NetworkProbeSettings, type PaymentBatchCommitResult, type PaymentBatchPreview, type PaymentProfile, type ProfileWarmState, type ProviderImportCommitResult, type ProviderImportMapping, type ProviderImportPreview, type ProxyBenchmark, type ProxyProfile, type ProxySecretReveal, type ReconciliationStatus, type Run, type RunAnnotation, type RunDetail, type RunNetworkUsage, type RunSetup, type SecretCopyField, type SessionSnapshot, type ShippingProfile, type ShippingSecretReveal, type SimulatePaymentHandoffInput, type StartCaptchaLabInput, type Store, type Target, type UpdateBrowserProfileInput, type UpdateCaptchaSettingsInput, type UpdatePaymentProfileInput, type UpdateProfileWarmStateInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput, type UpsertCaptchaProviderInput, type UpsertCostBudgetInput, type WarmDestination
 } from "@copify/shared";
 
 const api = {
@@ -38,6 +38,17 @@ const api = {
     reveal: (id: string): Promise<ApiResult<ShippingSecretReveal | null>> => ipcRenderer.invoke(shippingIpc.reveal, id),
     copyRevealed: (token: string, field: SecretCopyField): Promise<ApiResult<boolean>> => ipcRenderer.invoke(shippingIpc.copyRevealed, token, field),
     onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(shippingIpc.changed, callback); return () => ipcRenderer.removeListener(shippingIpc.changed, callback); }
+  },
+  payments: {
+    list: (): Promise<ApiResult<PaymentProfile[]>> => ipcRenderer.invoke(paymentIpc.list),
+    create: (input: CreatePaymentProfileInput): Promise<ApiResult<PaymentProfile>> => ipcRenderer.invoke(paymentIpc.create, input),
+    update: (id: string, input: UpdatePaymentProfileInput): Promise<ApiResult<PaymentProfile>> => ipcRenderer.invoke(paymentIpc.update, id, input),
+    remove: (id: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(paymentIpc.remove, id),
+    previewCsv: (): Promise<ApiResult<PaymentBatchPreview | null>> => ipcRenderer.invoke(paymentIpc.previewCsv),
+    previewPaste: (csv: string): Promise<ApiResult<PaymentBatchPreview>> => ipcRenderer.invoke(paymentIpc.previewPaste, { text: csv }),
+    commitBatch: (input: CommitPaymentBatchInput): Promise<ApiResult<PaymentBatchCommitResult>> => ipcRenderer.invoke(paymentIpc.commitBatch, input),
+    cancelBatch: (token: string): Promise<ApiResult<boolean>> => ipcRenderer.invoke(paymentIpc.cancelBatch, token),
+    onChanged: (listener: () => void): (() => void) => { const callback = () => listener(); ipcRenderer.on(paymentIpc.changed, callback); return () => ipcRenderer.removeListener(paymentIpc.changed, callback); }
   },
   stores: {
     list: (): Promise<ApiResult<Store[]>> => ipcRenderer.invoke(storeIpc.list),

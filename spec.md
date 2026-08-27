@@ -2,7 +2,7 @@
 
 **Document:** `spec.md`  
 **Product:** Copify  
-**Status:** Living specification — implemented through v0.13; v0.14 payment profiles and full auto-checkout is next
+**Status:** Living specification — v0.14 implementation in progress; completion requires every acceptance gate below
 **Primary platform:** Windows  
 **Future platforms:** macOS, Linux  
 **Date:** 2026-08-27
@@ -2013,8 +2013,8 @@ Saved proxy credentials and shipping/contact details may be revealed only after 
 
 ### 30.2 Payment information
 
-Copify may store operator-configured card, VCC, expiration, CVV, and gateway-token
-material for Full Auto-Checkout, but only as an Electron `safeStorage` encrypted
+Copify may store operator-configured card, VCC, expiration, and CVV material for
+Full Auto-Checkout, but only as an Electron `safeStorage` encrypted
 payload. Plaintext payment fields must never be written to SQLite, JSON, run
 artifacts, browser-profile metadata, or application configuration.
 
@@ -2045,6 +2045,16 @@ If `safeStorage` is unavailable, locked, or cannot decrypt the selected profile,
 Copify fails the Payment Profile preflight and does not downgrade to plaintext
 storage. Browser-owned Shop Pay or saved-wallet state remains preferred when the
 adapter can submit without extracting its credentials.
+
+> **Security/compliance exception:** v0.14 persistently stores CVV in the encrypted
+> payload by explicit product decision. PCI SSC FAQ 1280 states that card
+> verification codes must not be retained after authorization, including when
+> encrypted. Copify must receive specialist PCI/legal review before distribution.
+> See https://www.pcisecuritystandards.org/faqs/1280/.
+
+`GATEWAY_TOKEN` remains reserved in the internal versioned contract only. v0.14
+rejects its creation, assignment, preflight eligibility, and execution;
+gateway-token investigation and implementation is deferred to v0.19.
 
 ### 30.3 Secure batch Payment Profile intake
 
@@ -3176,7 +3186,10 @@ Copify service or a second browser profile.
 
 #### Deliverables
 
-- Add Payment Profile CRUD for cards, VCCs, and gateway tokens using one
+- Publish package version `0.14.0`, SQLite schema version `20`, and IPC version
+  `21`; migrate existing targets to Assisted/Unlimited and historical checkout
+  Runs to explicit Assisted legacy/manual behavior.
+- Add Payment Profile CRUD for cards and VCCs using one
   `safeStorage` ciphertext payload plus redacted metadata.
 - Add secure batch intake through main-process CSV parsing and multiline paste,
   with a redacted preview, two-minute opaque token, normalized Revolut/MB WAY
@@ -3186,8 +3199,8 @@ Copify service or a second browser profile.
 - Support a Browser Profile default Payment Profile and an ephemeral per-session
   Run setup override. No Payment Profile is selected automatically.
 - Resolve and snapshot Assisted versus Full Auto-Checkout per session. Full Auto
-  supports adapter-controlled Shopify checkout form submission, gateway-token
-  injection, and authenticated Shop Pay 1-click submission.
+  supports adapter-controlled Shopify checkout form submission and authenticated
+  Shop Pay submission. Gateway-token execution is deferred to v0.19.
 - Add just-in-time main-to-runner secret delivery with scoped lifetime, fail-closed
   secure-storage handling, payment-surface diagnostic suppression, and complete
   payment-secret redaction.
@@ -3703,7 +3716,8 @@ Locked implementation sequence; v0.13 is the current completed milestone:
 13. v0.16: Typed low-copy variant IPC, protocol negotiation & Windows dispatch performance gates
 14. v0.17: Runtime proxy watchdog, ordered backups & session-only pre-checkout failover
 15. v0.18: IP route qualification, PT/DE cohort lab, stability gates & evidence-based selection
-16. v1.0: Windows production release & installer
+16. v0.19: Gateway-token investigation, eligibility contract & execution adapters
+17. v1.0: Windows production release & installer
 ```
 
 ---
@@ -3771,7 +3785,7 @@ The following decisions are considered **locked unless new evidence justifies ch
 - Copify supports both **Assisted Checkout** and **Full Auto-Checkout**, resolved and snapshotted per session.
 - CAPTCHA resolution is hybrid and local-first: manual Harvester, solver API, or API with automatic fallback, all using the runner's warmed context.
 - Target, Browser Profile, and ephemeral Run-session overrides form the locked checkout/CAPTCHA strategy hierarchy defined in section 19.
-- Full Auto-Checkout may submit Shop Pay, gateway-token, or checkout-form payments automatically; only interactive issuer 3DS/PSD2 verification triggers human handoff.
+- Full Auto-Checkout may submit authenticated Shop Pay or checkout-form CARD/VCC payments automatically; gateway-token execution is deferred to v0.19, and interactive issuer 3DS/PSD2 verification triggers human handoff.
 - Payment Profiles and CAPTCHA/provider credentials are encrypted exclusively with Electron `safeStorage` and are strictly excluded from renderer state, exports, diagnostics, telemetry, and logs.
 - Batch card/VCC intake is local CSV/paste only, exposes a redacted preview through an opaque expiring token, and commits encrypted profiles atomically; direct banking/provider APIs are out of scope.
 - Targets define `maxCheckouts`; the Orchestrator enforces finite caps with atomic reservations and permits independent submissions when the value is `UNLIMITED`.

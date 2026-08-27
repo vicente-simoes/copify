@@ -5,7 +5,7 @@ import { preflight, type PreflightInput } from "./preflight";
 const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
 
 const profile = (over: Partial<BrowserProfile> = {}): BrowserProfile => ({
-  id: id(1), name: "Home", userDataDir: "C:/x", proxyProfileId: null, shippingProfileId: null,
+  id: id(1), name: "Home", userDataDir: "C:/x", proxyProfileId: null, shippingProfileId: null, paymentProfileId: null, checkoutModeOverride: "INHERIT_TARGET",
   captchaStrategyOverride: "INHERIT_TARGET", driver: { kind: "NATIVE_STEALTH" }, enabled: true, createdAt: 0, updatedAt: 0, ...over,
 });
 
@@ -20,7 +20,7 @@ const benchmark = { id: id(9), qualityScore: 90, status: "PASS" } as unknown as 
 
 const target = (over: Partial<Target> = {}): Target => ({
   id: id(5), name: "Box Logo", storeId: "supreme-eu", productKeywords: ["Box Logo"], negativeKeywords: [], directProductUrl: null,
-  preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 20_000, quantity: 1, captchaStrategy: "INHERIT_APP",
+  preferredColors: [], sizePriority: [], currency: "EUR", maxRetailMinor: 20_000, quantity: 1, checkoutMode: "ASSISTED", maxCheckouts: "UNLIMITED", captchaStrategy: "INHERIT_APP",
   enabled: true, latestCheck: null, createdAt: 0, updatedAt: 0, ...over,
 });
 
@@ -81,18 +81,18 @@ describe("preflight", () => {
     expect(observing.canStart).toBe(true);
     expect(check(observing, "target")?.status).toBe("warn");
 
-    const assisting = preflight(base({ mode: "ASSISTED_CHECKOUT", target: null }));
+    const assisting = preflight(base({ mode: "CHECKOUT", target: null }));
     expect(assisting.canStart).toBe(false);
     expect(check(assisting, "target")?.status).toBe("fail");
   });
 
   it("requires a complete address and a price limit before assisted checkout", () => {
-    const noShipping = preflight(base({ mode: "ASSISTED_CHECKOUT" }));
+    const noShipping = preflight(base({ mode: "CHECKOUT" }));
     expect(noShipping.canStart).toBe(false);
     expect(check(noShipping, "shipping")?.status).toBe("fail");
 
     const ready = preflight(base({
-      mode: "ASSISTED_CHECKOUT",
+      mode: "CHECKOUT",
       profiles: [profile({ shippingProfileId: id(7) })],
       shipping: [shippingProfile()],
     }));
@@ -100,7 +100,7 @@ describe("preflight", () => {
     expect(check(ready, "price")?.status).toBe("pass");
 
     const noPriceLimit = preflight(base({
-      mode: "ASSISTED_CHECKOUT",
+      mode: "CHECKOUT",
       profiles: [profile({ shippingProfileId: id(7) })],
       shipping: [shippingProfile()],
       target: target({ maxRetailMinor: 0 }),
@@ -111,7 +111,7 @@ describe("preflight", () => {
 
   it("blocks rotating checkout routes and warns when checkout browsers share a sticky route", () => {
     const rotating = { id: id(3), name: "PT rotating", type: "residential-rotating", enabled: true } as unknown as ProxyProfile;
-    const blocked = preflight(base({ mode: "ASSISTED_CHECKOUT", profiles: [profile({ proxyProfileId: id(3), shippingProfileId: id(7) })], proxies: [rotating], shipping: [shippingProfile()] }));
+    const blocked = preflight(base({ mode: "CHECKOUT", profiles: [profile({ proxyProfileId: id(3), shippingProfileId: id(7) })], proxies: [rotating], shipping: [shippingProfile()] }));
     expect(blocked.canStart).toBe(false); expect(check(blocked, "routes")?.detail).toContain("cannot preserve checkout affinity");
 
     const sticky = { id: id(3), name: "PT sticky", type: "residential-sticky", enabled: true } as unknown as ProxyProfile;
@@ -120,7 +120,7 @@ describe("preflight", () => {
   });
 
   it("surfaces coherence and warming gaps without blocking assisted checkout", () => {
-    const unknown = preflight(base({ mode: "ASSISTED_CHECKOUT", profiles: [profile({ shippingProfileId: id(7) })], shipping: [shippingProfile()] }));
+    const unknown = preflight(base({ mode: "CHECKOUT", profiles: [profile({ shippingProfileId: id(7) })], shipping: [shippingProfile()] }));
     expect(unknown.canStart).toBe(true);
     expect(check(unknown, "coherence")?.status).toBe("warn");
     expect(check(unknown, "warming")?.status).toBe("warn");
@@ -130,7 +130,7 @@ describe("preflight", () => {
       coherence: { status: "VERIFIED", country: "PT", city: "Lisbon", locale: "pt-PT", timezoneId: "Europe/Lisbon", geolocationApplied: true, webRtcPolicy: "DEFAULT_PUBLIC_INTERFACE_ONLY", source: "ROUTE_PROBE", resolvedAt: 1, message: null },
     });
     const ready = preflight(base({
-      mode: "ASSISTED_CHECKOUT", profiles: [profile({ shippingProfileId: id(7) })], shipping: [shippingProfile()], session: readySession,
+      mode: "CHECKOUT", profiles: [profile({ shippingProfileId: id(7) })], shipping: [shippingProfile()], session: readySession,
       warmStates: [{ id: id(8), browserProfileId: id(1), storeId: "supreme-eu", status: "READY", storefrontReady: true, googleReady: true, shopPayReady: true, storefrontCompletedAt: 1, googleCompletedAt: 1, shopPayCompletedAt: 1, proxyProfileId: null, driverKind: "NATIVE_STEALTH", routePublicIp: "203.0.113.9", routeCountry: "PT", startedAt: 1, completedAt: 2, updatedAt: 2 }],
     }));
     expect(ready.canStart).toBe(true);
@@ -159,7 +159,7 @@ describe("preflight", () => {
 
   it("warns when only some selected browsers can check out", () => {
     const result = preflight(base({
-      mode: "ASSISTED_CHECKOUT",
+      mode: "CHECKOUT",
       profiles: [profile({ shippingProfileId: id(7) }), profile({ id: id(2), name: "Proxy 1" })],
       selectedProfileIds: [id(1), id(2)],
       shipping: [shippingProfile()],
@@ -172,7 +172,7 @@ describe("preflight", () => {
 
   it("blocks assisted checkout for a store whose adapter cannot do it", () => {
     const result = preflight(base({
-      mode: "ASSISTED_CHECKOUT",
+      mode: "CHECKOUT",
       profiles: [profile({ shippingProfileId: id(7) })],
       shipping: [shippingProfile()],
       target: target({ storeId: "general" }),

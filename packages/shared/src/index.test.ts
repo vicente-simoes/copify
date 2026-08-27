@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createPaymentProfileSchema } from "./index";
 import { IPC_VERSION, SCHEMA_VERSION, appearanceSettingsSchema, captchaIpc, defaultAppearanceSettings, defaultThemeOverrides, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, sessionIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, startCaptchaLabSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
@@ -33,11 +34,15 @@ describe("store registry", () => {
 
 describe("shared contracts", () => {
   it("publishes the current IPC and SQLite contract versions", () => {
-    expect(IPC_VERSION).toBe(20); expect(SCHEMA_VERSION).toBe(19);
+    expect(IPC_VERSION).toBe(21); expect(SCHEMA_VERSION).toBe(20);
   });
   it("validates profile input", () => {
     expect(createBrowserProfileSchema.safeParse({ name: "  " }).success).toBe(false);
     expect(createBrowserProfileSchema.parse({ name: " Home " })).toMatchObject({ name: "Home", driver: { kind: "NATIVE_STEALTH" } });
+  });
+  it("keeps gateway tokens reserved while accepting valid CARD/VCC profiles", () => {
+    expect(createPaymentProfileSchema.safeParse({ name: "Reserved", kind: "GATEWAY_TOKEN", cardNumber: "4242424242424242", expiryMonth: 12, expiryYear: 2099, cvv: "123", cardholderName: "Ada" }).success).toBe(false);
+    expect(createPaymentProfileSchema.parse({ name: "VCC", kind: "VCC", cardNumber: "4242 4242 4242 4242", expiryMonth: 12, expiryYear: 2099, cvv: "123", cardholderName: "Ada" })).toMatchObject({ kind: "VCC", cardNumber: "4242424242424242" });
   });
   it("rejects malformed runner messages", () => {
     expect(runnerCommandSchema.safeParse({ type: "START", version: 1 }).success).toBe(false);
@@ -90,12 +95,12 @@ describe("shared contracts", () => {
     expect(createTargetSchema.safeParse({ name: "Jacket", storeId: "", productKeywords: ["Leather Jacket"], maxRetailMinor: 20_000 }).success).toBe(false);
     const profileId = "00000000-0000-4000-8000-000000000001";
     expect(createRunSchema.parse({ name: "Observe", diagnosticLevel: "NORMAL", profileIds: [profileId] }).targetId).toBeNull();
-    expect(createRunSetupSchema.parse({ name: "Sneakers", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId: null })).toMatchObject({ name: "Sneakers", profileIds: [profileId] });
+    expect(createRunSetupSchema.parse({ name: "Sneakers", diagnosticLevel: "NORMAL", executionMode: "CHECKOUT", profileIds: [profileId], targetId: null })).toMatchObject({ name: "Sneakers", profileIds: [profileId] });
   });
   it("requires a target for assisted checkout and validates encrypted shipping input", () => {
     const profileId = "00000000-0000-4000-8000-000000000001"; const targetId = "00000000-0000-4000-8000-000000000002";
-    expect(createRunSchema.safeParse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId: null }).success).toBe(false);
-    expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profileId], targetId }).executionMode).toBe("ASSISTED_CHECKOUT");
+    expect(createRunSchema.safeParse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "CHECKOUT", profileIds: [profileId], targetId: null }).success).toBe(false);
+    expect(createRunSchema.parse({ name: "Assist", diagnosticLevel: "NORMAL", executionMode: "CHECKOUT", profileIds: [profileId], targetId }).executionMode).toBe("CHECKOUT");
     expect(createShippingProfileSchema.parse({ name: "Home", details: { fullName: "Ada Lovelace", email: "ada@example.com", phone: "+351 1", address1: "1 Main St", postalCode: "1000", city: "Lisbon", country: "pt" } }).details.country).toBe("PT");
     expect(updateShippingProfileSchema.parse({ details: null })).toEqual({ details: null });
   });

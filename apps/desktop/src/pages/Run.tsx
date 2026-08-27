@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { isMonitorable, resolveCaptchaStrategy, type BrowserProfile, type CaptchaAppMode, type CaptchaStrategyOverride, type DiagnosticLevel, type MonitorRuntimeStatus, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunCaptchaOverride, type RunDetail, type RunNetworkUsage, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { isMonitorable, resolveCaptchaStrategy, type BrowserProfile, type CaptchaAppMode, type CaptchaStrategyOverride, type DiagnosticLevel, type MonitorRuntimeStatus, type PaymentProfile, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunCaptchaOverride, type RunDetail, type RunNetworkUsage, type RunSessionOverride, type RunSetup, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 import { preflight, type PreflightCheck } from "../preflight";
 import { Field, Route } from "../ui/primitives";
 import { Menu, type MenuEntry } from "../ui/Menu";
 import { RunAnalytics } from "./RunAnalytics";
 
-type Mode = "OBSERVATION" | "ASSISTED_CHECKOUT";
+type Mode = "OBSERVATION" | "CHECKOUT";
 
 function CheckRow({ check }: { check: PreflightCheck }) {
   return (
@@ -121,6 +121,7 @@ export function Run({
   targets,
   proxies,
   shipping,
+  payments,
   warmStates,
   latest,
   getSession,
@@ -133,6 +134,9 @@ export function Run({
   mode,
   selectedProfiles,
   captchaOverrides,
+  sessionOverrides,
+  purchaseMode,
+  fullAutoAcknowledged,
   targetId,
   acknowledged,
   busy,
@@ -143,6 +147,9 @@ export function Run({
   onTarget,
   onToggle,
   onCaptchaOverride,
+  onSessionOverride,
+  onPurchaseMode,
+  onFullAutoAck,
   onAck,
   onStart,
   onEnd,
@@ -157,6 +164,7 @@ export function Run({
   targets: Target[];
   proxies: ProxyProfile[];
   shipping: ShippingProfile[];
+  payments: PaymentProfile[];
   warmStates: ProfileWarmState[];
   latest: (id: string) => ProxyBenchmark | undefined;
   getSession: (id: string) => SessionSnapshot;
@@ -169,6 +177,9 @@ export function Run({
   mode: Mode;
   selectedProfiles: string[];
   captchaOverrides: RunCaptchaOverride[];
+  sessionOverrides: RunSessionOverride[];
+  purchaseMode: "DRY_RUN" | "LIVE";
+  fullAutoAcknowledged: boolean;
   targetId: string;
   acknowledged: boolean;
   busy: boolean;
@@ -179,6 +190,9 @@ export function Run({
   onTarget: (value: string) => void;
   onToggle: (id: string) => void;
   onCaptchaOverride: (browserProfileId: string, strategy: CaptchaStrategyOverride) => void;
+  onSessionOverride: (browserProfileId:string,patch:Partial<Omit<RunSessionOverride,"browserProfileId">>)=>void;
+  onPurchaseMode: (value: "DRY_RUN" | "LIVE") => void;
+  onFullAutoAck: (value: boolean) => void;
   onAck: (value: boolean) => void;
   onStart: () => void;
   onEnd: () => void;
@@ -215,11 +229,14 @@ export function Run({
     shipping,
     target,
     warmStates,
+    payments,
+    sessionOverrides,
   });
 
   const blocked =
     !status.canStart ||
     busy ||
+    (purchaseMode === "LIVE" && mode === "CHECKOUT" && !fullAutoAcknowledged) ||
     (level === "DEEP_DEBUG" && !acknowledged);
 
   if (view === "analytics") return <div className="page-stack"><div className="actions"><button className="text" onClick={() => setView("runs")}>Runs</button><button className="primary">Analytics</button></div><RunAnalytics targets={targets} onShow={onShow} /></div>;
@@ -249,7 +266,7 @@ export function Run({
           <Field label="Mode">
             <select value={mode} onChange={(event) => onMode(event.target.value as Mode)}>
               <option value="OBSERVATION">Observe</option>
-              <option value="ASSISTED_CHECKOUT">Assisted</option>
+              <option value="CHECKOUT">Checkout</option>
             </select>
           </Field>
           <Field label="Target">
@@ -267,17 +284,19 @@ export function Run({
               <option value="DEEP_DEBUG">Deep debug</option>
             </select>
           </Field>
+          {mode === "CHECKOUT" && <Field label="Purchase mode"><select value={purchaseMode} onChange={(event)=>onPurchaseMode(event.target.value as "DRY_RUN"|"LIVE")}><option value="DRY_RUN">Dry Run (never submit)</option><option value="LIVE">Live</option></select></Field>}
 
           <fieldset className="run-profile-picker">
             <legend>Browsers</legend>
             {selectable.map((profile) => {
               const open = getSession(profile.id).state !== "STOPPED";
               const override = captchaOverrides.find((entry) => entry.browserProfileId === profile.id)?.captchaStrategy ?? "INHERIT_TARGET";
+              const sessionOverride=sessionOverrides.find((entry)=>entry.browserProfileId===profile.id); const checkoutOverride=sessionOverride?.checkoutMode??"INHERIT_TARGET"; const paymentOverride=sessionOverride?.paymentProfileId===undefined?"INHERIT":sessionOverride.paymentProfileId??"NONE";
               const resolved = resolveCaptchaStrategy({ runOverride: override, profileOverride: profile.captchaStrategyOverride, targetStrategy: target?.captchaStrategy, appMode: captchaAppMode });
               return (
                 <div key={profile.id} className="row">
                   <label className="check row-main"><input type="checkbox" checked={selectedProfiles.includes(profile.id)} onChange={() => onToggle(profile.id)} />{profile.name}<span className="dim">{open ? " · open" : profile.proxyProfileId ? " · proxy" : " · direct"}</span></label>
-                  {selectedProfiles.includes(profile.id) ? <><select aria-label={`${profile.name} CAPTCHA override`} value={override} onChange={(event) => onCaptchaOverride(profile.id, event.target.value as CaptchaStrategyOverride)}><option value="INHERIT_TARGET">Inherit profile/target</option><option value="MANUAL_HARVESTER">Local Harvester</option><option value="API_SOLVER">API only</option><option value="API_WITH_FALLBACK">API with fallback</option></select><span className="badge">{resolved.replaceAll("_", " ").toLowerCase()}</span></> : null}
+                  {selectedProfiles.includes(profile.id) ? <><select aria-label={`${profile.name} checkout override`} value={checkoutOverride} onChange={(event)=>onSessionOverride(profile.id,{checkoutMode:event.target.value as RunSessionOverride["checkoutMode"]})}><option value="INHERIT_TARGET">Inherit checkout mode</option><option value="ASSISTED">Assisted</option><option value="FULL_AUTO">Full Auto</option></select><select aria-label={`${profile.name} payment override`} value={paymentOverride} onChange={(event)=>onSessionOverride(profile.id,{paymentProfileId:event.target.value==="INHERIT"?undefined:event.target.value==="NONE"?null:event.target.value})}><option value="INHERIT">Inherit browser payment</option><option value="NONE">No payment profile</option>{payments.filter(payment=>payment.configured&&payment.kind!=="GATEWAY_TOKEN").map(payment=><option key={payment.id} value={payment.id}>{payment.name} •••• {payment.last4}</option>)}</select><select aria-label={`${profile.name} CAPTCHA override`} value={override} onChange={(event) => onCaptchaOverride(profile.id, event.target.value as CaptchaStrategyOverride)}><option value="INHERIT_TARGET">Inherit profile/target</option><option value="MANUAL_HARVESTER">Local Harvester</option><option value="API_SOLVER">API only</option><option value="API_WITH_FALLBACK">API with fallback</option></select><span className="badge">{resolved.replaceAll("_", " ").toLowerCase()}</span></> : null}
                 </div>
               );
             })}
@@ -294,6 +313,7 @@ export function Run({
               Deep debug captures HAR, video and traces. They stay local.
             </label>
           )}
+          {mode === "CHECKOUT" && purchaseMode === "LIVE" && <label className="check warning"><input type="checkbox" checked={fullAutoAcknowledged} onChange={(event)=>onFullAutoAck(event.target.checked)}/>I acknowledge that Full Auto sessions may submit a real order. This acknowledgement applies only to this run.</label>}
         </div>
       </section>
 
@@ -318,7 +338,7 @@ export function Run({
                     <span className="row-name">{setup.name}</span>
                     <span className="row-meta">{setupTarget?.name ?? (setup.targetId ? "Missing target" : "No target")} · {browserNames.join(", ")}</span>
                   </div>
-                  <span className="dim">{setup.executionMode === "ASSISTED_CHECKOUT" ? "Assisted" : "Observe"} · {setup.diagnosticLevel.toLowerCase()}</span>
+                  <span className="dim">{setup.executionMode === "CHECKOUT" ? "Checkout" : "Observe"} · {setup.diagnosticLevel.toLowerCase()}</span>
                   <div className="row-actions">
                     <button className="primary" disabled={busy} onClick={() => onLoadSetup(setup)}>Load</button>
                     <Menu entries={entries} label={`Actions for ${setup.name}`} />
@@ -346,7 +366,7 @@ export function Run({
                 </span>
                 <span className={`state ${run.status.toLowerCase()}`}>{run.status}</span>
                 <small className="dim">
-                  {run.executionMode === "ASSISTED_CHECKOUT" ? "Assisted" : "Observe"} · {run.diagnosticLevel.toLowerCase()}
+                  {run.executionMode === "CHECKOUT" ? "Checkout" : "Observe"} · {run.diagnosticLevel.toLowerCase()}
                 </small>
               </button>
             ))}

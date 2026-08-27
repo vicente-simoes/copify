@@ -119,6 +119,16 @@ describe("ProfileRepository", () => {
     expect((await repo.get(profile.id))?.shippingProfileId).toBeNull(); expect(await repo.getStoredShippingProfile(shipping.id)).toBeUndefined();
   });
 
+  it("keeps payment payloads redacted and clears browser assignments transactionally", async () => {
+    const repo = repository(); const canary = "ciphertext-payment-canary";
+    const payment = await repo.createPaymentProfile({ name: "Revolut VCC", kind: "VCC", cardNumber: "4242424242424242", expiryMonth: 12, expiryYear: 2099, cvv: "123", cardholderName: "Ada Lovelace", tags: ["Revolut"], billing: null }, Buffer.from(canary));
+    expect(payment).toMatchObject({ kind: "VCC", brand: "Visa", last4: "4242", configured: true, tags: ["Revolut"] });
+    expect(JSON.stringify(payment)).not.toContain("4242424242424242"); expect(JSON.stringify(await repo.listPaymentProfiles())).not.toContain(canary);
+    const stored = await repo.getStoredPaymentProfile(payment.id); expect(stored?.payloadCiphertext?.toString()).toBe(canary);
+    const browser = await repo.create({ name: "Payment browser" }); await repo.update(browser.id, { paymentProfileId: payment.id }); await repo.removePaymentProfile(payment.id);
+    expect((await repo.get(browser.id))?.paymentProfileId).toBeNull(); expect(await repo.getStoredPaymentProfile(payment.id)).toBeUndefined();
+  });
+
   it("migrates an existing v1 database without removing browser profiles", async () => {
     const root = mkdtempSync(join(tmpdir(), "copify-v1-")); roots.push(root);
     const { DatabaseSync } = await import("node:sqlite"); const database = new DatabaseSync(join(root, "copify.sqlite"));
@@ -205,7 +215,7 @@ describe("ProfileRepository", () => {
     const repo = openProfileRepository(databasePath, join(root, "browser-profiles")); repositories.push(repo);
     expect(await repo.list()).toMatchObject([{ id: idFor(11), name: "v0.9 profile", userDataDir: "C:/persistent-profile" }]);
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
-    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(19);
+    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(20);
     expect(inspection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profile_warm_states'").get()).toBeTruthy(); inspection.close();
   });
 
@@ -215,7 +225,7 @@ describe("ProfileRepository", () => {
     database.exec(`CREATE TABLE targets (id TEXT PRIMARY KEY,name TEXT); CREATE TABLE browser_profiles (id TEXT PRIMARY KEY,name TEXT); CREATE TABLE run_sessions (id TEXT PRIMARY KEY,run_id TEXT); CREATE TABLE run_setups (id TEXT PRIMARY KEY,name TEXT); CREATE TABLE app_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE app_secrets (id TEXT PRIMARY KEY,ciphertext BLOB NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); PRAGMA user_version=17;`);
     database.prepare("INSERT INTO targets (id,name) VALUES (?,?)").run(targetId, "Preserved target"); database.prepare("INSERT INTO browser_profiles (id,name) VALUES (?,?)").run(profileId, "Preserved browser"); database.prepare("INSERT INTO run_sessions (id,run_id) VALUES (?,?)").run(sessionId, randomUUID()); database.prepare("INSERT INTO run_setups (id,name) VALUES (?,?)").run(setupId, "Preserved setup"); database.close();
     const repo = openProfileRepository(databasePath, join(root, "profiles")); repositories.push(repo); const inspection = new DatabaseSync(databasePath, { readOnly: true });
-    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(19);
+    expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(20);
     expect(inspection.prepare("SELECT name,captcha_strategy FROM targets WHERE id=?").get(targetId)).toEqual({ name: "Preserved target", captcha_strategy: "INHERIT_APP" });
     expect(inspection.prepare("SELECT name,captcha_strategy_override FROM browser_profiles WHERE id=?").get(profileId)).toEqual({ name: "Preserved browser", captcha_strategy_override: "INHERIT_TARGET" });
     expect(inspection.prepare("SELECT captcha_strategy,captcha_provider_json FROM run_sessions WHERE id=?").get(sessionId)).toEqual({ captcha_strategy: "MANUAL_HARVESTER", captcha_provider_json: null });
@@ -251,7 +261,7 @@ describe("ProfileRepository", () => {
 
   it("saves reusable run setups separately from run history", async () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Sneakers", productKeywords: ["Sneaker"], maxRetailMinor: 20_000 });
-    const setup = await repo.createRunSetup({ name: "Sneakers drop", diagnosticLevel: "NORMAL", executionMode: "ASSISTED_CHECKOUT", profileIds: [profile.id], targetId: target.id });
+    const setup = await repo.createRunSetup({ name: "Sneakers drop", diagnosticLevel: "NORMAL", executionMode: "CHECKOUT", profileIds: [profile.id], targetId: target.id });
     expect(await repo.listRunSetups()).toEqual([setup]);
     expect(await repo.removeRunSetup(setup.id)).toBe(true);
     expect(await repo.listRunSetups()).toEqual([]);
@@ -268,7 +278,7 @@ describe("ProfileRepository", () => {
     const repo = repository(); const profile = await repo.create({ name: "Home" }); const target = await repo.createTarget({ name: "Jacket", productKeywords: ["Leather Jacket"], currency: "GBP", maxRetailMinor: 20_000 });
     const check = { id: randomUUID(), targetId: target.id, checkedAt: Date.now(), status: "SUCCESS" as const, decision: { kind: "NO_MATCH" as const, message: "No configured product phrase was found.", candidate: null, selectedVariant: null }, candidateCount: 0, errorMessage: null };
     await repo.setTargetCheck(target.id, check); expect((await repo.getTarget(target.id))?.latestCheck).toEqual(check);
-    const startedAt = Date.now(); const snapshot = { targetId: target.id, name: target.name, storeId: target.storeId, productKeywords: target.productKeywords, negativeKeywords: target.negativeKeywords, directProductUrl: target.directProductUrl, preferredColors: target.preferredColors, sizePriority: target.sizePriority, currency: target.currency, maxRetailMinor: target.maxRetailMinor, quantity: target.quantity, captchaStrategy: target.captchaStrategy, enabled: target.enabled, capturedAt: startedAt } as const;
+    const startedAt = Date.now(); const snapshot = { targetId: target.id, name: target.name, storeId: target.storeId, productKeywords: target.productKeywords, negativeKeywords: target.negativeKeywords, directProductUrl: target.directProductUrl, preferredColors: target.preferredColors, sizePriority: target.sizePriority, currency: target.currency, maxRetailMinor: target.maxRetailMinor, quantity: target.quantity, checkoutMode: target.checkoutMode, maxCheckouts: target.maxCheckouts, captchaStrategy: target.captchaStrategy, enabled: target.enabled, capturedAt: startedAt } as const;
     const detail = await repo.createRun({ name: "Target run", diagnosticLevel: "NORMAL", profileIds: [profile.id], targetId: target.id }, { appVersion: "0.4.0", schemaVersion: 4, osVersion: "win32", chromeVersion: null, playwrightVersion: "test", capturedAt: startedAt }, [{ id: randomUUID(), runId: randomUUID(), browserProfileId: profile.id, browserProfileName: profile.name, route: { kind: "direct", verification: { status: "PENDING", publicIp: null, country: null, city: null, verifiedAt: null, message: null } }, status: "STARTING", startedAt, endedAt: null, finalError: null }], snapshot);
     await repo.updateTarget(target.id, { name: "Changed" }); await repo.removeTarget(target.id);
     expect((await repo.getRun(detail.run.id))?.run.targetSnapshot?.name).toBe("Jacket");

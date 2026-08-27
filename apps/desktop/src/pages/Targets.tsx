@@ -219,6 +219,14 @@ export function Targets({
               <option value="INHERIT_APP">Inherit app setting</option><option value="MANUAL_HARVESTER">Local Harvester</option><option value="API_SOLVER">API only</option><option value="API_WITH_FALLBACK">API with local fallback</option>
             </select>
           </Field>
+          <Field label="Checkout mode">
+            <select value={draft.checkoutMode} onChange={(event) => setDraft({ ...draft, checkoutMode: event.target.value as TargetDraft["checkoutMode"] })}>
+              <option value="ASSISTED">Assisted</option><option value="FULL_AUTO">Full Auto</option>
+            </select>
+          </Field>
+          <Field label="Maximum successful checkouts">
+            <input value={draft.maxCheckouts} onChange={(event) => setDraft({ ...draft, maxCheckouts: event.target.value.toUpperCase() })} placeholder="UNLIMITED or 1" />
+          </Field>
 
           <Field label="Must match">
             <input

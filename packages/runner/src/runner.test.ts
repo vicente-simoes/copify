@@ -9,6 +9,10 @@ describe("runner recording redaction", () => {
     expect(value).not.toContain("abc123");
     expect(value).toContain("[REDACTED]");
   });
+  it("redacts PAN and CVV-like payment values from diagnostics", () => {
+    const value = sanitizeText("card_number=4242 4242 4242 4242 cvv=123 payment_method=fixture-canary");
+    expect(value).not.toContain("4242 4242 4242 4242"); expect(value).not.toContain("cvv=123"); expect(value).not.toContain("fixture-canary");
+  });
   it("recognizes Supreme EU's visible color-thumbnail label", () => {
     expect(isColorThumbnailTitle("view Small Box Zip Up Hooded Sweatshirt - Navy (image 1 of 2)", "Navy")).toBe(true);
     expect(isColorThumbnailTitle("view Small Box Zip Up Hooded Sweatshirt - Navy (image 2 of 2)", "Navy")).toBe(false);

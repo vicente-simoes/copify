@@ -27,7 +27,8 @@ export const storeMonitoringSchema = z.object({
 export type StoreMonitoring = z.infer<typeof storeMonitoringSchema>;
 
 export const storeCapabilitiesSchema = z.object({
-  monitor: storeMonitorKindSchema, cartInspection: z.boolean(), addToCart: z.boolean(), checkoutAutofill: z.boolean()
+  monitor: storeMonitorKindSchema, cartInspection: z.boolean(), addToCart: z.boolean(), checkoutAutofill: z.boolean(),
+  checkoutModes: z.array(z.enum(["ASSISTED", "FULL_AUTO"])), paymentMethods: z.array(z.enum(["CARD", "VCC", "SHOP_PAY", "GATEWAY_TOKEN"])),
 });
 export type StoreCapabilities = z.infer<typeof storeCapabilitiesSchema>;
 
@@ -54,7 +55,7 @@ const SUPREME_EU_APPAREL_SIZES = ["Small", "Medium", "Large", "XLarge", "XXLarge
 const MANIFESTS: readonly StoreManifest[] = [
   {
     id: STORE_SUPREME_EU, name: "Supreme", region: "EU", currency: "EUR", status: "stable",
-    capabilities: { monitor: "shared", cartInspection: true, addToCart: true, checkoutAutofill: true },
+    capabilities: { monitor: "shared", cartInspection: true, addToCart: true, checkoutAutofill: true, checkoutModes: ["ASSISTED", "FULL_AUTO"], paymentMethods: ["CARD", "VCC", "SHOP_PAY"] },
     monitoring: {
       descriptorVersion: 1, mode: "shared", access: "PUBLIC", recommendedPollIntervalMs: 1_000,
       endpoint: "https://eu.supreme.com/collections/all", hydrationHandlerId: "supreme-product-page-v1",
@@ -70,7 +71,7 @@ const MANIFESTS: readonly StoreManifest[] = [
   },
   {
     id: STORE_GENERAL, name: "General", region: null, currency: "EUR", status: "unsupported",
-    capabilities: { monitor: null, cartInspection: false, addToCart: false, checkoutAutofill: false },
+    capabilities: { monitor: null, cartInspection: false, addToCart: false, checkoutAutofill: false, checkoutModes: [], paymentMethods: [] },
     monitoring: null,
     warming: null,
     variants: { sizes: { kind: "freeform" }, colors: { kind: "freeform" } }
@@ -86,6 +87,8 @@ export function requireStoreManifest(id: string): StoreManifest { const manifest
 export function storeCapabilities(id: string): StoreCapabilities | undefined { return BY_ID.get(id)?.capabilities; }
 export function isMonitorable(id: string): boolean { return BY_ID.get(id)?.monitoring !== null && BY_ID.has(id); }
 export function supportsAssistedCheckout(id: string): boolean { const capabilities = BY_ID.get(id)?.capabilities; return Boolean(capabilities?.addToCart && capabilities.checkoutAutofill); }
+export function supportsCheckoutMode(id: string, mode: "ASSISTED" | "FULL_AUTO"): boolean { const capabilities = BY_ID.get(id)?.capabilities; return Boolean(capabilities?.addToCart && capabilities.checkoutAutofill && capabilities.checkoutModes.includes(mode)); }
+export function supportsPaymentMethod(id: string, method: "CARD" | "VCC" | "SHOP_PAY" | "GATEWAY_TOKEN"): boolean { return Boolean(BY_ID.get(id)?.capabilities.paymentMethods.includes(method)); }
 
 export const storeSettingsSchema = z.object({ id: z.string().min(1).max(64), enabled: z.boolean() });
 export type StoreSettings = z.infer<typeof storeSettingsSchema>;

@@ -1,6 +1,6 @@
 import { RunsIcon, SessionsIcon, SettingsIcon, ShippingIcon, TargetsIcon } from "./icons";
 
-export type Workspace = "run" | "browsers" | "targets" | "shipping" | "settings";
+export type Workspace = "run" | "browsers" | "targets" | "shipping" | "payments" | "settings";
 
 type NavEntry = { id: Workspace; label: string; Icon: (props: { className?: string }) => React.JSX.Element };
 
@@ -10,6 +10,7 @@ export const navigation: NavEntry[] = [
   { id: "browsers", label: "Browsers", Icon: SessionsIcon },
   { id: "targets", label: "Targets", Icon: TargetsIcon },
   { id: "shipping", label: "Shipping", Icon: ShippingIcon },
+  { id: "payments", label: "Payments", Icon: ShippingIcon },
 ];
 
 const footerNavigation: NavEntry[] = [{ id: "settings", label: "Settings", Icon: SettingsIcon }];

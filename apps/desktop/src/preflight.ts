@@ -1,4 +1,4 @@
-import { supportsAssistedCheckout, type BrowserProfile, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
+import { supportsAssistedCheckout, supportsCheckoutMode, type BrowserProfile, type PaymentProfile, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunSessionOverride, type SessionSnapshot, type ShippingProfile, type Target } from "@copify/shared";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -18,7 +18,7 @@ export type Preflight = {
 };
 
 export type PreflightInput = {
-  mode: "OBSERVATION" | "ASSISTED_CHECKOUT";
+  mode: "OBSERVATION" | "CHECKOUT";
   diagnosticLevel?: "NORMAL" | "DIAGNOSTIC" | "DEEP_DEBUG";
   profiles: BrowserProfile[];
   selectedProfileIds: string[];
@@ -28,11 +28,13 @@ export type PreflightInput = {
   shipping: ShippingProfile[];
   target: Target | null;
   warmStates?: ProfileWarmState[];
+  payments?: PaymentProfile[];
+  sessionOverrides?: RunSessionOverride[];
 };
 
 export function preflight(input: PreflightInput): Preflight {
   const { mode, profiles, selectedProfileIds, session, proxies, latestBenchmark, shipping, target } = input;
-  const assisted = mode === "ASSISTED_CHECKOUT";
+  const assisted = mode === "CHECKOUT";
   const selected = selectedProfileIds
     .map((id) => profiles.find((profile) => profile.id === id))
     .filter((profile): profile is BrowserProfile => Boolean(profile));
@@ -130,6 +132,8 @@ export function preflight(input: PreflightInput): Preflight {
 
   // --- assisted-only checks ---
   if (assisted) {
+    const overrideByProfile=new Map((input.sessionOverrides??[]).map((entry)=>[entry.browserProfileId,entry])); const resolvedMode=(profile:BrowserProfile)=>{const run=overrideByProfile.get(profile.id)?.checkoutMode;if(run&&run!=="INHERIT_TARGET")return run;if(profile.checkoutModeOverride!=="INHERIT_TARGET")return profile.checkoutModeOverride;return target?.checkoutMode??"ASSISTED";};
+    const unsupported=target?selected.filter((profile)=>!supportsCheckoutMode(target.storeId,resolvedMode(profile))):[]; if(unsupported.length)checks.push({id:"checkout-mode",label:"Checkout modes supported",status:"fail",detail:`Unsupported for this store: ${unsupported.map((profile)=>profile.name).join(", ")}.`});
     const coherenceWarnings = selected.filter((profile) => session(profile.id).coherence?.status === "WARNING");
     const coherenceUnknown = selected.filter((profile) => !session(profile.id).coherence);
     checks.push(coherenceWarnings.length || coherenceUnknown.length
@@ -151,6 +155,8 @@ export function preflight(input: PreflightInput): Preflight {
           ? { id: "shipping", label: "Shipping ready", status: "warn", detail: `${observers.map((profile) => profile.name).join(", ")} will observe only — no complete address assigned.` }
           : { id: "shipping", label: "Shipping ready", status: "pass", detail: `${eligible.length} browser${eligible.length === 1 ? "" : "s"} can check out.` },
     );
+
+    const fullAuto=selected.filter((profile)=>resolvedMode(profile)==="FULL_AUTO"); if(fullAuto.length){const payments=input.payments??[];const warming=input.warmStates??[];const missing=fullAuto.filter((profile)=>{const warm=target?warming.find((state)=>state.browserProfileId===profile.id&&state.storeId===target.storeId):undefined;const shopPay=Boolean(warm?.status==="READY"&&warm.shopPayReady&&warm.shopPayCompletedAt&&Date.now()-warm.shopPayCompletedAt<=86_400_000);const override=overrideByProfile.get(profile.id);const id=override?.paymentProfileId!==undefined?override.paymentProfileId:profile.paymentProfileId;const payment=id?payments.find((entry)=>entry.id===id):undefined;return !shopPay&&(!payment?.configured||payment.kind==="GATEWAY_TOKEN");});checks.push(missing.length?{id:"payment",label:"Full Auto payment ready",status:"fail",detail:`${missing.map((profile)=>profile.name).join(", ")} needs a configured CARD/VCC profile or recently verified Shop Pay.`}:{id:"payment",label:"Full Auto payment ready",status:"pass",detail:`${fullAuto.length} Full Auto session${fullAuto.length===1?"":"s"} has a payment path.`});}
 
     checks.push(
       target && target.maxRetailMinor > 0

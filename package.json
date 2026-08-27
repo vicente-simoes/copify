@@ -1,6 +1,6 @@
 {
   "name": "copify",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Local release monitoring and assisted checkout operations console.",
   "author": "Copify",
   "main": "apps/desktop/out/main/index.js",

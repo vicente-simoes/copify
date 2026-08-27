@@ -24,6 +24,8 @@ export type TargetDraft = {
   sizePriority: string;
   currency: "EUR" | "GBP" | "USD";
   maxRetailPrice: string;
+  checkoutMode: Target["checkoutMode"];
+  maxCheckouts: string;
   captchaStrategy: Target["captchaStrategy"];
   enabled: boolean;
 };
@@ -62,6 +64,8 @@ export const blankTarget = (): TargetDraft => ({
   sizePriority: "",
   currency: "EUR",
   maxRetailPrice: "0.00",
+  checkoutMode: "ASSISTED",
+  maxCheckouts: "UNLIMITED",
   captchaStrategy: "INHERIT_APP",
   enabled: true,
 });

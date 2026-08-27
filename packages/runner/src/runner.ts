@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserContext, CDPSession, Locator, Page } from "rebrowser-playwright";
-import { CAPTCHA_LAB_FIXTURES, IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type CaptchaChallenge, type CaptchaFailureCode, type CaptchaLabFixture, type CaptchaProviderKind, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
+import { CAPTCHA_LAB_FIXTURES, IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type CaptchaChallenge, type CaptchaFailureCode, type CaptchaLabFixture, type CaptchaProviderKind, type PaymentCardSecret, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
 import { routeFromIdentity, verifyRoute } from "./network";
 import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
 import { externalCoherence, resolveNetworkCoherence } from "./coherence";
@@ -31,11 +31,16 @@ let automationPausedUntil: number | null = null;
 let humanInputs = new WeakMap<Page, HumanInput>();
 const pendingClipboardLeases = new Map<string, (granted: boolean) => void>();
 const pendingCaptchaCredentials = new Map<string, (credential: CaptchaCredentialLease | null) => void>();
+const pendingPaymentSecrets = new Map<string, (secret: PaymentCardSecret | null) => void>();
+type SlotGrant = { granted: true; reservationId: string | null } | { granted: false };
+const pendingCheckoutSlots = new Map<string, (grant: SlotGrant) => void>();
+const pendingCheckoutSuccess = new Map<string, (orderIndex: number) => void>();
 let captchaGeneration = 0; let captchaAttempt = 0; let retryCaptcha: { page: Page; challenge: CaptchaChallenge } | undefined;
 let heldClipboardLeaseId: string | undefined;
 let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbiddenCount = 0; let rateLimitedCount = 0; let challengeCount = 0; let checkoutFailures = 0; let pageLoads: number[] = [];
 let trafficReceivedBytes = 0; let trafficSentBytes = 0; let trafficCdpAttached = 0; let trafficFallbackSeen = false; let observedPages = new WeakSet<Page>(); let trafficSessions: CDPSession[] = [];
 let paymentHandoffLatch: PaymentHandoffLatch | undefined;
+let pendingSubmission: { requestId: string; reservationId: string | null; submittedAt: number } | undefined;
 let usageTimer:NodeJS.Timeout|undefined;
 let captchaLabFixture: CaptchaLabFixture | undefined;
 
@@ -48,6 +53,10 @@ process.on("message", async (message: unknown) => {
   if (command.data.type === "RETRY_CAPTCHA") await retryApiCaptcha(command.data.runId, command.data.runSessionId);
   if (command.data.type === "TEST_CAPTCHA") await testCaptcha(command.data.runId, command.data.runSessionId, command.data.fixture);
   if (command.data.type === "CAPTCHA_CREDENTIAL_RESPONSE") { const resolve = pendingCaptchaCredentials.get(command.data.requestId); if (resolve) { pendingCaptchaCredentials.delete(command.data.requestId); resolve(command.data.credential); } }
+  if (command.data.type === "PAYMENT_SECRET_RESPONSE") { const resolve = pendingPaymentSecrets.get(command.data.requestId); if (resolve) { pendingPaymentSecrets.delete(command.data.requestId); resolve(command.data.secret); } }
+  if (command.data.type === "CHECKOUT_SLOT_GRANTED") { const resolve = pendingCheckoutSlots.get(command.data.requestId); if (resolve) { pendingCheckoutSlots.delete(command.data.requestId); resolve({ granted: true, reservationId: command.data.reservationId }); } }
+  if (command.data.type === "CHECKOUT_SLOT_DENIED") { const resolve = pendingCheckoutSlots.get(command.data.requestId); if (resolve) { pendingCheckoutSlots.delete(command.data.requestId); resolve({ granted: false }); } }
+  if (command.data.type === "CHECKOUT_SUCCESS_RECORDED") { const resolve = pendingCheckoutSuccess.get(command.data.requestId); if (resolve) { pendingCheckoutSuccess.delete(command.data.requestId); resolve(command.data.orderIndex); } }
   if (command.data.type === "CHECK_CART") await checkCart(command.data.profileId);
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
   if (command.data.type === "OPEN_WARM_DESTINATION") await openWarmDestination(command.data.url);
@@ -60,11 +69,11 @@ process.on("message", async (message: unknown) => {
 });
 
 async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null, background: boolean): Promise<void> {
-  if (context) return; profileId = id; activeProxy = proxy; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; captchaLabFixture = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; captchaGeneration = captchaAttempt = 0; retryCaptcha = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); for (const resolve of pendingCaptchaCredentials.values()) resolve(null); pendingCaptchaCredentials.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
+  if (context) return; profileId = id; activeProxy = proxy; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; pendingSubmission = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; captchaLabFixture = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; captchaGeneration = captchaAttempt = 0; retryCaptcha = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); for (const resolve of pendingCaptchaCredentials.values()) resolve(null); pendingCaptchaCredentials.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
   try {
     await disableChromeTranslation(userDataDir);
     const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
-    if (recording?.diagnosticLevel === "DEEP_DEBUG" && !recording.assisted) {
+    if (recording?.diagnosticLevel === "DEEP_DEBUG" && recording.checkoutMode !== "FULL_AUTO") {
       await mkdir(recording.artifactDir, { recursive: true });
       if (driver.kind === "NATIVE_STEALTH") {
         persistentOptions.recordHar = { path: join(recording.artifactDir, "network.har"), mode: "minimal", content: "omit" };
@@ -100,7 +109,7 @@ async function start(id: string, userDataDir: string, driver: RunnerBrowserDrive
     // Do not leave the visible browser on an unused blank tab while the target
     // monitor performs its first check. This is a normal storefront warm-up,
     // not an artificial delay or stealth behavior.
-    if (recording?.assisted) await warmStorefront(context).catch(() => undefined);
+    if (recording?.checkoutMode) await warmStorefront(context).catch(() => undefined);
     send({ type: "READY", version: IPC_VERSION, profileId: id, route, coherence, driver: driverSession.metadata });
   } catch (error) {
     if (recording) emitRun("RECORDING_OR_LAUNCH_FAILED", { message: sanitizeText(error instanceof Error ? error.message : "unknown") });
@@ -125,7 +134,7 @@ async function beginRecording(activeContext: BrowserContext, value: RunnerRecord
   if (value.diagnosticLevel !== "NORMAL") {
     await activeContext.tracing.start({ screenshots: true, snapshots: true, sources: true, title: value.runId });
   }
-  if (value.diagnosticLevel === "DEEP_DEBUG" && !value.assisted && driverMetadata?.capabilities.launchHarVideo) {
+  if (value.diagnosticLevel === "DEEP_DEBUG" && value.checkoutMode !== "FULL_AUTO" && driverMetadata?.capabilities.launchHarVideo) {
     emitArtifact("HAR", "network.har", true);
     emitArtifact("VIDEO", "video", true);
   }
@@ -173,11 +182,17 @@ async function resumeAssist(runId: string, runSessionId: string): Promise<void> 
   if (!pendingAssist || pendingAssist.runId !== runId || pendingAssist.runSessionId !== runSessionId || !assistPage) return;
   if (automationBlocked()) { checkpointForCircuit(); return; }
   try {
+    if (pendingSubmission) {
+      const pending = pendingSubmission; const result = await classifyPaymentResult(assistPage); if (result === "INTERACTIVE_3DS") { await assistPage.bringToFront(); return; }
+      pendingSubmission = undefined; sendSubmissionResult(pending.requestId, pending.reservationId, result, Date.now() - pending.submittedAt, result === "REJECTED" ? "PAYMENT_REJECTED" : result === "AMBIGUOUS" ? "PAYMENT_RESULT_AMBIGUOUS" : null);
+      if (result === "SUCCESS") transition("SUCCESS", "CHECKOUT_SUCCESS_RECORDED", { orderIndex: await waitForCheckoutSuccess(pending.requestId) }); else if (result === "REJECTED") throw new AssistError("PAYMENT_REJECTED", "The payment provider rejected the submission."); else transition("CHECKPOINT", "PAYMENT_RESULT_AMBIGUOUS", { reason: "PAYMENT_RESULT_AMBIGUOUS" });
+      return;
+    }
     if (cartResumeMode === "EMPTY_CART") { transition("PRODUCT_OPEN", "CART_RECHECK_STARTED", {}); await continueFromEmptyCart(pendingAssist); return; }
     if (cartResumeMode === "TARGET_ONLY") { transition("CARTED", "CART_RECHECK_STARTED", {}); await continueFromTargetOnlyCart(pendingAssist); return; }
     if (await checkpoint(assistPage, false)) return;
     await stopSensitiveCapture(); await fillShipping(assistPage, pendingAssist.shipping); await acceptTerms(assistPage);
-    transition("READY_TO_CONFIRM", "READY_TO_CONFIRM", { message: "Checkpoint cleared. Shipping details were filled; review payment and confirm manually." }); await assistPage.bringToFront();
+    await continuePayment(pendingAssist);
   } catch (error) { recordAssistFailure(error, "Could not resume assisted checkout."); }
 }
 
@@ -219,7 +234,42 @@ async function continueFromTargetOnlyCart(command: AssistCommand): Promise<void>
   if (await checkpoint(assistPage)) return;
   await stopSensitiveCapture(); await fillShipping(assistPage, command.shipping); await acceptTerms(assistPage);
   if (await checkpoint(assistPage)) return;
-  transition("READY_TO_CONFIRM", "READY_TO_CONFIRM", { message: "Shipping details were filled. Review payment and confirm manually." }); await assistPage.bringToFront();
+  await continuePayment(command);
+}
+
+async function continuePayment(command: AssistCommand): Promise<void> {
+  if (!assistPage || !profileId || !recording) return;
+  if (command.checkoutMode === "ASSISTED") { transition("READY_TO_CONFIRM", "READY_TO_CONFIRM", { message: "Shipping details were filled. Review payment and confirm manually." }); await assistPage.bringToFront(); return; }
+  const readinessStarted = Date.now();
+  if (command.paymentProfile.path === "SHOP_PAY") await prepareShopPay(assistPage);
+  else {
+    const paymentProfileId = command.paymentProfile.paymentProfileId;
+    if (!paymentProfileId) throw new AssistError("PAYMENT_NOT_CONFIGURED", "No Payment Profile was assigned.");
+    const secret = await requestPaymentSecret(paymentProfileId);
+    if (!secret) throw new AssistError("PAYMENT_SECRET_UNAVAILABLE", "The assigned Payment Profile could not be decrypted.");
+    try { await fillCardPayment(assistPage, secret, command.shipping); } finally { /* Keep plaintext scoped to this call. */ }
+  }
+  transition("READY_TO_SUBMIT", "READY_TO_SUBMIT", { paymentPath: command.paymentProfile.path, readinessMs: Date.now() - readinessStarted });
+  const slot = await requestCheckoutSlot();
+  if (!slot.granted) { transition("CHECKOUT_LIMIT_REACHED", "CHECKOUT_LIMIT_REACHED", {}); return; }
+  if (command.purchaseMode === "DRY_RUN") {
+    sendSubmissionResult(randomUUID(), slot.reservationId, "REJECTED", 0, "DRY_RUN_RELEASE");
+    emitRun("DRY_RUN_SUBMIT_SUPPRESSED", { paymentPath: command.paymentProfile.path });
+    return;
+  }
+  const requestId = randomUUID(); const submittedAt = Date.now();
+  transition("SUBMITTING", "PAYMENT_SUBMISSION_DISPATCHED", { reservationId: slot.reservationId, readyToSubmitToDispatchMs: Date.now() - readinessStarted });
+  const clicked = await clickIrreversibleSubmit(assistPage, command.paymentProfile.path);
+  if (!clicked) { sendSubmissionResult(requestId, slot.reservationId, "REJECTED", Date.now() - submittedAt, "SUBMIT_CONTROL_NOT_FOUND"); throw new AssistError("PAYMENT_REJECTED", "The payment submit control was not available."); }
+  transition("SUBMITTED", "PAYMENT_SUBMITTED", {});
+  const result = await classifyPaymentResult(assistPage);
+  if (result === "INTERACTIVE_3DS") { pendingSubmission = { requestId, reservationId: slot.reservationId, submittedAt }; transition("CHECKPOINT", "INTERACTIVE_3DS_REQUIRED", { reason: "INTERACTIVE_3DS_REQUIRED" }); send({ type: "PAYMENT_HANDOFF", version: IPC_VERSION, profileId, runId: recording.runId, runSessionId: recording.runSessionId, phase: "DETECTED", category: "PSD2_3DS" }); return; }
+  sendSubmissionResult(requestId, slot.reservationId, result, Date.now() - submittedAt, result === "REJECTED" ? "PAYMENT_REJECTED" : result === "AMBIGUOUS" ? "PAYMENT_RESULT_AMBIGUOUS" : null);
+  if (result === "SUCCESS") {
+    const orderIndex = await waitForCheckoutSuccess(requestId);
+    transition("SUCCESS", "CHECKOUT_SUCCESS_RECORDED", { orderIndex });
+  } else if (result === "REJECTED") throw new AssistError("PAYMENT_REJECTED", "The payment provider rejected the submission.");
+  else transition("CHECKPOINT", "PAYMENT_RESULT_AMBIGUOUS", { reason: "PAYMENT_RESULT_AMBIGUOUS" });
 }
 
 async function inspectCart(page: Page, targetName: string, productUrl: string, variantId?: string): Promise<CartInspection> {
@@ -686,6 +736,87 @@ async function stopSensitiveCapture(): Promise<void> {
   emitRun("SENSITIVE_CAPTURE_STOPPED", { message: "Tracing and automatic screenshots stopped before sensitive checkout work." });
 }
 
+async function requestPaymentSecret(paymentProfileId: string): Promise<PaymentCardSecret | null> {
+  if (!profileId || !recording) return null;
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { pendingPaymentSecrets.delete(requestId); resolve(null); }, 10_000); timer.unref();
+    pendingPaymentSecrets.set(requestId, (value) => { clearTimeout(timer); resolve(value); });
+    send({ type: "PAYMENT_SECRET_REQUEST", version: IPC_VERSION, profileId: profileId!, runId: recording!.runId, runSessionId: recording!.runSessionId, requestId, paymentProfileId });
+  });
+}
+
+async function requestCheckoutSlot(): Promise<SlotGrant> {
+  if (!profileId || !recording) return { granted: false };
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { pendingCheckoutSlots.delete(requestId); resolve({ granted: false }); }, 10_000); timer.unref();
+    pendingCheckoutSlots.set(requestId, (value) => { clearTimeout(timer); resolve(value); });
+    send({ type: "CHECKOUT_SLOT_REQUEST", version: IPC_VERSION, profileId: profileId!, runId: recording!.runId, runSessionId: recording!.runSessionId, requestId });
+  });
+}
+
+function sendSubmissionResult(requestId: string, reservationId: string | null, outcome: "SUCCESS" | "REJECTED" | "AMBIGUOUS", durationMs: number, code: string | null): void {
+  if (!profileId || !recording) return;
+  send({ type: "PAYMENT_SUBMISSION_RESULT", version: IPC_VERSION, profileId, runId: recording.runId, runSessionId: recording.runSessionId, requestId, reservationId, outcome, durationMs, code });
+}
+
+async function waitForCheckoutSuccess(requestId: string): Promise<number> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { pendingCheckoutSuccess.delete(requestId); resolve(1); }, 10_000); timer.unref();
+    pendingCheckoutSuccess.set(requestId, (value) => { clearTimeout(timer); resolve(value); });
+  });
+}
+
+async function prepareShopPay(page: Page): Promise<void> {
+  const button = await firstVisible([page.getByRole("button", { name: /shop\s*pay/i }).first(), page.getByRole("link", { name: /shop\s*pay/i }).first()], 5_000);
+  if (!button) throw new AssistError("PAYMENT_NOT_CONFIGURED", "Authenticated Shop Pay was not ready in this browser profile.");
+  emitRun("PAYMENT_READINESS_VERIFIED", { paymentPath: "SHOP_PAY" });
+}
+
+export async function fillCardPayment(page: Page, secret: PaymentCardSecret, shipping: RunnerShipping): Promise<void> {
+  const scopes = [page, ...page.frames()];
+  const fill = async (selectors: string[], value: string, label: string): Promise<void> => {
+    for (const scope of scopes) for (const selector of selectors) {
+      const field = scope.locator(selector).first();
+      if (!await field.count().catch(() => 0) || !await field.isVisible({ timeout: 1_000 }).catch(() => false)) continue;
+      await field.fill(value, { timeout: 3_000 }); return;
+    }
+    throw new AssistError("PAYMENT_FORM_UNAVAILABLE", `The ${label} payment field was not available.`);
+  };
+  await fill(['input[autocomplete="cc-number"]', 'input[name*="number" i]', 'input[placeholder*="card number" i]'], secret.pan, "card number");
+  await fill(['input[autocomplete="cc-exp"]', 'input[name*="expiry" i]', 'input[placeholder*="MM / YY" i]'], `${String(secret.expiryMonth).padStart(2, "0")}/${String(secret.expiryYear).slice(-2)}`, "expiry");
+  await fill(['input[autocomplete="cc-csc"]', 'input[name*="verification" i]', 'input[name*="cvv" i]', 'input[placeholder*="security code" i]'], secret.cvv, "security code");
+  await fill(['input[autocomplete="cc-name"]', 'input[name*="name" i]'], secret.cardholderName, "cardholder name").catch(() => undefined);
+  if (secret.billing) {
+    const same = page.getByRole("checkbox", { name: /same as shipping/i }).first(); if (await same.isChecked().catch(() => false)) await same.uncheck();
+    await fill(['input[autocomplete~="billing" i][autocomplete~="address-line1" i]', 'input[name*="billing_address1" i]'], secret.billing.address1, "billing address");
+    if (secret.billing.address2) await fill(['input[autocomplete~="billing" i][autocomplete~="address-line2" i]', 'input[name*="billing_address2" i]'], secret.billing.address2, "billing address line 2").catch(() => undefined);
+    await fill(['input[autocomplete~="billing" i][autocomplete~="postal-code" i]', 'input[name*="billing" i][name*="postal" i]'], secret.billing.postalCode, "billing postal code");
+    await fill(['input[autocomplete~="billing" i][autocomplete~="address-level2" i]', 'input[name*="billing" i][name*="city" i]'], secret.billing.city, "billing city");
+  } else emitRun("PAYMENT_BILLING_FALLBACK", { source: "SHIPPING_PROFILE", country: shipping.country });
+  emitRun("PAYMENT_READINESS_VERIFIED", { paymentPath: "PAYMENT_PROFILE", kind: secret.kind });
+}
+
+async function clickIrreversibleSubmit(page: Page, path: "NONE" | "PAYMENT_PROFILE" | "SHOP_PAY"): Promise<boolean> {
+  const candidates = path === "SHOP_PAY"
+    ? [page.getByRole("button", { name: /shop\s*pay/i }).first(), page.getByRole("link", { name: /shop\s*pay/i }).first()]
+    : [page.getByRole("button", { name: /pay now|complete order|place order|submit order/i }).first(), page.locator('button[type="submit"]').last()];
+  const button = await firstVisible(candidates, 5_000); if (!button) return false; await button.click(); return true;
+}
+
+async function classifyPaymentResult(page: Page): Promise<"SUCCESS" | "REJECTED" | "AMBIGUOUS" | "INTERACTIVE_3DS"> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const url = page.url(); const text = await page.locator("body").innerText().then((value) => value.slice(0, 8_000)).catch(() => "");
+    if (/thank.?you|order.?confirmed|orders\/[^/]+/i.test(url) || /thank you.*order|order (?:is )?confirmed/i.test(text)) return "SUCCESS";
+    if (/declined|payment.*failed|card.*rejected|couldn.?t process/i.test(text)) return "REJECTED";
+    if (/one.?time|\botp\b|verification code|approve (?:this|the) (?:payment|purchase)|open your bank app|biometric|complete (?:your )?(?:authentication|challenge)/i.test(text)) return "INTERACTIVE_3DS";
+    await page.waitForTimeout(250);
+  }
+  return "AMBIGUOUS";
+}
+
 export async function fillShipping(page: Page, shipping: RunnerShipping): Promise<void> {
   await selectShippingCountry(page, shipping.country);
   await selectShippingRegion(page, shipping.region);
@@ -950,7 +1081,7 @@ function sanitizeRequest(url: string, method: string, resourceType: string, erro
 }
 
 function sanitizePayload(payload: Record<string, unknown>): Record<string, unknown> { return Object.fromEntries(Object.entries(payload).map(([key, value]) => [key, typeof value === "string" ? sanitizeText(value) : value])); }
-export function sanitizeText(value: string): string { return value.replace(/(authorization|cookie|set-cookie|password|token|secret|proxy[-_ ]?authorization)\s*[:=]\s*(?:bearer\s+)?[^\s;,&]+/gi, "$1=[REDACTED]").replace(/([?&](?:token|code|key|password|secret|session)=[^&\s]+)/gi, "[REDACTED_QUERY]").slice(0, 2_000); }
+export function sanitizeText(value: string): string { return value.replace(/\b(?:\d[ -]*?){13,19}\b/g, "[REDACTED_PAN]").replace(/\b(?:cvv|cvc|security.?code)\s*[:=]?\s*\d{3,4}\b/gi, "[REDACTED_CVV]").replace(/(authorization|cookie|set-cookie|password|token|secret|proxy[-_ ]?authorization|payment[-_ ]?method|card[-_ ]?number)\s*[:=]\s*(?:bearer\s+)?[^\s;,&]+/gi, "$1=[REDACTED]").replace(/([?&](?:token|code|key|password|secret|session|payment_method)=[^&\s]+)/gi, "[REDACTED_QUERY]").slice(0, 2_000); }
 function send(event: RunnerEvent): void { process.send?.(event); }
 function classifyLaunchError(error: unknown): { code: Extract<RunnerEvent, { type: "ERROR" }>["code"]; message: string } {
   if (error instanceof BrowserDriverError) return { code: error.code, message: error.message };

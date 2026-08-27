@@ -54,9 +54,9 @@ export function deriveMetrics(detail: RunDetail): { run: RunMetrics; sessions: S
     const cart = first(events, "CART_CONFIRMED", "DIRECT_CART_VERIFIED"); const checkout = first(events, "CHECKOUT_NAVIGATION_STARTED");
     const checkpoints = pairedDuration(events, ["CHECKPOINT_DETECTED"], ["CHECKPOINT_RESUMED"]);
     const handoffs = pairedDuration(events, ["PAYMENT_HANDOFF_DETECTED", "INTERACTIVE_3DS_REQUIRED"], ["PAYMENT_HANDOFF_RETURNED"]);
-    const reachedReady = Boolean(first(events, "READY_TO_CONFIRM", "PAYMENT_HANDOFF_RETURNED"));
+    const reachedReady = Boolean(first(events, "READY_TO_CONFIRM", "PAYMENT_HANDOFF_RETURNED")); const readyToSubmit=first(events,"READY_TO_SUBMIT"); const dispatched=first(events,"PAYMENT_SUBMISSION_DISPATCHED"); const submissionResult=first(events,"CHECKOUT_SUCCESS","CHECKOUT_SLOT_RELEASED","PAYMENT_RESULT_AMBIGUOUS");
     const eligible = Boolean(first(events, "VARIANT_SELECTED"));
-    const observedOutcome = detail.run.executionMode === "OBSERVATION" ? "OBSERVATION_ONLY" : session.status === "FAILED" ? "FAILED" : reachedReady ? "READY_TO_CONFIRM" : "ENDED_WITHOUT_READY";
+    const observedOutcome = detail.run.executionMode === "OBSERVATION" ? "OBSERVATION_ONLY" : session.orderIndex ? "SUCCESS" : session.executionState === "CHECKOUT_LIMIT_REACHED" ? "CHECKOUT_LIMIT_REACHED" : session.quotaOutcome === "AMBIGUOUS" ? "PAYMENT_RESULT_AMBIGUOUS" : session.status === "FAILED" ? "FAILED" : readyToSubmit ? "READY_TO_SUBMIT" : reachedReady ? "READY_TO_CONFIRM" : "ENDED_WITHOUT_READY";
     const challenges = events.filter((e) => e.type === "CAPTCHA_CHALLENGE_DETECTED");
     const completedSolves = events.filter((e) => e.type === "CAPTCHA_SOLVE_COMPLETED");
     const solveDurations = completedSolves.map((event) => Number(event.payload.durationMs)).filter((value) => Number.isFinite(value) && value >= 0);
@@ -70,7 +70,8 @@ export function deriveMetrics(detail: RunDetail): { run: RunMetrics; sessions: S
       http4xxCount: events.filter((e) => e.type === "HTTP_STATUS" && Number(e.payload.status) >= 400 && Number(e.payload.status) < 500).length,
       http5xxCount: events.filter((e) => e.type === "HTTP_STATUS" && Number(e.payload.status) >= 500).length, failureCategory: classify(session, events),
       incompleteCheckpoint: checkpoints.incomplete, incomplete3ds: handoffs.incomplete, anomalies: [...anomalies, ...(eligible ? [] : ["not-checkout-eligible"])],
-      checkoutMode: null, captchaStrategy: session.captchaStrategy, captchaSolveDurationMs: solveDurations.length ? solveDurations.reduce((sum, value) => sum + value, 0) : null, captchaSolveCostMicrosUsd: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null, captchaFailoverCount: events.filter((e) => e.type === "CAPTCHA_FAILOVER_TRIGGERED").length,
+      checkoutMode: session.checkoutMode, captchaStrategy: session.captchaStrategy, captchaSolveDurationMs: solveDurations.length ? solveDurations.reduce((sum, value) => sum + value, 0) : null, captchaSolveCostMicrosUsd: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null, captchaFailoverCount: events.filter((e) => e.type === "CAPTCHA_FAILOVER_TRIGGERED").length,
+      readyToSubmitToDispatchMs: duration(readyToSubmit,dispatched,anomalies,"readyToSubmitToDispatch"), paymentSubmissionToResultMs: duration(dispatched,submissionResult,anomalies,"paymentSubmissionToResult"), orderIndex:session.orderIndex,quotaOutcome:session.quotaOutcome,
     };
   });
   return { run, sessions };

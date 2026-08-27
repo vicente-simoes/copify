@@ -3,13 +3,13 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, appearanceSettingsSchema, captchaProviderConfigSchema, captchaProviderDiagnosticSchema, captchaSettingsSchema, chromeColorsSchema, defaultAppearanceSettings, defaultCaptchaSettings, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxyBenchmarkSchema,
-  analyticsFilterSchema, createRunAnnotationSchema, proxyProfileSchema, runAnnotationSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runMetricsSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, sessionMetricsSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
+  DEFAULT_NETWORK_PROBE_URL, browserHealthSnapshotSchema, browserProfileSchema, cardBrand, createBrowserProfileSchema, createPaymentProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, appearanceSettingsSchema, captchaProviderConfigSchema, captchaProviderDiagnosticSchema, captchaSettingsSchema, chromeColorsSchema, defaultAppearanceSettings, defaultCaptchaSettings, defaultMonitorSettings, monitorSettingsSchema, networkProbeSettingsSchema, paymentProfileSchema, profileWarmStateSchema, proxyBenchmarkSchema,
+  analyticsFilterSchema, createRunAnnotationSchema, proxyProfileSchema, runAnnotationSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runMetricsSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, sessionMetricsSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updatePaymentProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type AppearanceSettings, type ChromeColors, type WindowBounds, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
-  type AnalyticsFilter, type AnalyticsResult, type CaptchaProviderConfig, type CaptchaProviderDiagnostic, type CaptchaProviderKind, type CaptchaSettings, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot, type UpdateCaptchaSettingsInput,
+  type AnalyticsFilter, type AnalyticsResult, type CaptchaProviderConfig, type CaptchaProviderDiagnostic, type CaptchaProviderKind, type CaptchaSettings, type CreatePaymentProfileInput, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type PaymentProfile, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot, type UpdateCaptchaSettingsInput,
   budgetStatusSchema, costBudgetSchema, costQuerySchema, costSummarySchema, createManualCostSnapshotSchema, estimateCostMicrosUsd, providerBalanceSnapshotSchema, providerUsageRecordSchema, resolveBudgetPeriod, resolveCostPeriod, resolveCostSeries, upsertCostBudgetSchema,
   type BudgetStatus, type CostBudget, type CostQuery, type CostSummary, type CreateManualCostSnapshotInput, type ProviderBalanceSnapshot, type ProviderUsageRecord, type UpsertCostBudgetInput,
-  type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
+  type UpdateBrowserProfileInput, type UpdatePaymentProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
 import { deriveMetrics, reliabilityRows } from "./analytics";
 export { deriveMetrics, percentile, reliabilityRows } from "./analytics";
@@ -22,9 +22,11 @@ export type EncryptedProxyCredentials = { username?: Buffer; password?: Buffer }
 export type EncryptedProxyCredentialUpdate = { username?: EncryptedCredential; password?: EncryptedCredential };
 export type StoredProxy = ProxyProfile & { usernameCiphertext: Buffer | null; passwordCiphertext: Buffer | null };
 export type StoredShippingProfile = ShippingProfile & { detailsCiphertext: Buffer | null };
+export type StoredPaymentProfile = PaymentProfile & { payloadCiphertext: Buffer | null };
 export type StoredBrowserProfile = BrowserProfile & { externalCdpEndpointCiphertext: Buffer | null };
 export type StoredCaptchaProvider = CaptchaProviderConfig & { apiKeyCiphertext: Buffer | null; lastDiagnostic: CaptchaProviderDiagnostic | null };
-type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "captchaStrategy" | "captchaProvider" | "assistedEligible" | "executionState" | "checkpointReason"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "captchaStrategy" | "captchaProvider" | "assistedEligible" | "executionState" | "checkpointReason">>;
+type NewRunSession = Omit<RunSession, "runId" | "shippingProfile" | "paymentProfile" | "checkoutMode" | "captchaStrategy" | "captchaProvider" | "assistedEligible" | "executionState" | "checkpointReason" | "quotaOutcome" | "orderIndex"> & Partial<Pick<RunSession, "runId" | "shippingProfile" | "paymentProfile" | "checkoutMode" | "captchaStrategy" | "captchaProvider" | "assistedEligible" | "executionState" | "checkpointReason" | "quotaOutcome" | "orderIndex">>;
+export type EncryptedPaymentProfileCreate = { input: CreatePaymentProfileInput; ciphertext: Buffer };
 export type RecordedUsageSnapshot = RunNetworkUsage & { browserProfileId?: string | null; proxyProvider?: string | null; timezoneId?: string };
 export type ProviderImportRecord = Omit<ProviderUsageRecord, "id" | "authority" | "importBatchId" | "recordedAt">;
 
@@ -308,6 +310,22 @@ export class ProfileRepository {
         fired_at INTEGER NOT NULL, UNIQUE(budget_id,period_start_at,threshold)
       );`);
     }
+    if (version < 20) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS payment_profiles (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, brand TEXT, last4 TEXT,
+        expiry_month INTEGER, expiry_year INTEGER, tags_json TEXT NOT NULL DEFAULT '[]', payload_secret_id TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS payment_profiles_created_idx ON payment_profiles(created_at ASC);`);
+      const addV20Column = (table: string, column: string, definition: string): void => { const columns=this.all(`PRAGMA table_info(${table})`); if(columns.length&&!columns.some((row)=>String(row.name)===column))this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${definition};`); };
+      addV20Column("browser_profiles","payment_profile_id","payment_profile_id TEXT"); addV20Column("browser_profiles","checkout_mode_override","checkout_mode_override TEXT NOT NULL DEFAULT 'INHERIT_TARGET'");
+      addV20Column("targets","checkout_mode","checkout_mode TEXT NOT NULL DEFAULT 'ASSISTED'"); addV20Column("targets","max_checkouts","max_checkouts TEXT NOT NULL DEFAULT 'UNLIMITED'");
+      addV20Column("runs","purchase_mode","purchase_mode TEXT NOT NULL DEFAULT 'LEGACY_MANUAL'"); addV20Column("runs","max_checkouts","max_checkouts TEXT NOT NULL DEFAULT 'UNLIMITED'");
+      addV20Column("run_sessions","payment_profile_json","payment_profile_json TEXT"); addV20Column("run_sessions","checkout_mode","checkout_mode TEXT NOT NULL DEFAULT 'ASSISTED'"); addV20Column("run_sessions","quota_outcome","quota_outcome TEXT NOT NULL DEFAULT 'NONE'"); addV20Column("run_sessions","order_index","order_index INTEGER");
+      addV20Column("run_setups","session_overrides_json","session_overrides_json TEXT NOT NULL DEFAULT '[]'");
+      if(this.all("PRAGMA table_info(runs)").some((row)=>String(row.name)==="execution_mode"))this.sql.prepare("UPDATE runs SET execution_mode='CHECKOUT' WHERE execution_mode='ASSISTED_CHECKOUT'").run();
+      if(this.all("PRAGMA table_info(run_setups)").some((row)=>String(row.name)==="execution_mode"))this.sql.prepare("UPDATE run_setups SET execution_mode='CHECKOUT' WHERE execution_mode='ASSISTED_CHECKOUT'").run();
+    }
     // Earlier v0.12 builds used the user-entered range end as a manual balance's
     // effective timestamp. A balance is observed when it is entered, so repair
     // those records once on open; this also makes today's current balance visible.
@@ -317,7 +335,7 @@ export class ProfileRepository {
     if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_usage_records'").get()) {
       this.sql.prepare("UPDATE provider_usage_records SET interval_end_at=recorded_at WHERE authority='MANUAL_CONFIRMED' AND interval_end_at>recorded_at").run();
     }
-    this.sql.exec("PRAGMA user_version = 19;");
+    this.sql.exec("PRAGMA user_version = 20;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -352,14 +370,14 @@ export class ProfileRepository {
   async create(input: CreateBrowserProfileInput, endpointCiphertext?: Buffer): Promise<BrowserProfile> {
     const parsed = createBrowserProfileSchema.parse(input); const id = randomUUID(); const now = Date.now();
     const endpointSecretId = endpointCiphertext ? randomUUID() : null;
-    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, captchaStrategyOverride: parsed.captchaStrategyOverride, driver: parsed.driver.kind === "EXTERNAL_CDP" ? { kind: "EXTERNAL_CDP", endpointConfigured: true } : { kind: "NATIVE_STEALTH" }, enabled: parsed.enabled, createdAt: now, updatedAt: now };
+    const profile: BrowserProfile = { id, name: parsed.name, userDataDir: profileDirectory(this.profilesRoot, id), proxyProfileId: null, shippingProfileId: null, paymentProfileId: null, checkoutModeOverride: parsed.checkoutModeOverride, captchaStrategyOverride: parsed.captchaStrategyOverride, driver: parsed.driver.kind === "EXTERNAL_CDP" ? { kind: "EXTERNAL_CDP", endpointConfigured: true } : { kind: "NATIVE_STEALTH" }, enabled: parsed.enabled, createdAt: now, updatedAt: now };
     try {
       this.transaction(() => {
         if (endpointSecretId && endpointCiphertext) this.insertSecret(endpointSecretId, endpointCiphertext, now);
         const last = this.getRow("SELECT MAX(position) AS position FROM browser_profiles");
         const position = last?.position == null ? 0 : Number(last.position) + 1;
-        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,captcha_strategy_override,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,position,created_at,updated_at) VALUES (?,?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?,?)")
-          .run(profile.id, profile.name, profile.userDataDir, null, null, profile.captchaStrategyOverride, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, position, now, now);
+        this.sql.prepare("INSERT INTO browser_profiles (id,name,user_data_dir,proxy_profile_id,shipping_profile_id,payment_profile_id,checkout_mode_override,captcha_strategy_override,launch_mode,driver_kind,external_cdp_endpoint_secret_id,enabled,position,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'PLAYWRIGHT',?,?,?,?,?,?)")
+          .run(profile.id, profile.name, profile.userDataDir, null, null, null, profile.checkoutModeOverride, profile.captchaStrategyOverride, profile.driver.kind, endpointSecretId, profile.enabled ? 1 : 0, position, now, now);
       });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not create the browser profile."); }
     return profile;
@@ -371,6 +389,7 @@ export class ProfileRepository {
     const existing = browserProfileSchema.parse(mapProfile(existingRow));
     if (parsed.proxyProfileId !== undefined && parsed.proxyProfileId !== null && !(await this.getProxy(parsed.proxyProfileId))) throw new Error("Proxy profile not found.");
     if (parsed.shippingProfileId !== undefined && parsed.shippingProfileId !== null && !(await this.getShippingProfile(parsed.shippingProfileId))) throw new Error("Shipping profile not found.");
+    if (parsed.paymentProfileId !== undefined && parsed.paymentProfileId !== null && !(await this.getPaymentProfile(parsed.paymentProfileId))) throw new Error("Payment profile not found.");
     const nextKind = parsed.driver?.kind ?? existing.driver.kind;
     const endpointUpdate = nextKind === "NATIVE_STEALTH" ? null : endpointCiphertext;
     const endpointSecretId = this.replaceSecret(existingRow.external_cdp_endpoint_secret_id, endpointUpdate, Date.now());
@@ -379,8 +398,8 @@ export class ProfileRepository {
     try {
       this.transaction(() => {
         this.updateSecret(existingRow.external_cdp_endpoint_secret_id, endpointSecretId, endpointUpdate, updated.updatedAt);
-        this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, driver_kind=?, external_cdp_endpoint_secret_id=?, proxy_profile_id=?, shipping_profile_id=?, captcha_strategy_override=?, updated_at=? WHERE id=?")
-          .run(updated.name, updated.enabled ? 1 : 0, updated.driver.kind, endpointSecretId, updated.proxyProfileId, updated.shippingProfileId, updated.captchaStrategyOverride, updated.updatedAt, id);
+        this.sql.prepare("UPDATE browser_profiles SET name=?, enabled=?, driver_kind=?, external_cdp_endpoint_secret_id=?, proxy_profile_id=?, shipping_profile_id=?, payment_profile_id=?, checkout_mode_override=?, captcha_strategy_override=?, updated_at=? WHERE id=?")
+          .run(updated.name, updated.enabled ? 1 : 0, updated.driver.kind, endpointSecretId, updated.proxyProfileId, updated.shippingProfileId, updated.paymentProfileId, updated.checkoutModeOverride, updated.captchaStrategyOverride, updated.updatedAt, id);
         if (parsed.proxyProfileId !== undefined || parsed.driver !== undefined) this.sql.prepare("UPDATE profile_warm_states SET status='REVIEW', updated_at=? WHERE browser_profile_id=?").run(updated.updatedAt, id);
       });
     } catch (error) { throw new Error(isUniqueError(error) ? "A browser profile with that name already exists." : "Could not update the browser profile."); }
@@ -414,6 +433,49 @@ export class ProfileRepository {
   async removeShippingProfile(id: string): Promise<boolean> {
     const existing = this.getRow("SELECT * FROM shipping_profiles WHERE id = ?", [id]); if (!existing) return false;
     this.transaction(() => { this.sql.prepare("UPDATE browser_profiles SET shipping_profile_id=NULL, updated_at=? WHERE shipping_profile_id=?").run(Date.now(), id); this.sql.prepare("DELETE FROM shipping_profiles WHERE id=?").run(id); if (existing.details_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(existing.details_secret_id); }); return true;
+  }
+
+  async listPaymentProfiles(): Promise<PaymentProfile[]> { return this.all("SELECT * FROM payment_profiles ORDER BY created_at ASC").map((row) => paymentProfileSchema.parse(mapPayment(row))); }
+  async getPaymentProfile(id: string): Promise<PaymentProfile | undefined> { const row = this.getRow("SELECT * FROM payment_profiles WHERE id=?", [id]); return row ? paymentProfileSchema.parse(mapPayment(row)) : undefined; }
+  async getStoredPaymentProfile(id: string): Promise<StoredPaymentProfile | undefined> {
+    const row = this.getRow("SELECT p.*,s.ciphertext AS payload_ciphertext FROM payment_profiles p LEFT JOIN app_secrets s ON s.id=p.payload_secret_id WHERE p.id=?", [id]);
+    return row ? { ...paymentProfileSchema.parse(mapPayment(row)), payloadCiphertext: toBuffer(row.payload_ciphertext) } : undefined;
+  }
+  async createPaymentProfile(input: CreatePaymentProfileInput, ciphertext: Buffer): Promise<PaymentProfile> {
+    const parsed = createPaymentProfileSchema.parse(input); return this.insertPaymentProfiles([{ input: parsed, ciphertext }], [])[0];
+  }
+  async createPaymentProfilesAtomic(entries: EncryptedPaymentProfileCreate[], assignments: { entryIndex: number; browserProfileId: string }[]): Promise<PaymentProfile[]> {
+    const parsed = entries.map((entry) => ({ input: createPaymentProfileSchema.parse(entry.input), ciphertext: entry.ciphertext }));
+    const profileIds = new Set(this.all("SELECT id FROM browser_profiles").map((row) => String(row.id)));
+    if (assignments.some((entry) => entry.entryIndex < 0 || entry.entryIndex >= parsed.length || !profileIds.has(entry.browserProfileId))) throw new Error("A batch browser assignment is invalid.");
+    if (new Set(assignments.map((entry) => entry.browserProfileId)).size !== assignments.length) throw new Error("Each browser may only be assigned once per batch.");
+    return this.insertPaymentProfiles(parsed, assignments);
+  }
+  private insertPaymentProfiles(entries: { input: ReturnType<typeof createPaymentProfileSchema.parse>; ciphertext: Buffer }[], assignments: { entryIndex: number; browserProfileId: string }[]): PaymentProfile[] {
+    const now = Date.now(); const created: PaymentProfile[] = [];
+    this.transaction(() => {
+      for (const entry of entries) {
+        const id = randomUUID(); const secretId = randomUUID(); const pan = entry.input.cardNumber;
+        this.insertSecret(secretId, entry.ciphertext, now);
+        try { this.sql.prepare("INSERT INTO payment_profiles (id,name,kind,brand,last4,expiry_month,expiry_year,tags_json,payload_secret_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+          .run(id, entry.input.name, entry.input.kind, cardBrand(pan), pan.slice(-4), entry.input.expiryMonth, entry.input.expiryYear, JSON.stringify(normalizePaymentTags(entry.input.tags)), secretId, now, now); }
+        catch (error) { throw new Error(isUniqueError(error) ? "A payment profile with that name already exists." : "Could not create payment profile."); }
+        created.push(paymentProfileSchema.parse(mapPayment(this.getRow("SELECT * FROM payment_profiles WHERE id=?", [id])!)));
+      }
+      for (const assignment of assignments) this.sql.prepare("UPDATE browser_profiles SET payment_profile_id=?,updated_at=? WHERE id=?").run(created[assignment.entryIndex].id, now, assignment.browserProfileId);
+    });
+    return created;
+  }
+  async updatePaymentProfile(id: string, input: UpdatePaymentProfileInput, ciphertext: Buffer | undefined): Promise<PaymentProfile> {
+    const parsed = updatePaymentProfileSchema.parse(input); const row = this.getRow("SELECT * FROM payment_profiles WHERE id=?", [id]); if (!row) throw new Error("Payment profile not found."); const now = Date.now();
+    const current = paymentProfileSchema.parse(mapPayment(row)); const secretId = ciphertext ? randomUUID() : String(row.payload_secret_id);
+    const replacement = parsed.replacement; const next = paymentProfileSchema.parse({ ...current, name: parsed.name ?? current.name, tags: normalizePaymentTags(parsed.tags ?? current.tags), ...(replacement ? { kind: replacement.kind, brand: cardBrand(replacement.cardNumber), last4: replacement.cardNumber.slice(-4), expiryMonth: replacement.expiryMonth, expiryYear: replacement.expiryYear, configured: true } : {}), updatedAt: now });
+    this.transaction(() => { if (ciphertext) { this.insertSecret(secretId, ciphertext, now); if (row.payload_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(row.payload_secret_id); } try { this.sql.prepare("UPDATE payment_profiles SET name=?,kind=?,brand=?,last4=?,expiry_month=?,expiry_year=?,tags_json=?,payload_secret_id=?,updated_at=? WHERE id=?").run(next.name,next.kind,next.brand,next.last4,next.expiryMonth,next.expiryYear,JSON.stringify(next.tags),secretId,now,id); } catch (error) { throw new Error(isUniqueError(error) ? "A payment profile with that name already exists." : "Could not update payment profile."); } });
+    return next;
+  }
+  async removePaymentProfile(id: string): Promise<boolean> {
+    const row = this.getRow("SELECT payload_secret_id FROM payment_profiles WHERE id=?", [id]); if (!row) return false;
+    this.transaction(() => { this.sql.prepare("UPDATE browser_profiles SET payment_profile_id=NULL,updated_at=? WHERE payment_profile_id=?").run(Date.now(),id); this.sql.prepare("DELETE FROM payment_profiles WHERE id=?").run(id); if (row.payload_secret_id) this.sql.prepare("DELETE FROM app_secrets WHERE id=?").run(row.payload_secret_id); }); return true;
   }
 
   async listProxies(): Promise<ProxyProfile[]> {
@@ -518,14 +580,14 @@ export class ProfileRepository {
   async getTarget(id: string): Promise<Target | undefined> { const row = this.getRow("SELECT * FROM targets WHERE id = ?", [id]); return row ? targetSchema.parse(mapTarget(row)) : undefined; }
   async createTarget(input: CreateTargetInput): Promise<Target> {
     const parsed = createTargetSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,direct_product_url,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,captcha_strategy,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), parsed.directProductUrl, JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.captchaStrategy, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
+    try { this.sql.prepare("INSERT INTO targets (id,name,store_id,product_keywords_json,negative_keywords_json,direct_product_url,preferred_colors_json,size_priority_json,currency,max_retail_minor,quantity,checkout_mode,max_checkouts,captcha_strategy,enabled,latest_check_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.storeId, JSON.stringify(parsed.productKeywords), JSON.stringify(parsed.negativeKeywords), parsed.directProductUrl, JSON.stringify(parsed.preferredColors), JSON.stringify(parsed.sizePriority), parsed.currency, parsed.maxRetailMinor, parsed.quantity, parsed.checkoutMode, String(parsed.maxCheckouts), parsed.captchaStrategy, parsed.enabled ? 1 : 0, null, now, now); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not create target."); }
     return (await this.getTarget(id))!;
   }
   async updateTarget(id: string, input: UpdateTargetInput): Promise<Target> {
     const parsed = updateTargetSchema.parse(input); const existing = await this.getTarget(id); if (!existing) throw new Error("Target not found."); const updated = targetSchema.parse({ ...existing, ...parsed, updatedAt: Date.now() });
-    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,direct_product_url=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,captcha_strategy=?,enabled=?,updated_at=? WHERE id=?")
-      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), updated.directProductUrl, JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.captchaStrategy, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
+    try { this.sql.prepare("UPDATE targets SET name=?,store_id=?,product_keywords_json=?,negative_keywords_json=?,direct_product_url=?,preferred_colors_json=?,size_priority_json=?,currency=?,max_retail_minor=?,quantity=?,checkout_mode=?,max_checkouts=?,captcha_strategy=?,enabled=?,updated_at=? WHERE id=?")
+      .run(updated.name, updated.storeId, JSON.stringify(updated.productKeywords), JSON.stringify(updated.negativeKeywords), updated.directProductUrl, JSON.stringify(updated.preferredColors), JSON.stringify(updated.sizePriority), updated.currency, updated.maxRetailMinor, updated.quantity, updated.checkoutMode, String(updated.maxCheckouts), updated.captchaStrategy, updated.enabled ? 1 : 0, updated.updatedAt, id); } catch (error) { throw new Error(isUniqueError(error) ? "A target with that name already exists." : "Could not update target."); }
     return (await this.getTarget(id))!;
   }
   async setTargetCheck(targetId: string, check: TargetCheck): Promise<Target> { const value = targetCheckSchema.parse(check); this.sql.prepare("UPDATE targets SET latest_check_json=?, updated_at=? WHERE id=?").run(JSON.stringify(value), Date.now(), targetId); const target = await this.getTarget(targetId); if (!target) throw new Error("Target not found."); return target; }
@@ -533,14 +595,14 @@ export class ProfileRepository {
 
   async createRun(input: CreateRunInput, environment: RunEnvironment, sessions: NewRunSession[], targetSnapshot: TargetSnapshot | null = null): Promise<RunDetail> {
     const parsed = createRunSchema.parse(input); const now = Date.now(); const id = randomUUID();
-    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, executionMode: parsed.executionMode, status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, discoverySnapshot: null, createdAt: now, updatedAt: now });
+    const run: Run = runSchema.parse({ id, name: parsed.name, diagnosticLevel: parsed.diagnosticLevel, executionMode: parsed.executionMode, purchaseMode: parsed.purchaseMode, maxCheckouts: targetSnapshot?.maxCheckouts ?? "UNLIMITED", status: "STARTING", startedAt: now, endedAt: null, environment, targetSnapshot, discoverySnapshot: null, createdAt: now, updatedAt: now });
     this.transaction(() => {
-      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,execution_mode,status,started_at,ended_at,environment_json,target_snapshot_json,discovery_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-        .run(run.id, run.name, run.diagnosticLevel, run.executionMode, run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, null, now, now);
+      this.sql.prepare("INSERT INTO runs (id,name,diagnostic_level,execution_mode,purchase_mode,max_checkouts,status,started_at,ended_at,environment_json,target_snapshot_json,discovery_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run(run.id, run.name, run.diagnosticLevel, run.executionMode, run.purchaseMode, String(run.maxCheckouts), run.status, run.startedAt, null, JSON.stringify(run.environment), targetSnapshot ? JSON.stringify(targetSnapshot) : null, null, now, now);
       for (const session of sessions) {
         const value = runSessionSchema.parse({ ...session, runId: id });
-        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,shipping_profile_json,captcha_strategy,captcha_provider_json,assisted_eligible,execution_state,checkpoint_reason,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), JSON.stringify(value.shippingProfile), value.captchaStrategy, value.captchaProvider ? JSON.stringify(value.captchaProvider) : null, value.assistedEligible ? 1 : 0, value.executionState, value.checkpointReason, value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
+        this.sql.prepare("INSERT INTO run_sessions (id,run_id,browser_profile_id,browser_profile_name,route_json,shipping_profile_json,payment_profile_json,checkout_mode,captcha_strategy,captcha_provider_json,assisted_eligible,execution_state,checkpoint_reason,quota_outcome,order_index,status,started_at,ended_at,final_error_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(value.id, id, value.browserProfileId, value.browserProfileName, JSON.stringify(value.route), JSON.stringify(value.shippingProfile), JSON.stringify(value.paymentProfile), value.checkoutMode, value.captchaStrategy, value.captchaProvider ? JSON.stringify(value.captchaProvider) : null, value.assistedEligible ? 1 : 0, value.executionState, value.checkpointReason, value.quotaOutcome, value.orderIndex, value.status, value.startedAt, value.endedAt, value.finalError ? JSON.stringify(value.finalError) : null);
       }
     });
     return (await this.getRun(id))!;
@@ -684,8 +746,8 @@ export class ProfileRepository {
 
   async createRunSetup(input: CreateRunSetupInput): Promise<RunSetup> {
     const parsed = createRunSetupSchema.parse(input); const id = randomUUID(); const now = Date.now();
-    try { this.sql.prepare("INSERT INTO run_setups (id,name,diagnostic_level,execution_mode,profile_ids_json,captcha_overrides_json,target_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
-      .run(id, parsed.name, parsed.diagnosticLevel, parsed.executionMode, JSON.stringify(parsed.profileIds), JSON.stringify(parsed.captchaOverrides), parsed.targetId, now, now); }
+    try { this.sql.prepare("INSERT INTO run_setups (id,name,diagnostic_level,execution_mode,profile_ids_json,session_overrides_json,captcha_overrides_json,target_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .run(id, parsed.name, parsed.diagnosticLevel, parsed.executionMode, JSON.stringify(parsed.profileIds), JSON.stringify(parsed.sessionOverrides), JSON.stringify(parsed.captchaOverrides), parsed.targetId, now, now); }
     catch (error) { throw new Error(isUniqueError(error) ? "A saved run setup with that name already exists." : "Could not save the run setup."); }
     return runSetupSchema.parse({ id, ...parsed, createdAt: now, updatedAt: now });
   }
@@ -716,6 +778,7 @@ export class ProfileRepository {
       .run(status, route ? JSON.stringify(route) : null, ended, finalError ? JSON.stringify(finalError) : null, id);
   }
   async setRunSessionExecution(id: string, executionState: RunSession["executionState"], checkpointReason: string | null = null): Promise<void> { this.sql.prepare("UPDATE run_sessions SET execution_state=?, checkpoint_reason=? WHERE id=?").run(executionState, checkpointReason, id); }
+  async setRunSessionQuota(id: string, quotaOutcome: RunSession["quotaOutcome"], orderIndex: number | null = null): Promise<void> { this.sql.prepare("UPDATE run_sessions SET quota_outcome=?,order_index=? WHERE id=?").run(quotaOutcome,orderIndex,id); }
 
   async addRunEvent(event: RunEvent): Promise<RunEvent> {
     const value = runEventSchema.parse(event);
@@ -1072,7 +1135,7 @@ export function openProfileRepository(databasePath: string, profilesRoot: string
 
 function mapProfile(row: Row): Record<string, unknown> {
   const kind = row.driver_kind === "EXTERNAL_CDP" ? "EXTERNAL_CDP" : "NATIVE_STEALTH";
-  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, captchaStrategyOverride: row.captcha_strategy_override ?? "INHERIT_TARGET", driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, userDataDir: row.user_data_dir, proxyProfileId: row.proxy_profile_id ?? null, shippingProfileId: row.shipping_profile_id ?? null, paymentProfileId: row.payment_profile_id ?? null, checkoutModeOverride: row.checkout_mode_override ?? "INHERIT_TARGET", captchaStrategyOverride: row.captcha_strategy_override ?? "INHERIT_TARGET", driver: kind === "EXTERNAL_CDP" ? { kind, endpointConfigured: Boolean(row.external_cdp_endpoint_secret_id) } : { kind }, enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapWarmState(row: Row): Record<string, unknown> {
   return { id: row.id, browserProfileId: row.browser_profile_id, storeId: row.store_id, status: row.status, storefrontReady: Boolean(row.storefront_ready), googleReady: Boolean(row.google_ready), shopPayReady: Boolean(row.shop_pay_ready), storefrontCompletedAt: nullableNumber(row.storefront_completed_at), googleCompletedAt: nullableNumber(row.google_completed_at), shopPayCompletedAt: nullableNumber(row.shop_pay_completed_at), proxyProfileId: row.proxy_profile_id ?? null, driverKind: row.driver_kind, routePublicIp: row.route_public_ip ?? null, routeCountry: row.route_country ?? null, startedAt: Number(row.started_at), completedAt: row.completed_at == null ? null : Number(row.completed_at), updatedAt: Number(row.updated_at) };
@@ -1083,20 +1146,21 @@ function mapProxy(row: Row): Record<string, unknown> {
 function mapShipping(row: Row): Record<string, unknown> {
   return { id: row.id, name: row.name, country: row.country ?? null, detailsConfigured: Boolean(row.details_secret_id), complete: Boolean(row.details_secret_id), enabled: Boolean(row.enabled), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
+function mapPayment(row: Row): Record<string, unknown> { return { id: row.id, name: row.name, kind: row.kind, brand: row.brand ?? null, last4: row.last4 ?? null, expiryMonth: nullableNumber(row.expiry_month), expiryYear: nullableNumber(row.expiry_year), tags: row.tags_json ? JSON.parse(String(row.tags_json)) : [], configured: Boolean(row.payload_secret_id), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) }; }
 function mapBenchmark(row: Row): Record<string, unknown> {
   return { id: row.id, routeKind: row.route_kind, proxyProfileId: row.proxy_profile_id ?? null, probeUrl: row.probe_url, startedAt: Number(row.started_at), completedAt: Number(row.completed_at), attempts: Number(row.attempts), successes: Number(row.successes), publicIp: row.public_ip ?? null, country: row.country ?? null, city: row.city ?? null, connectLatencyMs: nullableNumber(row.connect_latency_ms), medianLatencyMs: nullableNumber(row.median_latency_ms), jitterMs: nullableNumber(row.jitter_ms), failureRate: Number(row.failure_rate), ipStable: Boolean(row.ip_stable), qualityScore: Number(row.quality_score), status: row.status, errorCode: row.error_code ?? null, errorMessage: row.error_message ?? null, samples: JSON.parse(String(row.samples_json)) };
 }
 function mapRun(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode ?? "OBSERVATION", status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, discoverySnapshot: row.discovery_snapshot_json ? JSON.parse(String(row.discovery_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode === "ASSISTED_CHECKOUT" ? "CHECKOUT" : row.execution_mode ?? "OBSERVATION", purchaseMode: row.purchase_mode ?? "LEGACY_MANUAL", maxCheckouts: parseMaxCheckouts(row.max_checkouts), status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), environment: JSON.parse(String(row.environment_json)), targetSnapshot: row.target_snapshot_json ? JSON.parse(String(row.target_snapshot_json)) : null, discoverySnapshot: row.discovery_snapshot_json ? JSON.parse(String(row.discovery_snapshot_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSetup(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), captchaOverrides: row.captcha_overrides_json ? JSON.parse(String(row.captcha_overrides_json)) : [], targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, diagnosticLevel: row.diagnostic_level, executionMode: row.execution_mode === "ASSISTED_CHECKOUT" ? "CHECKOUT" : row.execution_mode, profileIds: JSON.parse(String(row.profile_ids_json)), sessionOverrides: row.session_overrides_json ? JSON.parse(String(row.session_overrides_json)) : [], captchaOverrides: row.captcha_overrides_json ? JSON.parse(String(row.captcha_overrides_json)) : [], targetId: row.target_id ?? null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapTarget(row: Row): Record<string, unknown> {
-  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), directProductUrl: row.direct_product_url ?? null, preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: Number(row.quantity), captchaStrategy: row.captcha_strategy ?? "INHERIT_APP", enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return { id: row.id, name: row.name, storeId: row.store_id, productKeywords: JSON.parse(String(row.product_keywords_json)), negativeKeywords: JSON.parse(String(row.negative_keywords_json)), directProductUrl: row.direct_product_url ?? null, preferredColors: JSON.parse(String(row.preferred_colors_json)), sizePriority: JSON.parse(String(row.size_priority_json)), currency: row.currency, maxRetailMinor: Number(row.max_retail_minor), quantity: 1, checkoutMode: row.checkout_mode ?? "ASSISTED", maxCheckouts: parseMaxCheckouts(row.max_checkouts), captchaStrategy: row.captcha_strategy ?? "INHERIT_APP", enabled: Boolean(row.enabled), latestCheck: row.latest_check_json ? JSON.parse(String(row.latest_check_json)) : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 function mapRunSession(row: Row): Record<string, unknown> {
-  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), shippingProfile: row.shipping_profile_json ? JSON.parse(String(row.shipping_profile_json)) : { shippingProfileId: null, name: null, country: null, complete: false }, captchaStrategy: row.captcha_strategy ?? "MANUAL_HARVESTER", captchaProvider: row.captcha_provider_json ? JSON.parse(String(row.captcha_provider_json)) : null, assistedEligible: Boolean(row.assisted_eligible), executionState: row.execution_state ?? "OBSERVING", checkpointReason: row.checkpoint_reason ?? null, status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
+  return { id: row.id, runId: row.run_id, browserProfileId: row.browser_profile_id, browserProfileName: row.browser_profile_name, route: JSON.parse(String(row.route_json)), shippingProfile: row.shipping_profile_json ? JSON.parse(String(row.shipping_profile_json)) : { shippingProfileId: null, name: null, country: null, complete: false }, paymentProfile: row.payment_profile_json ? JSON.parse(String(row.payment_profile_json)) : { paymentProfileId: null, label: null, kind: null, configured: false, path: "NONE" }, checkoutMode: row.checkout_mode ?? "ASSISTED", captchaStrategy: row.captcha_strategy ?? "MANUAL_HARVESTER", captchaProvider: row.captcha_provider_json ? JSON.parse(String(row.captcha_provider_json)) : null, assistedEligible: Boolean(row.assisted_eligible), executionState: row.execution_state ?? "OBSERVING", checkpointReason: row.checkpoint_reason ?? null, quotaOutcome: row.quota_outcome ?? "NONE", orderIndex: nullableNumber(row.order_index), status: row.status, startedAt: Number(row.started_at), endedAt: row.ended_at === null || row.ended_at === undefined ? null : Number(row.ended_at), finalError: row.final_error_json ? JSON.parse(String(row.final_error_json)) : null };
 }
 function mapRunEvent(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id ?? null, wallTimeMs: Number(row.wall_time_ms), elapsedNs: String(row.elapsed_ns), type: row.type, stateBefore: row.state_before ?? null, stateAfter: row.state_after ?? null, payload: JSON.parse(String(row.payload_json)) };
@@ -1112,5 +1176,7 @@ function mapRunArtifact(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id, kind: row.kind, relativePath: row.relative_path, sensitive: Boolean(row.sensitive), createdAt: Number(row.created_at) };
 }
 function nullableNumber(value: unknown): number | null { return value === null || value === undefined ? null : Number(value); }
+function parseMaxCheckouts(value: unknown): "UNLIMITED" | number { if (value === null || value === undefined || String(value) === "UNLIMITED") return "UNLIMITED"; const parsed = Number(value); return Number.isInteger(parsed) && parsed >= 1 ? parsed : "UNLIMITED"; }
+function normalizePaymentTags(tags: string[]): string[] { return [...new Set(tags.map((tag) => tag.trim().replace(/\s+/g," ")).filter(Boolean).map((tag) => /^revolut$/i.test(tag) ? "Revolut" : /^mb\s*way$/i.test(tag) ? "MB WAY" : tag))].slice(0,12); }
 function toBuffer(value: unknown): Buffer | null { return value instanceof Uint8Array ? Buffer.from(value) : null; }
 function isUniqueError(error: unknown): boolean { return error instanceof Error && /UNIQUE constraint failed/i.test(error.message); }
