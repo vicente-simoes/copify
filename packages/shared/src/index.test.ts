@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IPC_VERSION, SCHEMA_VERSION, appearanceSettingsSchema, defaultAppearanceSettings, defaultThemeOverrides, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, sessionIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
+import { IPC_VERSION, SCHEMA_VERSION, appearanceSettingsSchema, captchaIpc, defaultAppearanceSettings, defaultThemeOverrides, createBrowserProfileSchema, createProxyProfileSchema, createRunSchema, createRunSetupSchema, createShippingProfileSchema, createTargetSchema, defaultMonitorSettings, estimateProxyCostMicrosUsd, externalCdpEndpointSchema, getStoreManifest, getStoreShippingDestinations, isKnownStore, isMonitorable, listStoreManifests, monitorSettingsSchema, networkProbeSettingsSchema, profileWarmStateSchema, proxySecretRevealSchema, resolveMonitorBehavior, runExecutionStateSchema, runnerCommandSchema, runnerEventSchema, secretCopyFieldSchema, sessionIpc, shippingSecretRevealSchema, simulatePaymentHandoffSchema, startCaptchaLabSchema, storeManifestSchema, supportsAssistedCheckout, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema } from "./index";
 
 describe("store registry", () => {
   it("exposes well-formed manifests for every registered store", () => {
@@ -33,7 +33,7 @@ describe("store registry", () => {
 
 describe("shared contracts", () => {
   it("publishes the current IPC and SQLite contract versions", () => {
-    expect(IPC_VERSION).toBe(19); expect(SCHEMA_VERSION).toBe(18);
+    expect(IPC_VERSION).toBe(20); expect(SCHEMA_VERSION).toBe(19);
   });
   it("validates profile input", () => {
     expect(createBrowserProfileSchema.safeParse({ name: "  " }).success).toBe(false);
@@ -52,6 +52,13 @@ describe("shared contracts", () => {
     expect(simulatePaymentHandoffSchema.safeParse({ profileId, phase: "DETECTED" }).success).toBe(true);
     expect(simulatePaymentHandoffSchema.safeParse({ profileId, phase: "PAYMENT" }).success).toBe(false);
     expect(simulatePaymentHandoffSchema.safeParse({ profileId: "not-a-uuid", phase: "RETURNED" }).success).toBe(false);
+  });
+  it("allows only explicit CAPTCHA Lab fixtures and strategies", () => {
+    const browserProfileId = "00000000-0000-4000-8000-000000000001";
+    expect(startCaptchaLabSchema.safeParse({ browserProfileId, fixture: "RECAPTCHA_V2", strategy: "MANUAL_HARVESTER" }).success).toBe(true);
+    expect(startCaptchaLabSchema.safeParse({ browserProfileId, fixture: "ARBITRARY_URL", strategy: "API_SOLVER" }).success).toBe(false);
+    expect(runnerCommandSchema.safeParse({ type: "TEST_CAPTCHA", version: IPC_VERSION, runId: browserProfileId, runSessionId: browserProfileId, fixture: "TURNSTILE" }).success).toBe(true);
+    expect(captchaIpc.labStart).toBe("captcha:lab-start");
   });
   it("publishes the browser coherence-check IPC endpoint", () => {
     expect(sessionIpc.checkCoherence).toBe("sessions:check-coherence");

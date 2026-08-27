@@ -70,6 +70,14 @@
   --warn: #e3b341;
   --danger: #f0656b;
 
+  /* Categorical, for chart series only. A series is a category, not a state, so
+     it must not borrow the three above — a bar is not "healthy" or "failing".
+     Held off the green/amber/red arc so a coloured bar can never be misread as
+     one, and separated from each other in hue rather than in lightness, which
+     is what made a neutral pair unreadable at bar size. */
+  --data-1: #4d8bf0;
+  --data-2: #b57cf5;
+
   /* Where the primary action travels past the foreground. */
   --extreme: #ffffff;
 
@@ -89,6 +97,10 @@
   --accent: #16a06a;
   --warn: #9a6a00;
   --danger: #c02a35;
+
+  /* Same two hues, darkened until a thin bar holds its colour on white. */
+  --data-1: #2f6ed4;
+  --data-2: #8046c8;
 
   --extreme: #000000;
 

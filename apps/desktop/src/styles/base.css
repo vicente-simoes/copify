@@ -68,7 +68,13 @@ input, select, textarea {
   transition: border-color var(--speed) ease;
 }
 input::placeholder { color: var(--fg-dim); }
-input:hover, select:hover { border-color: var(--fg-dim); }
+input:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--fg-dim); }
+
+/* Only buttons carried a disabled style, so a field switched off because the
+   mode above it makes it inert looked exactly like a live one. */
+input:disabled, select:disabled, textarea:disabled {
+  opacity: 0.45; cursor: not-allowed; background: var(--surface-raised);
+}
 
 /* Focus rides the primary, not the accent, which stays reserved for state. */
 :focus-visible { outline: 2px solid var(--primary-bg); outline-offset: 1px; }

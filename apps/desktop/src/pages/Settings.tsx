@@ -10,6 +10,7 @@ import { Costs } from "./Costs";
 import { CaptchaSettingsPage } from "./CaptchaSettings";
 
 type Tab = "routes" | "monitor" | "captcha" | "costs" | "stores" | "advanced" | "appearance" | "about";
+const EXPERIMENTAL_FEATURES_KEY = "copify.experimentalFeatures";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "routes", label: "Routes" },
@@ -67,6 +68,10 @@ export function Settings(props: {
   onBrowserDriver: (id: string, driver: BrowserDriverInput) => void;
 }) {
   const [tab, setTab] = useState<Tab>("routes");
+  const [experimentalFeatures, setExperimentalFeatures] = useState(() => {
+    try { return window.localStorage.getItem(EXPERIMENTAL_FEATURES_KEY) === "1"; }
+    catch { return false; }
+  });
   const [monitorSettings, setMonitorSettings] = useState<MonitorSettings>(defaultMonitorSettings());
   const [monitorNotice, setMonitorNotice] = useState<string>("");
   const [monitorStoreId, setMonitorStoreId] = useState("supreme-eu");
@@ -76,7 +81,7 @@ export function Settings(props: {
   return (
     <div className="page-stack">
       <nav className="tabs" aria-label="Settings sections">
-        {TABS.map((entry) => (
+        {TABS.filter((entry) => entry.id !== "advanced" || experimentalFeatures).map((entry) => (
           <button
             key={entry.id}
             className={`tab ${tab === entry.id ? "active" : ""}`}
@@ -160,7 +165,7 @@ export function Settings(props: {
 
       {tab === "costs" && <Costs proxies={props.proxies} />}
 
-      {tab === "captcha" && <CaptchaSettingsPage busy={props.busy} />}
+      {tab === "captcha" && <CaptchaSettingsPage busy={props.busy} profiles={props.profiles} sessions={props.sessions} developmentMode={import.meta.env.DEV} />}
 
       {tab === "stores" && (
         <section className="panel">
@@ -214,6 +219,7 @@ export function Settings(props: {
       {tab === "appearance" && <Appearance />}
 
       {tab === "about" && (
+        <>
         <section className="panel">
           <div className="section-title">
             <h2>Copify</h2>
@@ -229,6 +235,12 @@ export function Settings(props: {
             </div>
           </div>
         </section>
+        <section className="panel">
+          <div className="section-title"><div><h2>Experimental features</h2><p className="muted">Developer integrations that are not part of Copify's standard managed-browser workflow.</p></div></div>
+          <label className="check"><input type="checkbox" checked={experimentalFeatures} onChange={(event) => { const enabled=event.target.checked;setExperimentalFeatures(enabled);try{window.localStorage.setItem(EXPERIMENTAL_FEATURES_KEY,enabled?"1":"0");}catch{/* The preference remains active for this session. */} }}/> Show experimental settings</label>
+          <p className="field-note">Enables the Advanced tab and external local CDP attachment. Native Stealth remains recommended.</p>
+        </section>
+        </>
       )}
     </div>
   );

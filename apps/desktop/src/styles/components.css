@@ -106,10 +106,10 @@
   letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;
 }
 .state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
-.state.ready, .state.pass, .state.recording, .state.completed { color: var(--accent); }
-.state.starting, .state.stopping, .state.warn, .state.checkpoint { color: var(--warn); }
+.state.ready, .state.pass, .state.passed, .state.recording, .state.completed { color: var(--accent); }
+.state.starting, .state.stopping, .state.solving, .state.warn, .state.checkpoint { color: var(--warn); }
 .state.error, .state.crashed, .state.fail, .state.failed { color: var(--danger); }
-.state.stopped, .state.untested, .state.template { color: var(--fg-dim); }
+.state.stopped, .state.idle, .state.untested, .state.template { color: var(--fg-dim); }
 
 .error-detail { color: var(--danger); font-size: var(--text-sm); }
 
@@ -155,11 +155,14 @@
 .warning {
   grid-column: 1 / -1;
   padding: 9px 11px;
+  /* grid-column is inert outside a grid, so a warning that sits directly in a
+     panel needs its own separation from whatever it follows. */
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--warn) 7%, transparent);
   color: var(--fg);
 }
+.panel > .warning, .import-preview > .warning { margin-top: 12px; }
 
 .compact-create { display: flex; gap: 6px; min-width: min(100%, 320px); }
 .compact-create input { min-width: 180px; }
@@ -168,7 +171,10 @@
 .select-label select { width: auto; min-width: 150px; }
 
 .run-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-.run-form > button { grid-column: 1 / -1; justify-self: start; }
+.run-form > button, .run-form > .actions { grid-column: 1 / -1; justify-self: start; }
+/* A grid ends at its last cell, so anything following it butts straight against
+   the controls unless it opens its own gap. */
+.run-form + .actions, .run-form + .rows { margin-top: 14px; }
 .run-profile-picker {
   display: flex; flex-wrap: wrap; gap: 8px 20px; grid-column: 1 / -1; margin: 0; padding: 11px;
   border: 1px solid var(--border-strong); border-radius: var(--radius);
@@ -388,11 +394,13 @@
 /* The header and every row are subgrids of one parent grid, so a column can
    never drift because one cell happens to hold more than another. Sizing each
    row independently made the header and body disagree by the actions width. */
-.browser-rows, .proxy-rows, .address-rows, .assignment-rows { display: grid; }
+.browser-rows, .proxy-rows, .address-rows, .assignment-rows, .cost-rows, .budget-rows { display: grid; }
 .browser-rows > .row,
 .proxy-rows > .row,
 .address-rows > .row,
-.assignment-rows > .row {
+.assignment-rows > .row,
+.cost-rows > .row,
+.budget-rows > .row {
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: subgrid;
@@ -512,7 +520,12 @@
 }
 
 .drawer-form { display: flex; flex-direction: column; gap: 14px; }
+/* Helper text belonging to the field above it: the negative margin cancels the
+   stack gap so the note reads as part of that control. A note that is instead a
+   panel-level message has no field to attach to, so it takes ordinary spacing
+   rather than climbing onto whatever it follows. */
 .field-note { margin-top: -6px; color: var(--fg-dim); font-size: var(--text-sm); }
+.panel > .field-note { margin-top: 12px; }
 .proxy-url-import { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
 .inline-secret-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .sensitive-reveal { display: flex; flex-direction: column; gap: 12px; }
@@ -624,7 +637,7 @@
     minmax(0, 1fr) minmax(120px, 190px) minmax(64px, 80px)
     minmax(64px, 80px) minmax(48px, 60px) minmax(96px, auto);
 }
-.proxy-row .row-name { display: flex; align-items: center; gap: 8px; }
+.proxy-row .row-name, .provider-row .row-name { display: flex; align-items: center; gap: 8px; }
 .score.pass { color: var(--accent); }
 .score.warn { color: var(--warn); }
 .score.fail { color: var(--danger); }
@@ -632,6 +645,85 @@
 .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 .benchmark-empty { margin-top: 12px; }
+
+/* ---- costs ---- */
+
+.cost-rows { grid-template-columns: minmax(0, 1fr) minmax(60px, 140px) minmax(84px, 116px) minmax(84px, 116px); }
+/* Only the money columns align right; "Share" labels a bar that fills from the
+   left, so its heading stays on that edge. */
+.cost-rows .row-cell, .cost-rows .row-head > span:nth-child(n + 3) { text-align: right; }
+
+/* Share of the largest row in the table. A bar answers "where does it go" at a
+   glance, which two columns of six-decimal money never do. */
+.share { display: block; height: 5px; border-radius: 3px; background: var(--surface-hover); }
+.share > i { display: block; height: 100%; min-width: 2px; border-radius: 3px; background: var(--data-1); }
+/* The bar carries the row's category in the same two colours the chart above
+   uses, so a glance down the table matches a glance at the plot. */
+.cost-row.captcha .share > i { background: var(--data-2); }
+.cost-row.mixed .share > i { background: linear-gradient(90deg, var(--data-1), var(--data-2)); }
+
+/* Spend over time. Columns, not a line: the ledger is bucketed, and a line
+   between two buckets would draw values that were never sampled. */
+/* Explicit margin: a <figure> carries a 40px inline default that would inset
+   the plot from the panel it lives in. */
+.spend-chart { display: flex; flex-direction: column; gap: 7px; margin: 16px 0 0; }
+.spend-empty { margin-top: 16px; }
+
+.spend-plot {
+  position: relative;
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 128px; padding-top: 18px;
+  border-bottom: 1px solid var(--border);
+}
+/* The peak gridline: one reference line is enough to read a bar against, and a
+   full set of ticks would out-weigh the data on a panel this size. */
+.spend-plot::before { content: ""; position: absolute; left: 0; right: 0; top: 18px; border-top: 1px dashed var(--border); }
+.spend-peak { position: absolute; right: 0; top: 0; color: var(--fg-dim); font-size: var(--text-xs); }
+
+.spend-column {
+  display: flex; flex-direction: column; justify-content: flex-end;
+  flex: 1 1 0; min-width: 1px; height: 100%;
+}
+.spend-column:hover { background: var(--surface-hover); }
+/* Capped and centred: over a week of daily buckets a full-width fill spans
+   ~160px and stops reading as a column at all. */
+.spend-fill { display: block; width: 100%; max-width: 46px; margin: 0 auto; }
+.spend-fill.proxy { background: var(--data-1); }
+.spend-fill.captcha { background: var(--data-2); }
+/* Only the topmost segment is rounded, so a stack still meets flush. */
+.spend-fill.cap { border-radius: 2px 2px 0 0; }
+
+.spend-axis { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--fg-dim); font-size: var(--text-xs); }
+.spend-legend { display: flex; gap: 14px; }
+.spend-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); }
+.spend-legend span::before { content: ""; width: 8px; height: 8px; border-radius: 2px; }
+.spend-legend .proxy::before { background: var(--data-1); }
+.spend-legend .captcha::before { background: var(--data-2); }
+
+/* ---- budgets ---- */
+
+.budget-rows { grid-template-columns: minmax(0, 1fr) minmax(80px, 180px) minmax(52px, 64px) minmax(84px, 116px) minmax(120px, auto); }
+.budget-rows .row-cell { text-align: right; }
+.budget-row .row-name { display: flex; align-items: center; gap: 8px; }
+.budget-row .row-actions { justify-content: flex-end; }
+.over-budget { color: var(--danger); }
+
+/* The alert thresholds are drawn on the track, so 80% is a place on the bar
+   rather than a number in a sentence somewhere else on the row. */
+.meter { position: relative; display: block; height: 6px; border-radius: 3px; background: var(--surface-hover); overflow: hidden; }
+.meter-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--accent); }
+.meter.warn .meter-fill { background: var(--warn); }
+.meter.fail .meter-fill { background: var(--danger); }
+.meter.disabled { opacity: 0.45; }
+.meter-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--bg); }
+
+/* ---- provider import ---- */
+
+.import-preview {
+  margin-top: 14px; padding: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface);
+}
 
 /* ---- appearance ---- */
 

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const captchaKindSchema = z.enum(["TURNSTILE", "RECAPTCHA_V2", "RECAPTCHA_V3", "HCAPTCHA"]);
+export const captchaKindSchema = z.enum(["TURNSTILE", "RECAPTCHA_V2", "RECAPTCHA_V3", "HCAPTCHA", "DATADOME", "AWS_WAF", "FUNCAPTCHA", "GEETEST_V3", "GEETEST_V4"]);
 export type CaptchaKind = z.infer<typeof captchaKindSchema>;
 export const captchaStrategySchema = z.enum(["MANUAL_HARVESTER", "API_SOLVER", "API_WITH_FALLBACK"]);
 export type CaptchaStrategy = z.infer<typeof captchaStrategySchema>;
@@ -64,19 +64,68 @@ export const captchaProviderDiagnosticSchema = z.object({
   message: z.string().max(240),
 });
 export type CaptchaProviderDiagnostic = z.infer<typeof captchaProviderDiagnosticSchema>;
+export const captchaProviderSnapshotSchema = z.object({ kind: captchaProviderKindSchema, label: z.string().min(1).max(80) }).nullable();
+export type CaptchaProviderSnapshot = z.infer<typeof captchaProviderSnapshotSchema>;
+
+export const captchaLabFixtureSchema = z.enum(["RECAPTCHA_V2", "RECAPTCHA_V3", "TURNSTILE", "GEETEST_V4"]);
+export type CaptchaLabFixture = z.infer<typeof captchaLabFixtureSchema>;
+export const CAPTCHA_LAB_FIXTURES: Record<CaptchaLabFixture, { label: string; url: string }> = {
+  RECAPTCHA_V2: { label: "reCAPTCHA v2", url: "https://www.google.com/recaptcha/api2/demo" },
+  RECAPTCHA_V3: { label: "reCAPTCHA v3", url: "https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php" },
+  TURNSTILE: { label: "Cloudflare Turnstile", url: "https://clifford.io/demo/cloudflare-turnstile" },
+  GEETEST_V4: { label: "GeeTest v4 (official slide demo)", url: "https://gt4.geetest.com/demov4/slide-float-en.html" },
+};
+export const startCaptchaLabSchema = z.object({
+  browserProfileId: z.string().uuid(),
+  fixture: captchaLabFixtureSchema,
+  strategy: captchaStrategySchema,
+});
+export type StartCaptchaLabInput = z.input<typeof startCaptchaLabSchema>;
+export const captchaLabEventSchema = z.object({
+  type: z.string().min(1).max(80),
+  at: z.number().int().nonnegative(),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type CaptchaLabEvent = z.infer<typeof captchaLabEventSchema>;
+export const captchaLabStatusSchema = z.object({
+  state: z.enum(["IDLE", "STARTING", "READY", "SOLVING", "PASSED", "FAILED", "STOPPING"]),
+  browserProfileId: z.string().uuid().nullable(),
+  fixture: captchaLabFixtureSchema.nullable(),
+  strategy: captchaStrategySchema.nullable(),
+  provider: captchaProviderSnapshotSchema,
+  message: z.string().max(500).nullable(),
+  startedAt: z.number().int().nonnegative().nullable(),
+  events: z.array(captchaLabEventSchema).max(200),
+});
+export type CaptchaLabStatus = z.infer<typeof captchaLabStatusSchema>;
+export function idleCaptchaLabStatus(): CaptchaLabStatus { return { state: "IDLE", browserProfileId: null, fixture: null, strategy: null, provider: null, message: null, startedAt: null, events: [] }; }
 
 export const captchaChallengeSchema = z.object({
   kind: captchaKindSchema,
   websiteUrl: z.string().url(),
-  siteKey: z.string().min(1).max(1_024),
+  siteKey: z.string().max(1_024),
   action: z.string().max(256).nullable(),
   cData: z.string().max(4_096).nullable(),
   chlPageData: z.string().max(16_384).nullable(),
   invisible: z.boolean(),
+  captchaUrl: z.string().url().max(16_384).nullable().optional(),
+  userAgent: z.string().max(1_024).nullable().optional(),
+  subdomain: z.string().max(253).nullable().optional(),
+  blob: z.string().max(32_768).nullable().optional(),
+  gt: z.string().max(4_096).nullable().optional(),
+  geetestChallenge: z.string().max(8_192).nullable().optional(),
+  captchaId: z.string().max(4_096).nullable().optional(),
+  riskType: z.string().max(512).nullable().optional(),
+  awsKey: z.string().max(16_384).nullable().optional(),
+  awsIv: z.string().max(16_384).nullable().optional(),
+  awsContext: z.string().max(32_768).nullable().optional(),
+  awsChallengeJs: z.string().url().max(16_384).nullable().optional(),
+  awsApiJs: z.string().url().max(16_384).nullable().optional(),
+  awsProblemUrl: z.string().url().max(16_384).nullable().optional(),
+  awsApiKey: z.string().max(16_384).nullable().optional(),
+  awsExistingToken: z.string().max(32_768).nullable().optional(),
 });
 export type CaptchaChallenge = z.infer<typeof captchaChallengeSchema>;
-export const captchaProviderSnapshotSchema = z.object({ kind: captchaProviderKindSchema, label: z.string().min(1).max(80) }).nullable();
-export type CaptchaProviderSnapshot = z.infer<typeof captchaProviderSnapshotSchema>;
 export const runCaptchaOverrideSchema = z.object({ browserProfileId: z.string().uuid(), captchaStrategy: captchaStrategyOverrideSchema });
 export type RunCaptchaOverride = z.infer<typeof runCaptchaOverrideSchema>;
 
@@ -90,4 +139,5 @@ export function resolveCaptchaStrategy(input: { runOverride?: CaptchaStrategyOve
 
 export const captchaIpc = {
   settings: "captcha:settings", updateSettings: "captcha:update-settings", upsertProvider: "captcha:upsert-provider", removeProvider: "captcha:remove-provider", diagnose: "captcha:diagnose", changed: "captcha:changed",
+  labStatus: "captcha:lab-status", labStart: "captcha:lab-start", labStop: "captcha:lab-stop", labChanged: "captcha:lab-changed",
 } as const;

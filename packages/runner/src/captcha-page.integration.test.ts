@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "rebrowser-playwright";
-import { extractCaptchaChallenge, hasCaptchaResponse, injectCaptchaToken, installCaptchaCallbackBridge } from "./captcha-page";
+import { extractCaptchaChallenge, hasCaptchaResponse, injectCaptchaSolution, injectCaptchaToken, installCaptchaCallbackBridge } from "./captcha-page";
 import { findChromeExecutable } from "./network";
 
 const enabled = process.env.COPIFY_CAPTCHA_SMOKE === "1";
@@ -21,5 +21,29 @@ describe.skipIf(!enabled)("local CAPTCHA browser fixtures", () => {
     await phase("navigate", page.goto(`data:text/html,${encodeURIComponent(html)}`, { waitUntil: "domcontentloaded" }));
     const detected = await phase("extract", extractCaptchaChallenge(page)); expect(detected?.challenge.kind).toBe(kind);
     expect(await phase("inject", injectCaptchaToken(page, kind, "fixture-token"))).toBe(true); expect(await phase("response", hasCaptchaResponse(page))).toBe(true);
+  }, 15_000);
+
+  it("detects DataDome, AWS WAF, and Arkose Labs parameters", async () => {
+    await page.goto(`data:text/html,${encodeURIComponent(`<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=x&t=fe"></iframe>`)}`);
+    await expect(extractCaptchaChallenge(page)).resolves.toMatchObject({ challenge: { kind: "DATADOME", captchaUrl: "https://geo.captcha-delivery.com/captcha/?initialCid=x&t=fe" } });
+
+    await page.goto(`data:text/html,${encodeURIComponent(`<script>window.gokuProps={key:'key',iv:'iv',context:'context'}</script>`)}`);
+    await expect(extractCaptchaChallenge(page)).resolves.toMatchObject({ challenge: { kind: "AWS_WAF", awsKey: "key", awsIv: "iv", awsContext: "context" } });
+
+    await page.goto(`data:text/html,${encodeURIComponent(`<div data-pkey="arkose-key"></div><input name="fc-token">`)}`);
+    const arkose = await extractCaptchaChallenge(page); expect(arkose?.challenge).toMatchObject({ kind: "FUNCAPTCHA", siteKey: "arkose-key" });
+    expect(await injectCaptchaSolution(page, "FUNCAPTCHA", { token: "arkose-token" })).toBe(true);
+  }, 15_000);
+
+  it("captures and injects GeeTest v3 and v4 structured solutions", async () => {
+    await page.goto(`data:text/html,${encodeURIComponent(`<script>window.initGeetest=(options,callback)=>callback({onSuccess:(handler)=>handler});setTimeout(()=>initGeetest({gt:'gt-key',challenge:'challenge-value'},()=>{}),250)</script><input name="geetest_challenge"><input name="geetest_validate"><input name="geetest_seccode">`)}`);
+    await page.waitForTimeout(500);
+    await expect(extractCaptchaChallenge(page)).resolves.toMatchObject({ challenge: { kind: "GEETEST_V3", gt: "gt-key", geetestChallenge: "challenge-value" } });
+    expect(await injectCaptchaSolution(page, "GEETEST_V3", { challenge: "new", validate: "valid", seccode: "secure" })).toBe(true);
+
+    await page.goto(`data:text/html,${encodeURIComponent(`<script>window.initGeetest4=(options,callback)=>callback({onSuccess:(handler)=>handler});setTimeout(()=>initGeetest4({captchaId:'captcha-id',riskType:'slide'},()=>{}),250)</script><input name="captcha_id"><input name="captcha_output"><input name="gen_time"><input name="lot_number"><input name="pass_token">`)}`);
+    await page.waitForTimeout(500);
+    await expect(extractCaptchaChallenge(page)).resolves.toMatchObject({ challenge: { kind: "GEETEST_V4", captchaId: "captcha-id", riskType: "slide" } });
+    expect(await injectCaptchaSolution(page, "GEETEST_V4", { captcha_id: "captcha-id", captcha_output: "output", gen_time: "time", lot_number: "lot", pass_token: "pass" })).toBe(true);
   }, 15_000);
 });

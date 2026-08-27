@@ -1,14 +1,24 @@
 import { z } from "zod";
 
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+/* A ceiling on the series so a multi-year custom range cannot return a point
+   per bucket forever; past it the last bucket simply absorbs the remainder. */
+const MAX_SERIES_POINTS = 400;
+
 const idSchema = z.string().uuid();
 const timestampSchema = z.number().int().nonnegative();
 const nullableMoneySchema = z.number().int().nonnegative().nullable();
 
-export const costAuthoritySchema = z.enum(["COPIFY_ESTIMATED", "PROVIDER_CONFIRMED", "MANUAL_CONFIRMED"]);
+export const costAuthoritySchema = z.enum(["COPIFY_ESTIMATED", "PROVIDER_CONFIRMED", "MANUAL_CONFIRMED", "PROVIDER_REPORTED", "MIXED"]);
 export type CostAuthority = z.infer<typeof costAuthoritySchema>;
+export const costCategorySchema = z.enum(["PROXY", "CAPTCHA"]);
+export type CostCategory = z.infer<typeof costCategorySchema>;
+export const costScopeSchema = z.enum(["ALL", "PROXY", "CAPTCHA"]);
+export type CostScope = z.infer<typeof costScopeSchema>;
 export const costPeriodPresetSchema = z.enum(["TODAY", "LAST_24_HOURS", "ROLLING_7_DAYS", "CALENDAR_MONTH", "CUSTOM"]);
 export type CostPeriodPreset = z.infer<typeof costPeriodPresetSchema>;
-export const costGroupBySchema = z.enum(["PROVIDER", "PROXY", "STORE", "SOURCE", "BROWSER_PROFILE", "RUN"]);
+export const costGroupBySchema = z.enum(["CATEGORY", "PROVIDER", "PROXY", "CAPTCHA_KIND", "STORE", "SOURCE", "BROWSER_PROFILE", "RUN"]);
 export type CostGroupBy = z.infer<typeof costGroupBySchema>;
 export const budgetCadenceSchema = z.enum(["DAILY", "WEEKLY", "MONTHLY"]);
 export type BudgetCadence = z.infer<typeof budgetCadenceSchema>;
@@ -29,21 +39,33 @@ export type CostPeriod = z.infer<typeof costPeriodSchema>;
 
 export const costQuerySchema = z.object({
   period: costPeriodSchema,
+  scope: costScopeSchema.default("ALL"),
   groupBy: costGroupBySchema.default("PROVIDER"),
   provider: z.string().min(1).max(40).nullable().default(null),
 });
-export type CostQuery = z.infer<typeof costQuerySchema>;
+export type CostQuery = z.input<typeof costQuerySchema>;
 
 export const costBreakdownRowSchema = z.object({
   id: z.string().min(1).max(160), label: z.string().min(1).max(160),
+  category: z.enum(["PROXY", "CAPTCHA", "MIXED"]), captchaSolveCount: z.number().int().nonnegative(), unknownCaptchaCostCount: z.number().int().nonnegative(),
   receivedBytes: z.number().int().nonnegative(), sentBytes: z.number().int().nonnegative(), requestCount: z.number().int().nonnegative(),
   estimatedCostMicrosUsd: nullableMoneySchema, confirmedCostMicrosUsd: nullableMoneySchema,
   completeness: z.enum(["EXACT", "PARTIAL", "UNSUPPORTED"]), authority: costAuthoritySchema.nullable(), lastActivityAt: timestampSchema.nullable(),
 });
 export type CostBreakdownRow = z.infer<typeof costBreakdownRowSchema>;
 
+export const costSeriesGranularitySchema = z.enum(["HOUR", "DAY", "WEEK"]);
+export type CostSeriesGranularity = z.infer<typeof costSeriesGranularitySchema>;
+export const costSeriesPointSchema = z.object({
+  startAt: timestampSchema, endAt: timestampSchema,
+  proxyCostMicrosUsd: nullableMoneySchema, captchaCostMicrosUsd: nullableMoneySchema,
+  receivedBytes: z.number().int().nonnegative(), sentBytes: z.number().int().nonnegative(),
+  requestCount: z.number().int().nonnegative(), captchaSolveCount: z.number().int().nonnegative(),
+});
+export type CostSeriesPoint = z.infer<typeof costSeriesPointSchema>;
+
 export const providerUsageRecordSchema = z.object({
-  id: idSchema, provider: z.string().min(1).max(40), authority: costAuthoritySchema.exclude(["COPIFY_ESTIMATED"]),
+  id: idSchema, provider: z.string().min(1).max(40), authority: costAuthoritySchema.exclude(["COPIFY_ESTIMATED", "PROVIDER_REPORTED", "MIXED"]),
   intervalStartAt: timestampSchema, intervalEndAt: timestampSchema, receivedBytes: z.number().int().nonnegative().nullable(),
   requestCount: z.number().int().nonnegative().nullable(), billedCostMicrosUsd: nullableMoneySchema, planLabel: z.string().max(120).nullable(),
   importBatchId: idSchema.nullable(), recordedAt: timestampSchema,
@@ -51,7 +73,7 @@ export const providerUsageRecordSchema = z.object({
 export type ProviderUsageRecord = z.infer<typeof providerUsageRecordSchema>;
 
 export const providerBalanceSnapshotSchema = z.object({
-  id: idSchema, provider: z.string().min(1).max(40), authority: costAuthoritySchema.exclude(["COPIFY_ESTIMATED"]),
+  id: idSchema, provider: z.string().min(1).max(40), authority: costAuthoritySchema.exclude(["COPIFY_ESTIMATED", "PROVIDER_REPORTED", "MIXED"]),
   effectiveAt: timestampSchema, remainingCreditMicrosUsd: nullableMoneySchema, remainingBytes: z.number().int().nonnegative().nullable(), recordedAt: timestampSchema,
 });
 export type ProviderBalanceSnapshot = z.infer<typeof providerBalanceSnapshotSchema>;
@@ -90,13 +112,15 @@ export const reconciliationStatusSchema = z.object({
 });
 export type ReconciliationStatus = z.infer<typeof reconciliationStatusSchema>;
 
-export const costBudgetSchema = z.object({
-  id: idSchema, provider: z.string().min(1).max(40), cadence: budgetCadenceSchema, limitMicrosUsd: z.number().int().positive(),
+const costBudgetObjectSchema = z.object({
+  id: idSchema, category: costCategorySchema.default("PROXY"), provider: z.string().min(1).max(40), cadence: budgetCadenceSchema, limitMicrosUsd: z.number().int().positive(),
   startingCreditMicrosUsd: nullableMoneySchema, timezoneId: z.string().min(1).max(120), thresholds: z.array(z.number().int().min(1).max(100)).min(1).max(10),
   hardCap: z.boolean(), enabled: z.boolean(), enabledAt: timestampSchema, createdAt: timestampSchema, updatedAt: timestampSchema,
 });
+const captchaBudgetSafety = (value: { category: CostCategory; hardCap: boolean }, context: z.RefinementCtx): void => { if (value.category === "CAPTCHA" && value.hardCap) context.addIssue({ code: z.ZodIssueCode.custom, message: "CAPTCHA budgets are alert-only and cannot stop checkout solving." }); };
+export const costBudgetSchema = costBudgetObjectSchema.superRefine(captchaBudgetSafety);
 export type CostBudget = z.infer<typeof costBudgetSchema>;
-export const upsertCostBudgetSchema = costBudgetSchema.omit({ id: true, createdAt: true, updatedAt: true, enabledAt: true }).extend({ id: idSchema.optional() });
+export const upsertCostBudgetSchema = costBudgetObjectSchema.omit({ id: true, createdAt: true, updatedAt: true, enabledAt: true }).extend({ id: idSchema.optional() }).superRefine(captchaBudgetSafety);
 export type UpsertCostBudgetInput = z.input<typeof upsertCostBudgetSchema>;
 export const budgetStatusSchema = z.object({
   budget: costBudgetSchema, periodStartAt: timestampSchema, periodEndAt: timestampSchema, spentMicrosUsd: z.number().int().nonnegative(),
@@ -107,9 +131,12 @@ export type BudgetStatus = z.infer<typeof budgetStatusSchema>;
 export const costSummarySchema = z.object({
   period: z.object({ startAt: timestampSchema, endAt: timestampSchema, timezoneId: z.string(), label: z.string() }),
   estimatedCostMicrosUsd: nullableMoneySchema, confirmedCostMicrosUsd: nullableMoneySchema, confirmedAuthority: costAuthoritySchema.nullable(),
+  captchaCostMicrosUsd: nullableMoneySchema, captchaSolveCount: z.number().int().nonnegative(), unknownCaptchaCostCount: z.number().int().nonnegative(), totalKnownCostMicrosUsd: nullableMoneySchema,
   confirmedDifferenceMicrosUsd: z.number().int().nullable(), receivedBytes: z.number().int().nonnegative(), sentBytes: z.number().int().nonnegative(), requestCount: z.number().int().nonnegative(),
   remainingCreditMicrosUsd: nullableMoneySchema, estimationCoverage: z.number().min(0).max(1).nullable(), confirmedDataAgeMs: z.number().int().nonnegative().nullable(),
-  rows: z.array(costBreakdownRowSchema), budgets: z.array(budgetStatusSchema), updatedAt: timestampSchema,
+  rows: z.array(costBreakdownRowSchema), budgets: z.array(budgetStatusSchema),
+  seriesGranularity: costSeriesGranularitySchema, series: z.array(costSeriesPointSchema).max(MAX_SERIES_POINTS),
+  updatedAt: timestampSchema,
 });
 export type CostSummary = z.infer<typeof costSummarySchema>;
 
@@ -143,6 +170,28 @@ export function resolveCostPeriod(period: CostPeriod, now = Date.now()): { start
   if (value.preset === "TODAY") return { startAt: today, endAt: now, timezoneId, label: "Today" };
   const parts = localParts(now, timezoneId); const startAt = zonedEpoch({ year: parts.year, month: parts.month, day: 1, hour: 0, minute: 0, second: 0 }, timezoneId);
   return { startAt, endAt: now, timezoneId, label: "Calendar month" };
+}
+
+/* Spend reads as a shape over time, not as one number, so the summary carries a
+   bucketed series. The bucket follows the span rather than the preset: a custom
+   two-day range and "Last 24 hours" are the same question. Day and week edges go
+   through the zoned helpers so a bucket is the operator's day, not a UTC day. */
+export function resolveCostSeries(startAt: number, endAt: number, timezoneId: string): { granularity: CostSeriesGranularity; edges: number[] } {
+  const span = Math.max(0, endAt - startAt);
+  const granularity: CostSeriesGranularity = span <= 48 * HOUR_MS ? "HOUR" : span <= 120 * DAY_MS ? "DAY" : "WEEK";
+  const edges: number[] = [];
+  if (granularity === "HOUR") {
+    let edge = zonedEpoch({ ...localParts(startAt, timezoneId), minute: 0, second: 0 }, timezoneId);
+    while (edge <= endAt && edges.length < MAX_SERIES_POINTS) { edges.push(edge); edge += HOUR_MS; }
+    edges.push(Math.max(edge, endAt));
+    return { granularity, edges };
+  }
+  const step = granularity === "DAY" ? 1 : 7;
+  let edge = startOfLocalDay(startAt, timezoneId);
+  if (granularity === "WEEK") { const parts = localParts(edge, timezoneId); edge = addLocalDays(edge, -((new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay() + 6) % 7), timezoneId); }
+  while (edge <= endAt && edges.length < MAX_SERIES_POINTS) { edges.push(edge); edge = addLocalDays(edge, step, timezoneId); }
+  edges.push(Math.max(edge, endAt));
+  return { granularity, edges };
 }
 
 export function resolveBudgetPeriod(cadence: BudgetCadence, timezoneId: string, now = Date.now()): { startAt: number; endAt: number } {

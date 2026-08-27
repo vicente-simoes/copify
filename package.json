@@ -1,6 +1,8 @@
 {
   "name": "copify",
-  "version": "0.12.0",
+  "version": "0.13.0",
+  "description": "Local release monitoring and assisted checkout operations console.",
+  "author": "Copify",
   "main": "apps/desktop/out/main/index.js",
   "private": true,
   "packageManager": "pnpm@10.0.0",
@@ -24,6 +26,7 @@
     "test:monitor": "set COPIFY_MONITOR_SMOKE=1&& vitest run packages/runner/src/monitor.integration.test.ts",
     "test:direct-cart": "set COPIFY_DIRECT_CART_SMOKE=1&& vitest run packages/runner/src/direct-cart.integration.test.ts",
     "test:captcha": "set COPIFY_CAPTCHA_SMOKE=1&& vitest run packages/runner/src/captcha-page.integration.test.ts",
+    "test:captcha:live": "set COPIFY_CAPTCHA_LIVE=1&& vitest run packages/runner/src/captcha-page.live.test.ts",
     "test:watch": "vitest"
   },
   "build": {

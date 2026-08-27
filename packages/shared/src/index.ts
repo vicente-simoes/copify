@@ -7,8 +7,8 @@ export * from "./stores";
 export * from "./costs";
 export * from "./captcha";
 
-export const IPC_VERSION = 19 as const;
-export const SCHEMA_VERSION = 18 as const;
+export const IPC_VERSION = 20 as const;
+export const SCHEMA_VERSION = 19 as const;
 export const DEFAULT_NETWORK_PROBE_URL = "https://ipwho.is/";
 
 const idSchema = z.string().uuid();
@@ -459,6 +459,7 @@ export const runnerCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ASSIST_TARGET"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, candidate: productCandidateSchema, variant: productVariantSchema, quantity: z.number().int().min(1).max(10), priceConstraint: z.object({ currency: targetCurrencySchema, maxRetailMinor: z.number().int().nonnegative() }), shipping: runnerShippingSchema }),
   z.object({ type: z.literal("RESUME_ASSIST"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
   z.object({ type: z.literal("RETRY_CAPTCHA"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema }),
+  z.object({ type: z.literal("TEST_CAPTCHA"), version: z.literal(IPC_VERSION), runId: idSchema, runSessionId: idSchema, fixture: z.enum(["RECAPTCHA_V2", "RECAPTCHA_V3", "TURNSTILE", "GEETEST_V4"]) }),
   z.object({ type: z.literal("CAPTCHA_CREDENTIAL_RESPONSE"), version: z.literal(IPC_VERSION), requestId: idSchema, credential: z.object({ kind: z.enum(["CAPSOLVER", "CUSTOM_ASYNC", "CUSTOM_FAST_TOKEN"]), endpoint: z.string().url().nullable(), apiKey: z.string().min(1).max(1_024) }).nullable(), failure: z.enum(["NOT_CONFIGURED", "UNAVAILABLE", "CANCELLED"]).nullable() }),
   z.object({ type: z.literal("CHECK_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
   z.object({ type: z.literal("EMPTY_CART"), version: z.literal(IPC_VERSION), profileId: idSchema }),
@@ -480,6 +481,7 @@ export const runnerEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("RUN_ARTIFACT"), version: z.literal(IPC_VERSION), profileId: idSchema, artifact: runArtifactSchema }),
   z.object({ type: z.literal("RUN_ENDED"), version: z.literal(IPC_VERSION), profileId: idSchema, runSessionId: idSchema }),
   z.object({ type: z.literal("CAPTCHA_CREDENTIAL_REQUEST"), version: z.literal(IPC_VERSION), profileId: idSchema, runId: idSchema, runSessionId: idSchema, requestId: idSchema, provider: z.enum(["CAPSOLVER", "CUSTOM_ASYNC", "CUSTOM_FAST_TOKEN"]) }),
+  z.object({ type: z.literal("CAPTCHA_LAB_RESULT"), version: z.literal(IPC_VERSION), profileId: idSchema, runId: idSchema, runSessionId: idSchema, fixture: z.enum(["RECAPTCHA_V2", "RECAPTCHA_V3", "TURNSTILE", "GEETEST_V4"]), status: z.enum(["PASSED", "FAILED"]), message: z.string().max(500) }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_REQUEST"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema, value: z.string().min(1).max(512) }),
   z.object({ type: z.literal("CLIPBOARD_LEASE_RELEASE"), version: z.literal(IPC_VERSION), profileId: idSchema, requestId: idSchema }),
   z.object({ type: z.literal("NETWORK_USAGE"), version: z.literal(IPC_VERSION), profileId: idSchema, runId: idSchema, runSessionId: idSchema, usage: networkUsageCounterSchema }),

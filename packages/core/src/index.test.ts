@@ -48,6 +48,12 @@ describe("SessionOrchestrator", () => {
     expect(runners[0].commands.at(-1)).toMatchObject({ type: "END_RUN", runSessionId });
   });
 
+  it("forwards an allow-listed CAPTCHA Lab command only to the selected runner", async () => {
+    const runners: FakeRunner[] = []; const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
+    const selected = profile(); await orchestrator.open(selected); const runId = randomUUID(); const runSessionId = randomUUID(); orchestrator.testCaptcha(selected.id, runId, runSessionId, "TURNSTILE");
+    expect(runners[0].commands.at(-1)).toEqual({ type: "TEST_CAPTCHA", version: IPC_VERSION, runId, runSessionId, fixture: "TURNSTILE" });
+  });
+
   it("pauses and resumes automated navigation without closing the browser", async () => {
     const runners: FakeRunner[] = []; const orchestrator = new SessionOrchestrator(() => { const runner = new FakeRunner(); runners.push(runner); return runner as unknown as RunnerChild; });
     const selected = profile(); await orchestrator.open(selected);

@@ -7,7 +7,7 @@ import {
   analyticsFilterSchema, createRunAnnotationSchema, proxyProfileSchema, runAnnotationSchema, runArtifactSchema, windowBoundsSchema, runDetailSchema, runEventSchema, runMetricsSchema, runNetworkUsageSchema, runSchema, runSessionSchema, runSetupSchema, sessionMetricsSchema, shippingProfileSchema, targetCheckSchema, targetSchema, updateBrowserProfileSchema, updateProxyProfileSchema, updateShippingProfileSchema, updateTargetSchema,
   type BrowserHealthDetail, type BrowserHealthSnapshot, type BrowserProfile, type CreateBrowserProfileInput, type AppearanceSettings, type ChromeColors, type WindowBounds, type CreateProxyProfileInput, type MonitorSettings, type ProfileWarmState, type ProxyBenchmark, type ProxyProfile, type RunNetworkUsage,
   type AnalyticsFilter, type AnalyticsResult, type CaptchaProviderConfig, type CaptchaProviderDiagnostic, type CaptchaProviderKind, type CaptchaSettings, type CreateRunAnnotationInput, type CreateRunInput, type CreateRunSetupInput, type CreateShippingProfileInput, type CreateTargetInput, type Run, type RunAnnotation, type RunArtifact, type RunDetail, type RunEnvironment, type RunEvent, type RunMetrics, type RunSession, type RunSetup, type SessionMetrics, type ShippingDetails, type ShippingProfile, type Target, type TargetCheck, type TargetSnapshot, type UpdateCaptchaSettingsInput,
-  budgetStatusSchema, costBudgetSchema, costQuerySchema, costSummarySchema, createManualCostSnapshotSchema, estimateCostMicrosUsd, providerBalanceSnapshotSchema, providerUsageRecordSchema, resolveBudgetPeriod, resolveCostPeriod, upsertCostBudgetSchema,
+  budgetStatusSchema, costBudgetSchema, costQuerySchema, costSummarySchema, createManualCostSnapshotSchema, estimateCostMicrosUsd, providerBalanceSnapshotSchema, providerUsageRecordSchema, resolveBudgetPeriod, resolveCostPeriod, resolveCostSeries, upsertCostBudgetSchema,
   type BudgetStatus, type CostBudget, type CostQuery, type CostSummary, type CreateManualCostSnapshotInput, type ProviderBalanceSnapshot, type ProviderUsageRecord, type UpsertCostBudgetInput,
   type UpdateBrowserProfileInput, type UpdateProxyProfileInput, type UpdateShippingProfileInput, type UpdateTargetInput
 } from "@copify/shared";
@@ -277,6 +277,37 @@ export class ProfileRepository {
         provider_kind TEXT PRIMARY KEY NOT NULL, api_key_secret_id TEXT NOT NULL, updated_at INTEGER NOT NULL
       );`);
     }
+    if (version < 19) {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS captcha_cost_records (
+        event_id TEXT PRIMARY KEY NOT NULL, occurred_at INTEGER NOT NULL, run_id TEXT NOT NULL, run_session_id TEXT,
+        browser_profile_id TEXT, store_id TEXT, provider_kind TEXT, provider_label TEXT, captcha_kind TEXT NOT NULL,
+        strategy TEXT NOT NULL, attempt INTEGER NOT NULL, cost_micros_usd INTEGER, authority TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS captcha_cost_records_period_idx ON captcha_cost_records(occurred_at,provider_kind);
+      CREATE INDEX IF NOT EXISTS captcha_cost_records_run_idx ON captcha_cost_records(run_id,occurred_at);
+      CREATE INDEX IF NOT EXISTS captcha_cost_records_store_idx ON captcha_cost_records(store_id,occurred_at);`);
+      const hasCostBudgets=Boolean(this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cost_budgets'").get());
+      if(hasCostBudgets)this.sql.exec(`ALTER TABLE cost_budgets RENAME TO cost_budgets_v18;
+      CREATE TABLE cost_budgets (
+        id TEXT PRIMARY KEY NOT NULL, category TEXT NOT NULL, provider TEXT NOT NULL, cadence TEXT NOT NULL, limit_micros_usd INTEGER NOT NULL,
+        starting_credit_micros_usd INTEGER, timezone_id TEXT NOT NULL, thresholds_json TEXT NOT NULL, hard_cap INTEGER NOT NULL,
+        enabled INTEGER NOT NULL, enabled_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE(category,provider,cadence)
+      );
+      INSERT INTO cost_budgets (id,category,provider,cadence,limit_micros_usd,starting_credit_micros_usd,timezone_id,thresholds_json,hard_cap,enabled,enabled_at,created_at,updated_at)
+        SELECT id,'PROXY',provider,cadence,limit_micros_usd,starting_credit_micros_usd,timezone_id,thresholds_json,hard_cap,enabled,enabled_at,created_at,updated_at FROM cost_budgets_v18;
+      DROP TABLE cost_budgets_v18;`);
+      else this.sql.exec(`CREATE TABLE cost_budgets (
+        id TEXT PRIMARY KEY NOT NULL, category TEXT NOT NULL, provider TEXT NOT NULL, cadence TEXT NOT NULL, limit_micros_usd INTEGER NOT NULL,
+        starting_credit_micros_usd INTEGER, timezone_id TEXT NOT NULL, thresholds_json TEXT NOT NULL, hard_cap INTEGER NOT NULL,
+        enabled INTEGER NOT NULL, enabled_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE(category,provider,cadence)
+      );`);
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS budget_threshold_events (
+        id TEXT PRIMARY KEY NOT NULL, budget_id TEXT NOT NULL, period_start_at INTEGER NOT NULL, threshold INTEGER NOT NULL,
+        fired_at INTEGER NOT NULL, UNIQUE(budget_id,period_start_at,threshold)
+      );`);
+    }
     // Earlier v0.12 builds used the user-entered range end as a manual balance's
     // effective timestamp. A balance is observed when it is entered, so repair
     // those records once on open; this also makes today's current balance visible.
@@ -286,7 +317,7 @@ export class ProfileRepository {
     if (this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_usage_records'").get()) {
       this.sql.prepare("UPDATE provider_usage_records SET interval_end_at=recorded_at WHERE authority='MANUAL_CONFIRMED' AND interval_end_at>recorded_at").run();
     }
-    this.sql.exec("PRAGMA user_version = 18;");
+    this.sql.exec("PRAGMA user_version = 19;");
   }
 
   async list(): Promise<BrowserProfile[]> {
@@ -688,9 +719,30 @@ export class ProfileRepository {
 
   async addRunEvent(event: RunEvent): Promise<RunEvent> {
     const value = runEventSchema.parse(event);
-    this.sql.prepare("INSERT INTO run_events (id,run_id,run_session_id,wall_time_ms,elapsed_ns,type,state_before,state_after,payload_json) VALUES (?,?,?,?,?,?,?,?,?)")
-      .run(value.id, value.runId, value.runSessionId, value.wallTimeMs, value.elapsedNs, value.type, value.stateBefore, value.stateAfter, JSON.stringify(value.payload));
+    this.transaction(() => {
+      this.sql.prepare("INSERT INTO run_events (id,run_id,run_session_id,wall_time_ms,elapsed_ns,type,state_before,state_after,payload_json) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(value.id, value.runId, value.runSessionId, value.wallTimeMs, value.elapsedNs, value.type, value.stateBefore, value.stateAfter, JSON.stringify(value.payload));
+      this.recordCaptchaCostEventSync(value);
+    });
     return value;
+  }
+
+  async recordCaptchaCostEvent(event: RunEvent, browserProfileId: string | null = null, storeId: string | null = null): Promise<boolean> {
+    const value = runEventSchema.parse(event);
+    return this.recordCaptchaCostEventSync(value, browserProfileId, storeId);
+  }
+
+  private recordCaptchaCostEventSync(event: RunEvent, browserProfileId: string | null = null, storeId: string | null = null): boolean {
+    if (event.type !== "CAPTCHA_TOKEN_ACQUIRED") return false;
+    const payload = event.payload; const rawCost = payload.costMicrosUsd; const cost = typeof rawCost === "number" && Number.isSafeInteger(rawCost) && rawCost >= 0 ? rawCost : null;
+    const session = event.runSessionId ? this.getRow("SELECT browser_profile_id FROM run_sessions WHERE id=?", [event.runSessionId]) : undefined;
+    const run = this.getRow("SELECT target_snapshot_json FROM runs WHERE id=?", [event.runId]);
+    let recordedStoreId = storeId; if (!recordedStoreId && run?.target_snapshot_json) { try { recordedStoreId = String(JSON.parse(String(run.target_snapshot_json)).storeId ?? "") || null; } catch { recordedStoreId = null; } }
+    return this.sql.prepare(`INSERT OR IGNORE INTO captcha_cost_records
+      (event_id,occurred_at,run_id,run_session_id,browser_profile_id,store_id,provider_kind,provider_label,captcha_kind,strategy,attempt,cost_micros_usd,authority)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(event.id,event.wallTimeMs,event.runId,event.runSessionId,browserProfileId??session?.browser_profile_id??null,recordedStoreId,
+        typeof payload.providerId==="string"?payload.providerId:null,typeof payload.providerLabel==="string"?payload.providerLabel:null,String(payload.kind??"UNKNOWN"),String(payload.strategy??"UNKNOWN"),
+        typeof payload.attempt==="number"&&Number.isSafeInteger(payload.attempt)?payload.attempt:1,cost,cost===null?"UNAVAILABLE":"PROVIDER_REPORTED").changes > 0;
   }
 
   async addRunArtifact(artifact: RunArtifact): Promise<RunArtifact> {
@@ -824,13 +876,13 @@ export class ProfileRepository {
     };
   }
 
-  async listCostBudgets(): Promise<CostBudget[]> { return this.all("SELECT * FROM cost_budgets ORDER BY provider,cadence").map(mapCostBudget); }
+  async listCostBudgets(): Promise<CostBudget[]> { return this.all("SELECT * FROM cost_budgets ORDER BY category,provider,cadence").map(mapCostBudget); }
   async upsertCostBudget(input: UpsertCostBudgetInput): Promise<CostBudget> {
-    const value = upsertCostBudgetSchema.parse(input); const current = this.getRow("SELECT * FROM cost_budgets WHERE provider=? AND cadence=?", [value.provider, value.cadence]); const now = Date.now();
+    const value = upsertCostBudgetSchema.parse(input); const current = this.getRow("SELECT * FROM cost_budgets WHERE category=? AND provider=? AND cadence=?", [value.category, value.provider, value.cadence]); const now = Date.now();
     const budget = costBudgetSchema.parse({ ...value, id: current?.id ?? value.id ?? randomUUID(), enabledAt: current ? Number(current.enabled_at) : now, createdAt: current ? Number(current.created_at) : now, updatedAt: now });
-    this.sql.prepare(`INSERT INTO cost_budgets (id,provider,cadence,limit_micros_usd,starting_credit_micros_usd,timezone_id,thresholds_json,hard_cap,enabled,enabled_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(provider,cadence) DO UPDATE SET limit_micros_usd=excluded.limit_micros_usd,starting_credit_micros_usd=excluded.starting_credit_micros_usd,timezone_id=excluded.timezone_id,thresholds_json=excluded.thresholds_json,hard_cap=excluded.hard_cap,enabled=excluded.enabled,updated_at=excluded.updated_at`)
-      .run(budget.id,budget.provider,budget.cadence,budget.limitMicrosUsd,budget.startingCreditMicrosUsd,budget.timezoneId,JSON.stringify(budget.thresholds),budget.hardCap?1:0,budget.enabled?1:0,budget.enabledAt,budget.createdAt,budget.updatedAt);
+    this.sql.prepare(`INSERT INTO cost_budgets (id,category,provider,cadence,limit_micros_usd,starting_credit_micros_usd,timezone_id,thresholds_json,hard_cap,enabled,enabled_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(category,provider,cadence) DO UPDATE SET limit_micros_usd=excluded.limit_micros_usd,starting_credit_micros_usd=excluded.starting_credit_micros_usd,timezone_id=excluded.timezone_id,thresholds_json=excluded.thresholds_json,hard_cap=excluded.hard_cap,enabled=excluded.enabled,updated_at=excluded.updated_at`)
+      .run(budget.id,budget.category,budget.provider,budget.cadence,budget.limitMicrosUsd,budget.startingCreditMicrosUsd,budget.timezoneId,JSON.stringify(budget.thresholds),budget.hardCap?1:0,budget.enabled?1:0,budget.enabledAt,budget.createdAt,budget.updatedAt);
     return budget;
   }
   async removeCostBudget(id: string): Promise<boolean> { return this.sql.prepare("DELETE FROM cost_budgets WHERE id=?").run(id).changes > 0; }
@@ -839,10 +891,17 @@ export class ProfileRepository {
     const results: BudgetStatus[] = [];
     for (const budget of (await this.listCostBudgets()).filter((row) => row.enabled)) {
       const period = resolveBudgetPeriod(budget.cadence, budget.timezoneId, now); const effectiveStart = Math.max(period.startAt, budget.enabledAt);
-      const estimateRow = this.getRow("SELECT COALESCE(SUM(estimated_cost_micros_usd),0) AS total,MAX(updated_at) AS latest FROM cost_usage_buckets WHERE proxy_provider=? AND bucket_start_at>=? AND bucket_start_at<?", [budget.provider,effectiveStart,period.endAt]);
-      const confirmed = this.confirmedRange(budget.provider,effectiveStart,Math.min(period.endAt,now)); const estimate = Number(estimateRow?.total ?? 0); const latestUsage = nullableNumber(estimateRow?.latest); const useConfirmed = latestUsage !== null && confirmed.coverageStart !== null && confirmed.coverageStart <= effectiveStart && confirmed.coveredThrough !== null && confirmed.coveredThrough >= latestUsage;
-      const spent = useConfirmed ? confirmed.cost : estimate; const firedThresholds = this.all("SELECT threshold FROM budget_threshold_events WHERE budget_id=? AND period_start_at=? ORDER BY threshold", [budget.id,period.startAt]).map((row)=>Number(row.threshold));
-      results.push(budgetStatusSchema.parse({ budget, periodStartAt: period.startAt, periodEndAt: period.endAt, spentMicrosUsd: spent, authority: useConfirmed ? confirmed.authority : "COPIFY_ESTIMATED", percent: budget.limitMicrosUsd ? spent / budget.limitMicrosUsd * 100 : 0, firedThresholds, capped: budget.hardCap && spent >= budget.limitMicrosUsd, dataAgeMs: useConfirmed && confirmed.recordedAt ? Math.max(0,now-confirmed.recordedAt) : null }));
+      let spent=0; let authority:"COPIFY_ESTIMATED"|"PROVIDER_CONFIRMED"|"MANUAL_CONFIRMED"|"PROVIDER_REPORTED"="COPIFY_ESTIMATED"; let dataAgeMs:number|null=null;
+      if(budget.category==="CAPTCHA"){
+        const providerFilter=budget.provider==="ALL"?"":" AND (provider_kind=? COLLATE NOCASE OR provider_label=? COLLATE NOCASE)";const params:any[]=[effectiveStart,period.endAt];if(providerFilter)params.push(budget.provider,budget.provider);
+        const row=this.getRow(`SELECT COALESCE(SUM(cost_micros_usd),0) AS total,MAX(occurred_at) AS latest FROM captcha_cost_records WHERE occurred_at>=? AND occurred_at<?${providerFilter}`,params);spent=Number(row?.total??0);authority="PROVIDER_REPORTED";const latest=nullableNumber(row?.latest);dataAgeMs=latest===null?null:Math.max(0,now-latest);
+      }else{
+        const providerFilter=budget.provider==="ALL"?"":" AND proxy_provider=?";const params:any[]=[effectiveStart,period.endAt];if(providerFilter)params.push(budget.provider);
+        const estimateRow=this.getRow(`SELECT COALESCE(SUM(estimated_cost_micros_usd),0) AS total,MAX(updated_at) AS latest FROM cost_usage_buckets WHERE bucket_start_at>=? AND bucket_start_at<?${providerFilter}`,params);const estimate=Number(estimateRow?.total??0);const latestUsage=nullableNumber(estimateRow?.latest);
+        if(budget.provider!=="ALL"){const confirmed=this.confirmedRange(budget.provider,effectiveStart,Math.min(period.endAt,now));const useConfirmed=latestUsage!==null&&confirmed.coverageStart!==null&&confirmed.coverageStart<=effectiveStart&&confirmed.coveredThrough!==null&&confirmed.coveredThrough>=latestUsage;spent=useConfirmed?confirmed.cost:estimate;authority=useConfirmed?confirmed.authority:"COPIFY_ESTIMATED";dataAgeMs=useConfirmed&&confirmed.recordedAt?Math.max(0,now-confirmed.recordedAt):null;}else spent=estimate;
+      }
+      const firedThresholds = this.all("SELECT threshold FROM budget_threshold_events WHERE budget_id=? AND period_start_at=? ORDER BY threshold", [budget.id,period.startAt]).map((row)=>Number(row.threshold));
+      results.push(budgetStatusSchema.parse({ budget, periodStartAt: period.startAt, periodEndAt: period.endAt, spentMicrosUsd: spent, authority, percent: budget.limitMicrosUsd ? spent / budget.limitMicrosUsd * 100 : 0, firedThresholds, capped: budget.category==="PROXY"&&budget.hardCap&&spent>=budget.limitMicrosUsd, dataAgeMs }));
     } return results;
   }
 
@@ -851,17 +910,34 @@ export class ProfileRepository {
   }
 
   async queryCosts(input: CostQuery, now = Date.now()): Promise<CostSummary> {
-    const query = costQuerySchema.parse(input); const period = resolveCostPeriod(query.period, now); const providerClause = query.provider ? " AND b.proxy_provider=?" : ""; const params: any[] = [period.startAt,period.endAt]; if (query.provider) params.push(query.provider);
-    const buckets = this.all(`SELECT b.*, p.name AS browser_profile_name, r.name AS run_name FROM cost_usage_buckets b LEFT JOIN browser_profiles p ON p.id=b.browser_profile_id LEFT JOIN runs r ON r.id=b.run_id WHERE b.bucket_start_at>=? AND b.bucket_start_at<?${providerClause}`, params);
-    const groups = new Map<string,{label:string;rows:Row[]}>(); const keyFor = (row:Row):[string,string] => {
-      if (query.groupBy === "PROXY") return [String(row.proxy_profile_id ?? "direct"),String(row.proxy_name ?? "Direct")];
-      if (query.groupBy === "STORE") return [String(row.store_id ?? "unknown"),String(row.store_id ?? "Unknown store")];
-      if (query.groupBy === "SOURCE") return [String(row.source),String(row.source).toLowerCase()];
-      if (query.groupBy === "BROWSER_PROFILE") return [String(row.browser_profile_id ?? "monitor"),String(row.browser_profile_name ?? "Monitor")];
-      if (query.groupBy === "RUN") return [String(row.run_id),String(row.run_name ?? row.run_id)];
-      return [String(row.proxy_provider ?? "direct"),String(row.proxy_provider ?? "Direct")];
+    const query = costQuerySchema.parse(input); const period = resolveCostPeriod(query.period, now);
+    const proxyProviderClause = query.provider ? " AND b.proxy_provider=? COLLATE NOCASE" : ""; const proxyParams: any[] = [period.startAt,period.endAt]; if (query.provider) proxyParams.push(query.provider);
+    const buckets = query.scope==="CAPTCHA"?[]:this.all(`SELECT b.*, p.name AS browser_profile_name, r.name AS run_name FROM cost_usage_buckets b LEFT JOIN browser_profiles p ON p.id=b.browser_profile_id LEFT JOIN runs r ON r.id=b.run_id WHERE b.bucket_start_at>=? AND b.bucket_start_at<?${proxyProviderClause}`, proxyParams);
+    const captchaProviderClause=query.provider?" AND (c.provider_kind=? COLLATE NOCASE OR c.provider_label=? COLLATE NOCASE)":"";const captchaParams:any[]=[period.startAt,period.endAt];if(query.provider)captchaParams.push(query.provider,query.provider);
+    const captchaRows=query.scope==="PROXY"?[]:this.all(`SELECT c.*,p.name AS browser_profile_name,r.name AS run_name FROM captcha_cost_records c LEFT JOIN browser_profiles p ON p.id=c.browser_profile_id LEFT JOIN runs r ON r.id=c.run_id WHERE c.occurred_at>=? AND c.occurred_at<?${captchaProviderClause}`,captchaParams);
+    const groups = new Map<string,{label:string;proxyRows:Row[];captchaRows:Row[]}>();
+    const add=(key:string,label:string,category:"PROXY"|"CAPTCHA",row:Row)=>{const group=groups.get(key)??{label,proxyRows:[],captchaRows:[]};group[category==="PROXY"?"proxyRows":"captchaRows"].push(row);groups.set(key,group);};
+    const proxyKey = (row:Row):[string,string] => {
+      if(query.groupBy==="CATEGORY")return["PROXY","Proxy traffic"];
+      if(query.groupBy==="PROXY")return[String(row.proxy_profile_id??"direct"),String(row.proxy_name??"Direct")];
+      if(query.groupBy==="CAPTCHA_KIND")return["not-captcha","Not CAPTCHA"];
+      if(query.groupBy==="STORE")return[String(row.store_id??"unknown"),String(row.store_id??"Unknown store")];
+      if(query.groupBy==="SOURCE")return[String(row.source),String(row.source).toLowerCase()];
+      if(query.groupBy==="BROWSER_PROFILE")return[String(row.browser_profile_id??"monitor"),String(row.browser_profile_name??"Monitor")];
+      if(query.groupBy==="RUN")return[String(row.run_id),String(row.run_name??row.run_id)];
+      return[String(row.proxy_provider??"direct"),String(row.proxy_provider??"Direct")];
     };
-    for (const row of buckets) { const [key,label]=keyFor(row); const group=groups.get(key)??{label,rows:[]}; group.rows.push(row); groups.set(key,group); }
+    const captchaKey=(row:Row):[string,string]=>{
+      if(query.groupBy==="CATEGORY")return["CAPTCHA","CAPTCHA solves"];
+      if(query.groupBy==="PROXY")return["not-proxy","No proxy allocation"];
+      if(query.groupBy==="CAPTCHA_KIND")return[String(row.captcha_kind),String(row.captcha_kind)];
+      if(query.groupBy==="STORE")return[String(row.store_id??"unknown"),String(row.store_id??"Unknown store")];
+      if(query.groupBy==="SOURCE")return["CAPTCHA","captcha"];
+      if(query.groupBy==="BROWSER_PROFILE")return[String(row.browser_profile_id??"lab"),String(row.browser_profile_name??"CAPTCHA Lab")];
+      if(query.groupBy==="RUN")return[String(row.run_id),String(row.run_name??row.run_id)];
+      return[String(row.provider_kind??row.provider_label??"unknown"),String(row.provider_label??row.provider_kind??"Unknown CAPTCHA provider")];
+    };
+    for(const row of buckets){const[key,label]=proxyKey(row);add(key,label,"PROXY",row);}for(const row of captchaRows){const[key,label]=captchaKey(row);add(key,label,"CAPTCHA",row);}
     const pricedBytes = buckets.filter((row)=>row.proxy_profile_id && row.estimated_cost_micros_usd!==null).reduce((sum,row)=>sum+Number(row.received_bytes)+Number(row.sent_bytes),0);
     const proxiedBytes = buckets.filter((row)=>row.proxy_profile_id).reduce((sum,row)=>sum+Number(row.received_bytes)+Number(row.sent_bytes),0); const estimateValues=buckets.map((r)=>nullableNumber(r.estimated_cost_micros_usd)); const estimate=estimateValues.some((v)=>v!==null)?estimateValues.reduce<number>((s,v)=>s+(v??0),0):null;
     const providers = query.provider ? [query.provider] : [...new Set(buckets.map((row)=>row.proxy_provider).filter(Boolean).map(String))]; let confirmedCost=0; let hasConfirmed=false; let confirmedAuthority: "PROVIDER_CONFIRMED"|"MANUAL_CONFIRMED"|null=null; let confirmedAge:number|null=null;
@@ -869,9 +945,17 @@ export class ProfileRepository {
     const balanceParams: any[] = [period.endAt]; if (query.provider) balanceParams.push(query.provider); balanceParams.push(period.endAt);
     const balances=this.all(`SELECT b.* FROM provider_balance_snapshots b WHERE b.effective_at<=?${query.provider?" AND b.provider=?":""} AND NOT EXISTS (SELECT 1 FROM provider_balance_snapshots newer WHERE newer.provider=b.provider AND newer.effective_at<=? AND (newer.effective_at>b.effective_at OR (newer.effective_at=b.effective_at AND (newer.recorded_at>b.recorded_at OR (newer.recorded_at=b.recorded_at AND newer.id>b.id)))))`,balanceParams);
     const remaining=balances.length&&balances.some((r)=>r.remaining_credit_micros_usd!==null)?balances.reduce((s,r)=>s+Number(r.remaining_credit_micros_usd??0),0):null;
-    const rows=[...groups.entries()].map(([id,group])=>{ const received=group.rows.reduce((s,r)=>s+Number(r.received_bytes),0); const sent=group.rows.reduce((s,r)=>s+Number(r.sent_bytes),0); const vals=group.rows.map((r)=>nullableNumber(r.estimated_cost_micros_usd)); const estimated=vals.some((v)=>v!==null)?vals.reduce<number>((s,v)=>s+(v??0),0):null; const confirmed=query.groupBy==="PROVIDER"&&id!=="direct"?this.confirmedRange(id,period.startAt,period.endAt):null; return { id,label:group.label,receivedBytes:received,sentBytes:sent,requestCount:group.rows.reduce((s,r)=>s+Number(r.request_count),0),estimatedCostMicrosUsd:estimated,confirmedCostMicrosUsd:confirmed?.hasData?confirmed.cost:null,completeness:worstCompleteness(group.rows.map((r)=>String(r.completeness))),authority:confirmed?.hasData?confirmed.authority:(estimated!==null?"COPIFY_ESTIMATED":null),lastActivityAt:Math.max(...group.rows.map((r)=>Number(r.updated_at))) }; });
+    const rows=[...groups.entries()].map(([id,group])=>{const received=group.proxyRows.reduce((s,r)=>s+Number(r.received_bytes),0);const sent=group.proxyRows.reduce((s,r)=>s+Number(r.sent_bytes),0);const vals=group.proxyRows.map((r)=>nullableNumber(r.estimated_cost_micros_usd));const estimated=vals.some((v)=>v!==null)?vals.reduce<number>((s,v)=>s+(v??0),0):null;const providerConfirmed=query.groupBy==="PROVIDER"&&group.proxyRows.length&&id!=="direct"?this.confirmedRange(id,period.startAt,period.endAt):null;const captchaCosts=group.captchaRows.map((r)=>nullableNumber(r.cost_micros_usd));const captchaKnown=captchaCosts.some((v)=>v!==null)?captchaCosts.reduce<number>((s,v)=>s+(v??0),0):null;const confirmed=(providerConfirmed?.hasData?providerConfirmed.cost:0)+(captchaKnown??0);const hasRowConfirmed=Boolean(providerConfirmed?.hasData)||captchaKnown!==null;const mixed=group.proxyRows.length>0&&group.captchaRows.length>0;const activity=[...group.proxyRows.map((r)=>Number(r.updated_at)),...group.captchaRows.map((r)=>Number(r.occurred_at))];return{id,label:group.label,category:mixed?"MIXED":group.captchaRows.length?"CAPTCHA":"PROXY",captchaSolveCount:group.captchaRows.length,unknownCaptchaCostCount:captchaCosts.filter((v)=>v===null).length,receivedBytes:received,sentBytes:sent,requestCount:group.proxyRows.reduce((s,r)=>s+Number(r.request_count),0),estimatedCostMicrosUsd:estimated,confirmedCostMicrosUsd:hasRowConfirmed?confirmed:null,completeness:group.proxyRows.length?worstCompleteness(group.proxyRows.map((r)=>String(r.completeness))):captchaKnown===null?"UNSUPPORTED":"EXACT",authority:mixed?"MIXED":providerConfirmed?.hasData?providerConfirmed.authority:captchaKnown!==null?"PROVIDER_REPORTED":estimated!==null?"COPIFY_ESTIMATED":null,lastActivityAt:activity.length?Math.max(...activity):null};});
+    const plan=resolveCostSeries(period.startAt,period.endAt,period.timezoneId);
+    const points=plan.edges.slice(0,-1).map((startAt,index)=>({startAt,endAt:plan.edges[index+1]!,proxyCosts:[] as (number|null)[],captchaCosts:[] as (number|null)[],receivedBytes:0,sentBytes:0,requestCount:0,captchaSolveCount:0}));
+    const pointAt=(at:number)=>{let low=0,high=points.length-1;while(low<=high){const mid=(low+high)>>1;const point=points[mid]!;if(at<point.startAt)high=mid-1;else if(at>=point.endAt)low=mid+1;else return point;}return undefined;};
+    for(const row of buckets){const point=pointAt(Number(row.bucket_start_at));if(!point)continue;point.proxyCosts.push(nullableNumber(row.estimated_cost_micros_usd));point.receivedBytes+=Number(row.received_bytes);point.sentBytes+=Number(row.sent_bytes);point.requestCount+=Number(row.request_count);}
+    for(const row of captchaRows){const point=pointAt(Number(row.occurred_at));if(!point)continue;point.captchaCosts.push(nullableNumber(row.cost_micros_usd));point.captchaSolveCount+=1;}
+    const known=(values:(number|null)[])=>values.some((value)=>value!==null)?values.reduce<number>((sum,value)=>sum+(value??0),0):null;
+    const series=points.map(({proxyCosts,captchaCosts,...point})=>({...point,proxyCostMicrosUsd:known(proxyCosts),captchaCostMicrosUsd:known(captchaCosts)}));
     const confirmedComparable = providers.length > 0 && providers.every((provider) => this.confirmedRange(provider,period.startAt,period.endAt).coversRange);
-    return costSummarySchema.parse({period,estimatedCostMicrosUsd:estimate,confirmedCostMicrosUsd:hasConfirmed?confirmedCost:null,confirmedAuthority,confirmedDifferenceMicrosUsd:hasConfirmed&&confirmedComparable&&estimate!==null?confirmedCost-estimate:null,receivedBytes:buckets.reduce((s,r)=>s+Number(r.received_bytes),0),sentBytes:buckets.reduce((s,r)=>s+Number(r.sent_bytes),0),requestCount:buckets.reduce((s,r)=>s+Number(r.request_count),0),remainingCreditMicrosUsd:remaining,estimationCoverage:proxiedBytes?pricedBytes/proxiedBytes:null,confirmedDataAgeMs:confirmedAge,rows,budgets:await this.getBudgetStatuses(now),updatedAt:now});
+    const captchaValues=captchaRows.map((row)=>nullableNumber(row.cost_micros_usd));const captchaCost=captchaValues.some((value)=>value!==null)?captchaValues.reduce<number>((sum,value)=>sum+(value??0),0):null;const proxyKnown=hasConfirmed&&confirmedComparable?confirmedCost:estimate;const totalKnown=proxyKnown===null&&captchaCost===null?null:(proxyKnown??0)+(captchaCost??0);
+    return costSummarySchema.parse({period,estimatedCostMicrosUsd:estimate,confirmedCostMicrosUsd:hasConfirmed?confirmedCost:null,confirmedAuthority,confirmedDifferenceMicrosUsd:hasConfirmed&&confirmedComparable&&estimate!==null?confirmedCost-estimate:null,captchaCostMicrosUsd:captchaCost,captchaSolveCount:captchaRows.length,unknownCaptchaCostCount:captchaValues.filter((value)=>value===null).length,totalKnownCostMicrosUsd:totalKnown,receivedBytes:buckets.reduce((s,r)=>s+Number(r.received_bytes),0),sentBytes:buckets.reduce((s,r)=>s+Number(r.sent_bytes),0),requestCount:buckets.reduce((s,r)=>s+Number(r.request_count),0),remainingCreditMicrosUsd:remaining,estimationCoverage:proxiedBytes?pricedBytes/proxiedBytes:null,confirmedDataAgeMs:confirmedAge,rows,budgets:await this.getBudgetStatuses(now),seriesGranularity:plan.granularity,series,updatedAt:now});
   }
   async getRunArtifact(id: string): Promise<RunArtifact | undefined> { const row = this.getRow("SELECT * FROM run_artifacts WHERE id=?", [id]); return row ? runArtifactSchema.parse(mapRunArtifact(row)) : undefined; }
   async setRunDiscoverySnapshot(id: string, snapshot: Run["discoverySnapshot"]): Promise<void> { this.sql.prepare("UPDATE runs SET discovery_snapshot_json=?,updated_at=? WHERE id=?").run(snapshot ? JSON.stringify(snapshot) : null, Date.now(), id); }
@@ -1022,7 +1106,7 @@ function mapRunNetworkUsage(row: Row): Record<string, unknown> {
 }
 function mapProviderUsage(row: Row): ProviderUsageRecord { return providerUsageRecordSchema.parse({id:row.id,provider:row.provider,authority:row.authority,intervalStartAt:Number(row.interval_start_at),intervalEndAt:Number(row.interval_end_at),receivedBytes:nullableNumber(row.received_bytes),requestCount:nullableNumber(row.request_count),billedCostMicrosUsd:nullableNumber(row.billed_cost_micros_usd),planLabel:row.plan_label??null,importBatchId:row.import_batch_id??null,recordedAt:Number(row.recorded_at)}); }
 function mapProviderBalance(row: Row): ProviderBalanceSnapshot { return providerBalanceSnapshotSchema.parse({id:row.id,provider:row.provider,authority:row.authority,effectiveAt:Number(row.effective_at),remainingCreditMicrosUsd:nullableNumber(row.remaining_credit_micros_usd),remainingBytes:nullableNumber(row.remaining_bytes),recordedAt:Number(row.recorded_at)}); }
-function mapCostBudget(row: Row): CostBudget { return costBudgetSchema.parse({id:row.id,provider:row.provider,cadence:row.cadence,limitMicrosUsd:Number(row.limit_micros_usd),startingCreditMicrosUsd:nullableNumber(row.starting_credit_micros_usd),timezoneId:row.timezone_id,thresholds:JSON.parse(String(row.thresholds_json)),hardCap:Boolean(row.hard_cap),enabled:Boolean(row.enabled),enabledAt:Number(row.enabled_at),createdAt:Number(row.created_at),updatedAt:Number(row.updated_at)}); }
+function mapCostBudget(row: Row): CostBudget { return costBudgetSchema.parse({id:row.id,category:row.category??"PROXY",provider:row.provider,cadence:row.cadence,limitMicrosUsd:Number(row.limit_micros_usd),startingCreditMicrosUsd:nullableNumber(row.starting_credit_micros_usd),timezoneId:row.timezone_id,thresholds:JSON.parse(String(row.thresholds_json)),hardCap:Boolean(row.hard_cap),enabled:Boolean(row.enabled),enabledAt:Number(row.enabled_at),createdAt:Number(row.created_at),updatedAt:Number(row.updated_at)}); }
 function worstCompleteness(values:string[]):"EXACT"|"PARTIAL"|"UNSUPPORTED" { return values.includes("UNSUPPORTED")?"UNSUPPORTED":values.includes("PARTIAL")?"PARTIAL":"EXACT"; }
 function mapRunArtifact(row: Row): Record<string, unknown> {
   return { id: row.id, runId: row.run_id, runSessionId: row.run_session_id, kind: row.kind, relativePath: row.relative_path, sensitive: Boolean(row.sensitive), createdAt: Number(row.created_at) };

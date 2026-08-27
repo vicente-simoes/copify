@@ -1316,13 +1316,18 @@ and notifications; it does not create a separate cookie context. The Harvester
 therefore retains the runner's warmed storefront and Google login state, which
 maximizes legitimate one-click challenge passes.
 
-The runner supports Cloudflare Turnstile, reCAPTCHA v2/v3, and hCaptcha. It
-observes provider callbacks and response elements including:
+The runner supports Cloudflare Turnstile, reCAPTCHA v2/v3, hCaptcha, DataDome
+Slider/Interstitial, AWS WAF CAPTCHA, Arkose Labs FunCaptcha, and GeeTest v3/v4.
+It observes provider callbacks, challenge configuration, clearance-cookie
+completion, and response elements including:
 
 ```text
 textarea[name="g-recaptcha-response"]
 input[name="cf-turnstile-response"]
 textarea[name="h-captcha-response"]
+input[name="fc-token"]
+input[name="geetest_validate"]
+input[name="lot_number"]
 ```
 
 When a non-empty solved response appears, the runner captures it only in memory,
@@ -1347,13 +1352,21 @@ interface CaptchaSolver {
 Adapters are provided for CapSolver and compatible fast-token APIs. CapBypass,
 NSLSolver, and custom endpoints use the same interface. A challenge extractor
 collects the site key, target URL, challenge type, action/cData/chlPageData where
-present, and other provider-required parameters. It submits an asynchronous
-request, polls within the configured SLA, and injects the returned token directly
-into the challenged form or runner payload.
+present, DataDome challenge URL plus matching route/user-agent, AWS WAF challenge
+parameters, Arkose public key/blob/subdomain, and GeeTest v3/v4 configuration. It
+submits an asynchronous request, polls within the configured SLA, and applies the
+returned token, structured response fields, or clearance cookie directly to the
+challenged browser context. DataDome must use the runner's existing proxy route;
+it is never sent as a proxyless task.
 
 Provider credentials are decrypted only for the request lifetime. Raw solver
 requests/responses, tokens, credentials, and credential-bearing endpoints are not
 persisted. The automated solve target is less than four seconds.
+
+The built-in CapSolver adapter covers its currently documented DataDome, AWS WAF,
+and GeeTest task contracts. Arkose Labs FunCaptcha remains available through the
+Local Harvester and compatible custom providers; the CapSolver adapter returns a
+typed `UNSUPPORTED_CHALLENGE` until CapSolver publishes an Arkose API contract.
 
 ### 19.3 Mode C: Dynamic failover
 
@@ -1533,7 +1546,8 @@ type NewRunEventType =
 
 interface CaptchaRunEventPayloads {
   CAPTCHA_CHALLENGE_DETECTED: {
-    captchaKind: "turnstile" | "recaptcha_v2" | "recaptcha_v3" | "hcaptcha";
+    captchaKind: "turnstile" | "recaptcha_v2" | "recaptcha_v3" | "hcaptcha"
+      | "datadome" | "aws_waf" | "funcaptcha" | "geetest_v3" | "geetest_v4";
     pageHost: string;
   };
   CAPTCHA_SOLVE_REQUESTED: {
@@ -2226,7 +2240,8 @@ Browsers   browser profiles, routes, cart state
 Targets    what to watch for and which variants are acceptable
 Shipping   addresses and which browser uses which
 Payments   encrypted payment profiles and browser assignments
-Settings   Routes · Monitor · Stores · CAPTCHA · Costs · Advanced · Appearance · About
+Settings   Routes · Monitor · Stores · CAPTCHA · Costs · Appearance · About
+           Advanced appears only when About → Show experimental settings is enabled
 ```
 
 There is no separate dashboard. A dashboard that only summarises other pages adds
@@ -2995,6 +3010,8 @@ Provider data is represented with an explicit authority value:
 - `COPIFY_ESTIMATED` — calculated from Copify's local measurements.
 - `PROVIDER_CONFIRMED` — imported or synchronised from a provider report/API.
 - `MANUAL_CONFIRMED` — operator-entered snapshot, including its entered time.
+- `PROVIDER_REPORTED` — a per-solve charge returned by a CAPTCHA provider.
+- `MIXED` — a presentation-only aggregate containing more than one authority.
 
 The UI must never add estimated and provider-confirmed spend together. It should
 instead show the latest confirmed value alongside the comparable Copify estimate
@@ -3004,19 +3021,29 @@ and their difference, with measurement completeness and data age.
 
 Add a dedicated Settings tab named **Costs & budgets** with:
 
-- headline cards for estimated and confirmed spend, proxy traffic, remaining
-  provider credit where known, and estimation coverage for the selected period.
+- headline cards for total known spend, provider-reported CAPTCHA spend, estimated
+  and confirmed proxy spend, proxy traffic, remaining provider credit where known,
+  and estimation coverage for the selected period.
 - period selector: Today, last 24 hours, rolling 7 days, calendar month, and
   custom range; all period labels state their timezone.
-- breakdowns by provider, proxy profile, store, monitor versus browser, browser
-  profile, and run. Rows show bytes, requests, estimated cost, confirmed cost when
-  attributable, completeness, and most recent activity.
+- a bucketed spend series over the selected period, returned on the summary as
+  `series` plus `seriesGranularity`. The bucket follows the span rather than the
+  preset — hourly to 48 hours, daily to 120 days, weekly beyond — and day and
+  week edges are the operator's local calendar boundaries, not UTC ones. Each
+  point carries proxy and CAPTCHA cost separately, along with its bytes,
+  requests, and solve count, so the chart can stack the two categories without
+  the renderer re-deriving anything. A point's cost is null when nothing in that
+  bucket was priced, which is distinct from a bucket that cost zero.
+- filters for all, proxy, or CAPTCHA costs and breakdowns by category, provider,
+  proxy profile, CAPTCHA kind, store, monitor versus browser, browser profile, and
+  run. Rows show the metrics relevant to their category, authority, completeness,
+  and most recent activity.
 - a reconciliation panel: provider connection/snapshot status, last successful
   refresh/import time, current balance/credit, imported report history, data age,
   and a clearly labelled refresh/import action.
-- a budget panel supporting daily, weekly, and monthly budgets in USD (stored as
-  integer micro-USD), with configurable warning thresholds and an optional
-  starting-provider-credit figure.
+- a budget panel supporting independent proxy and CAPTCHA daily, weekly, and
+  monthly budgets in USD (stored as integer micro-USD), with configurable warning
+  thresholds and an optional starting-provider-credit figure for proxy budgets.
 - budget progress based on provider-confirmed spend when it exists for the period;
   otherwise it uses Copify's estimate and displays that limitation prominently.
 
@@ -3026,6 +3053,7 @@ They are informational by default. An operator may separately enable a
 monitor-only hard cap: when the selected budget threshold is reached, Copify stops
 new monitor requests and displays an operator alert. A hard cap must never close,
 alter, or interrupt an already-running checkout browser, cart, or payment handoff.
+CAPTCHA budgets are alert-only and must never cancel, delay, or prevent a solve.
 
 Budgets apply prospectively to traffic observed after the budget is enabled; the
 UI may include prior usage in its chart but must label it as pre-budget.
@@ -3092,7 +3120,7 @@ Success criteria:
 
 ### v0.13 — Hybrid CAPTCHA Engine & Strategy Routing
 
-**Implementation status:** Complete in the working tree; release/version bump pending explicit approval.
+**Implementation status:** Packaged locally as v0.13.0; commit, tag, publishing, and installed-app smoke testing remain separate release actions.
 
 Copify resolves supported checkout challenges locally by default while allowing
 operators to opt individual sessions into low-latency API solving. The engine is
@@ -3102,8 +3130,9 @@ Copify service or a second browser profile.
 #### Deliverables
 
 - Add the headed Local Harvester in the challenged runner's persistent
-  `BrowserContext`, with automatic token extraction/injection for Turnstile,
-  reCAPTCHA v2/v3, and hCaptcha.
+  `BrowserContext`, with automatic completion detection and solution application
+  for Turnstile, reCAPTCHA v2/v3, hCaptcha, DataDome, AWS WAF, Arkose Labs
+  FunCaptcha, and GeeTest v3/v4.
 - Add the pluggable `CaptchaSolver` contract, a CapSolver adapter, compatible
   fast-token/custom endpoint support, asynchronous polling, cancellation, and
   normalized provider diagnostics.
@@ -3119,11 +3148,17 @@ Copify service or a second browser profile.
   and balance only and do not poll during a drop.
 - Persist structured challenge, request, acquisition, and failover events with
   solve duration and normalized micro-USD cost, never the token or provider secret.
+- Project each `CAPTCHA_TOKEN_ACQUIRED` event into the cost ledger exactly once,
+  including Lab solves, and expose provider/kind/store/profile/run breakdowns plus
+  independent CAPTCHA budgets. Validation and completion events repeat diagnostic
+  cost fields but must not create additional charges. Unknown provider costs remain
+  visible as unpriced solves and are excluded from spend totals.
 
 #### Success criteria
 
-- Successful API solves return and inject a usable token within an SLA of less
-  than four seconds under a healthy provider response.
+- Successful API solves return and apply a usable solution within the provider's
+  documented latency range. The sub-four-second target applies to fast token
+  challenges; interactive and clearance-cookie systems may take longer.
 - API-with-fallback opens the Harvester at the configured threshold (5,000 ms by
   default) or immediately on terminal provider failure, ignores late API results,
   and unblocks the existing checkout without page-state loss.

@@ -2,15 +2,16 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserContext, CDPSession, Locator, Page } from "rebrowser-playwright";
-import { IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type CaptchaChallenge, type CaptchaFailureCode, type CaptchaProviderKind, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
+import { CAPTCHA_LAB_FIXTURES, IPC_VERSION, runnerCommandSchema, type BrowserDriverMetadata, type CaptchaChallenge, type CaptchaFailureCode, type CaptchaLabFixture, type CaptchaProviderKind, type ProductVariant, type ProfileCoherenceSummary, type RunnerBrowserDriver, type RunnerEvent, type RunnerProxy, type RunnerRecording, type RunArtifact, type RunEvent, type RunnerShipping } from "@copify/shared";
 import { routeFromIdentity, verifyRoute } from "./network";
 import { BrowserDriverError, createBrowserDriver, type DriverSession } from "./drivers";
 import { externalCoherence, resolveNetworkCoherence } from "./coherence";
 import { HumanInput, type ClipboardPasteClient, type HumanInputTelemetry } from "./human-input";
-import { extractCaptchaChallenge, hasCaptchaResponse, injectCaptchaToken, installCaptchaCallbackBridge, waitForLocalCaptcha } from "./captcha-page";
+import { extractCaptchaChallenge, hasCaptchaResponse, injectCaptchaSolution, injectCaptchaToken, installCaptchaCallbackBridge, waitForLocalCaptcha } from "./captcha-page";
 import { CaptchaProviderError, solveCaptcha, type CaptchaCredentialLease } from "./captcha-providers";
 
 let context: BrowserContext | undefined;
+let activeProxy: RunnerProxy | null = null;
 let profileId: string | undefined;
 let profileUserDataDir: string | undefined;
 let stopping = false;
@@ -36,6 +37,7 @@ let requestCount = 0; let navigationCount = 0; let atcAttempts = 0; let forbidde
 let trafficReceivedBytes = 0; let trafficSentBytes = 0; let trafficCdpAttached = 0; let trafficFallbackSeen = false; let observedPages = new WeakSet<Page>(); let trafficSessions: CDPSession[] = [];
 let paymentHandoffLatch: PaymentHandoffLatch | undefined;
 let usageTimer:NodeJS.Timeout|undefined;
+let captchaLabFixture: CaptchaLabFixture | undefined;
 
 process.on("message", async (message: unknown) => {
   const command = runnerCommandSchema.safeParse(message); if (!command.success) return;
@@ -44,6 +46,7 @@ process.on("message", async (message: unknown) => {
   if (command.data.type === "ASSIST_TARGET") await assistTarget(command.data);
   if (command.data.type === "RESUME_ASSIST") await resumeAssist(command.data.runId, command.data.runSessionId);
   if (command.data.type === "RETRY_CAPTCHA") await retryApiCaptcha(command.data.runId, command.data.runSessionId);
+  if (command.data.type === "TEST_CAPTCHA") await testCaptcha(command.data.runId, command.data.runSessionId, command.data.fixture);
   if (command.data.type === "CAPTCHA_CREDENTIAL_RESPONSE") { const resolve = pendingCaptchaCredentials.get(command.data.requestId); if (resolve) { pendingCaptchaCredentials.delete(command.data.requestId); resolve(command.data.credential); } }
   if (command.data.type === "CHECK_CART") await checkCart(command.data.profileId);
   if (command.data.type === "EMPTY_CART") await emptyCart(command.data.profileId);
@@ -57,7 +60,7 @@ process.on("message", async (message: unknown) => {
 });
 
 async function start(id: string, userDataDir: string, driver: RunnerBrowserDriver, proxy: RunnerProxy | null, probeUrl: string, runRecording: RunnerRecording | null, background: boolean): Promise<void> {
-  if (context) return; profileId = id; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; captchaGeneration = captchaAttempt = 0; retryCaptcha = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); for (const resolve of pendingCaptchaCredentials.values()) resolve(null); pendingCaptchaCredentials.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
+  if (context) return; profileId = id; activeProxy = proxy; profileUserDataDir = userDataDir; recording = runRecording ?? undefined; startedMono = process.hrtime.bigint(); assistPage = undefined; pendingAssist = undefined; cartResumeMode = undefined; assistState = "OBSERVING"; tracingStoppedForPrivacy = false; automationPausedUntil = null; coherence = undefined; captchaLabFixture = undefined; paymentHandoffLatch?.stop(); paymentHandoffLatch = new PaymentHandoffLatch(); humanInputs = new WeakMap(); heldClipboardLeaseId = undefined; captchaGeneration = captchaAttempt = 0; retryCaptcha = undefined; for (const resolve of pendingClipboardLeases.values()) resolve(false); pendingClipboardLeases.clear(); for (const resolve of pendingCaptchaCredentials.values()) resolve(null); pendingCaptchaCredentials.clear(); requestCount = navigationCount = atcAttempts = forbiddenCount = rateLimitedCount = challengeCount = checkoutFailures = 0; pageLoads = []; trafficReceivedBytes = trafficSentBytes = trafficCdpAttached = 0; trafficFallbackSeen = false; observedPages = new WeakSet(); trafficSessions = [];
   try {
     await disableChromeTranslation(userDataDir);
     const persistentOptions: NonNullable<import("./drivers").DriverLaunchInput["persistentOptions"]> = {};
@@ -512,10 +515,66 @@ async function firstVisible(candidates: Locator[], timeout: number): Promise<Loc
   return undefined;
 }
 
+async function testCaptcha(runId: string, runSessionId: string, fixture: CaptchaLabFixture): Promise<void> {
+  if (!context || !recording || !profileId || recording.runId !== runId || recording.runSessionId !== runSessionId || captchaLabFixture) return;
+  captchaLabFixture = fixture;
+  const result = (status: "PASSED" | "FAILED", message: string): void => send({ type: "CAPTCHA_LAB_RESULT", version: IPC_VERSION, profileId: profileId!, runId, runSessionId, fixture, status, message: sanitizeText(message).slice(0, 500) });
+  try {
+    const page = context.pages()[0] ?? await context.newPage(); assistPage = page;
+    await page.goto(CAPTCHA_LAB_FIXTURES[fixture].url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    let detected: Awaited<ReturnType<typeof extractCaptchaChallenge>> = null;
+    const deadline = Date.now() + 20_000;
+    while (!detected && Date.now() < deadline) { detected = await extractCaptchaChallenge(page); if (!detected) await new Promise((resolve) => setTimeout(resolve, 250)); }
+    if (!detected) throw new Error("The public fixture did not expose a supported CAPTCHA within 20 seconds.");
+    if (detected.challenge.kind !== fixture) throw new Error(`Expected ${fixture}, but detected ${detected.challenge.kind}.`);
+    if (fixture === "RECAPTCHA_V3") detected.challenge.action = "examples/v3scores";
+    if (fixture === "RECAPTCHA_V3" && recording.captcha.strategy === "MANUAL_HARVESTER" && !await hasCaptchaResponse(page)) await page.evaluate(async ({ siteKey, action }) => {
+      const api = (window as any).grecaptcha; if (!api?.execute) throw new Error("The fixture did not expose grecaptcha.execute().");
+      const token = await api.execute(siteKey, { action }); const bridge = (window as any).__copifyCaptchaBridge; if (bridge) bridge.completed = Boolean(token);
+      const callback = (window as any).verifyRecaptcha; if (typeof callback === "function") callback(token);
+    }, { siteKey: detected.challenge.siteKey, action: detected.challenge.action });
+    const solved = await resolveCaptcha(page, detected.challenge);
+    if (!solved) throw new Error(lastCaptchaFailure ? `The resolver stopped with ${lastCaptchaFailure}.` : "The resolver did not complete the challenge.");
+    await submitCaptchaLabFixture(page, fixture);
+    result("PASSED", "The Copify resolver completed and the public fixture was submitted. Review the visible fixture result before stopping the Lab.");
+  } catch (error) {
+    result("FAILED", error instanceof Error ? error.message : "The CAPTCHA Lab failed.");
+  }
+}
+
+async function submitCaptchaLabFixture(page: Page, fixture: CaptchaLabFixture): Promise<void> {
+  if (fixture === "RECAPTCHA_V2") {
+    const submit = page.locator("input[type='submit'],button[type='submit']").first();
+    if (await submit.isVisible().catch(() => false)) await Promise.all([page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined), submit.click()]);
+    return;
+  }
+  if (fixture === "TURNSTILE") {
+    const submit = page.locator("button[type='submit'],input[type='submit']").first();
+    if (!await submit.isVisible().catch(() => false)) throw new Error("The Turnstile fixture did not expose its submit control.");
+    await Promise.all([page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined), submit.click()]);
+    await page.waitForTimeout(500);
+    const body = (await page.locator("body").innerText().catch(() => "")).slice(0, 10_000);
+    const challenge = await extractCaptchaChallenge(page);
+    if (challenge || /verification failed|token was not valid|invalid token/i.test(body)) throw new Error("The Turnstile fixture rejected the solver token.");
+    if (!/success|verified|valid/i.test(body)) throw new Error("The Turnstile fixture returned an ambiguous verification result.");
+    return;
+  }
+  if (fixture === "GEETEST_V4") {
+    const submit = page.getByRole("button", { name: /^submit$/i }).first();
+    if (await submit.isVisible().catch(() => false)) await submit.click();
+    await page.waitForTimeout(1_000);
+    const body = (await page.locator("body").innerText().catch(() => "")).slice(0, 10_000);
+    if (/verification failed|captcha failed|invalid|please.*verify/i.test(body)) throw new Error("The GeeTest fixture rejected the solver solution.");
+    return;
+  }
+  const check = page.getByRole("button", { name: /^check$/i }).first();
+  if (await check.isVisible().catch(() => false)) { await check.click(); await page.waitForTimeout(2_000); }
+}
+
 async function checkpoint(page: Page, emit = true): Promise<boolean> {
   const text = (await page.locator("body").innerText().catch(() => "")).slice(0, 20_000).toLowerCase();
   const detected = await extractCaptchaChallenge(page);
-  const reason = detected || /turnstile|captcha|recaptcha|hcaptcha/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
+  const reason = detected || /turnstile|captcha|recaptcha|hcaptcha|datadome|arkose|geetest|aws waf/.test(text) ? "CAPTCHA" : /queue|waiting room|security check|verify you are human/.test(text) ? "SECURITY_OR_QUEUE" : null;
   if (!reason) return false;
   if (reason === "CAPTCHA" && detected) {
     if (await hasCaptchaResponse(page)) return false;
@@ -556,19 +615,47 @@ async function runApiSolve(page: Page, challenge: CaptchaChallenge, generation: 
   let credential: CaptchaCredentialLease | null = null;
   try {
     credential = await requestCaptchaCredential(recording!.captcha.provider!.kind); if (!credential) throw new CaptchaProviderError("AUTH_INVALID", "The active solver is not configured.");
-    const result = await solveCaptcha(challenge, credential, recording!.captcha.solveTimeoutMs, signal);
+    const userAgent = challenge.userAgent ?? await page.evaluate(() => navigator.userAgent).catch(() => null);
+    const result = await solveCaptcha(challenge, credential, recording!.captcha.solveTimeoutMs, signal, { proxy: activeProxy, userAgent });
     if (generation !== captchaGeneration || signal.aborted) return false;
     emitRun("CAPTCHA_TOKEN_ACQUIRED", fields({ durationMs: Date.now() - started, costMicrosUsd: result.costMicrosUsd, costAuthority: result.costAuthority, outcome: "ACQUIRED" }));
-    const valid = await injectCaptchaToken(page, challenge.kind, result.token); result.token = "";
+    const valid = captchaLabFixture ? await injectCaptchaLabSolution(page, challenge, result.solution) : await injectCaptchaSolution(page, challenge.kind, result.solution); result.token = ""; for (const key of Object.keys(result.solution)) result.solution[key] = "";
     if (!valid) throw new CaptchaProviderError("INVALID_TOKEN", "The checkout did not accept the solver token.");
     if (generation !== captchaGeneration) return false;
     retryCaptcha = undefined; emitRun("CAPTCHA_TOKEN_VALIDATED", fields({ durationMs: Date.now() - started, costMicrosUsd: result.costMicrosUsd, costAuthority: result.costAuthority, outcome: "COMPLETED" }));
     transition("CHECKOUT", "CAPTCHA_SOLVE_COMPLETED", fields({ durationMs: Date.now() - started, costMicrosUsd: result.costMicrosUsd, costAuthority: result.costAuthority, outcome: "COMPLETED" })); return true;
   } catch (error) {
     const failure = error instanceof CaptchaProviderError ? error.code : "UNKNOWN"; lastCaptchaFailure = failure;
-    if (failure !== "CANCELLED") emitRun("CAPTCHA_SOLVE_FAILED", fields({ durationMs: Date.now() - started, normalizedFailure: failure, outcome: "FAILED" }));
+    if (failure !== "CANCELLED") emitRun("CAPTCHA_SOLVE_FAILED", fields({ durationMs: Date.now() - started, normalizedFailure: failure, failureDetail: sanitizeText(error instanceof Error ? error.message : "The solver failed."), outcome: "FAILED" }));
     return false;
   } finally { if (credential) credential.apiKey = ""; }
+}
+
+async function injectCaptchaLabSolution(page: Page, challenge: CaptchaChallenge, solution: Record<string, string>): Promise<boolean> {
+  const token = solution.token ?? solution.gRecaptchaResponse ?? solution.cookie ?? "";
+  if (captchaLabFixture === "RECAPTCHA_V3") {
+    return page.evaluate(async ({ value, expectedAction }) => {
+      const response = await fetch(`/recaptcha-v3-verify.php?token=${encodeURIComponent(value)}`, { credentials: "same-origin" });
+      if (!response.ok) return false;
+      const result = await response.json().catch(() => null) as { success?: boolean; action?: string } | null;
+      return result?.success === true && (!result.action || result.action === expectedAction);
+    }, { value: token, expectedAction: challenge.action }).catch(() => false);
+  }
+  if (captchaLabFixture === "TURNSTILE") {
+    for (const frame of page.frames()) await frame.evaluate((value) => {
+      for (const field of document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>("textarea[name='cf-turnstile-response'],input[name='cf-turnstile-response']")) {
+        const setter = Object.getOwnPropertyDescriptor(field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")?.set;
+        setter?.call(field, value);
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      const bridge = (window as any).__copifyCaptchaBridge;
+      if (bridge) { bridge.completed = true; for (const callback of bridge.callbacks ?? []) { try { callback(value); } catch {} } }
+    }, token).catch(() => undefined);
+    return hasCaptchaResponse(page);
+  }
+  const injected = await injectCaptchaSolution(page, challenge.kind, solution);
+  return injected || await hasCaptchaResponse(page);
 }
 
 async function runLocalHarvester(page: Page, challenge: CaptchaChallenge, generation: number, fields: (extra?: Record<string, unknown>) => Record<string, unknown>, reason: string | null): Promise<boolean> {
